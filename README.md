@@ -81,7 +81,7 @@ Do not use `https`!
 ``` bash
 docker exec -it apollo_dev_$(whoami) bash -c "cd /apollo && bazel-bin/cyber/tools/cyber_recorder/cyber_recorder play -f test.00000 --loop"
 ```
-> This file is the test recording file I added to this apollo branch.
+> This file is the test recording file I added to this apollo branch, you can observe the replay in Dreamview http://localhost:8899/
 
 ## Notes
 
