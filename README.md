@@ -40,44 +40,19 @@ bash apollo.sh build  # Execute inside the Docker Container!
 ```
 > The compilation process may take up to an hour to complete. Due to performance bottlenecks (see the Notes section below), please be patient.
 
-5. After successful compilation, **on your host mac terminal**, stop and remove the current container
+5. After successful compilation, launch Dreamview or Dreamview Plus:
+- For Dreamview 1.0:
 ```bash
-docker stop apollo_dev_$(whoami)  # NOT in Docker Container!
+bash scripts/bootstrap.sh start  # Execute inside the Docker Container!
 ```
+- For Dreamview Plus:
 ```bash
-docker rm apollo_dev_$(whoami)    # NOT in Docker Container!
-```
-
-6. Start a new container on your mac and add port mapping manually.
-
-> Please replace `$PATH_OF_YOUR_APOLLO_SOURCE_CODE` with the absolute path to your locally compiled Apollo repository on your Mac.
-
-```bash
-docker run -itd --name apollo_dev_$(whoami) \
-  --privileged \
-  -p 8888:8888 \
-  -p 8899:8899 \
-  -v $PATH_OF_YOUR_APOLLO_SOURCE_CODE:/apollo \
-  -w /apollo \
-  apolloauto/apollo:dev-aarch64-20.04-20231024_1054 \
-  /bin/bash
-```
-
-> This step is necessary. If you do not restart the container on the mac by this way, you will not be able to use port mapping for Dreamview or Dreamview plus.
-
-7. Create necessary directory for Dreamview and Dreamview plus:
-```bash
-docker exec -it apollo_dev_$(whoami) bash -c "mkdir -p /.apollo/dreamview/plugins/"
-```
-
-8. Launch Dreamview and Dreamview plus
-```bash
-docker exec -it apollo_dev_$(whoami) bash -c "cd /apollo && ./scripts/bootstrap.sh start"
+bash scripts/bootstrap.sh start_plus  # Execute inside the Docker Container!
 ```
 > Open a browser on your Mac. Dreamview Plus is available at http://localhost:8888/, and Dreamview is available at http://localhost:8899/.
 Do not use `https`!
 
-9. Try to replay a record file:
+6. Try to replay a record file, execute on your host mac's terminal:
 ``` bash
 docker exec -it apollo_dev_$(whoami) bash -c "cd /apollo && bazel-bin/cyber/tools/cyber_recorder/cyber_recorder play -f test.00000 --loop"
 ```
