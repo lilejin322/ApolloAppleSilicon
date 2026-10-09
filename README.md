@@ -14,7 +14,7 @@ If you encounter any issues during the build process, feel free to open an issue
 
 ### Prerequisites
 Docker Desktop for Mac (**Apple Silicon version**): https://www.docker.com/products/docker-desktop/
-> The compilation process requires approximately 15 GB of memory on peak. Please go to ```Docker Desktop → Settings → Resources``` and increase the Memory Limit to at least 16 GB. Insufficient memory allocation may cause excessive swapping and ultimately lead to compilation failure.
+> The compilation process requires approximately 16.5 GB of memory on peak. Please go to ```Docker Desktop → Settings → Resources``` and increase the Memory Limit to at least 16 GB. Insufficient memory allocation may cause excessive swapping and ultimately lead to compilation failure.
 
 ### Steps
 
