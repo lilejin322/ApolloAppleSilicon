@@ -13,8 +13,14 @@ If you encounter any issues during the build process, feel free to open an issue
 ## Quickstart
 
 ### Prerequisites
-Docker Desktop for Mac (**Apple Silicon version**): https://www.docker.com/products/docker-desktop/
+1. Docker Desktop for Mac (**Apple Silicon version**): https://www.docker.com/products/docker-desktop/
 > The compilation process requires approximately 16.5 GB of memory on peak. Please go to ```Docker Desktop → Settings → Resources``` and increase the Memory Limit to at least 16 GB. Insufficient memory allocation may cause excessive swapping and ultimately lead to compilation failure.
+
+2. XQuartz
+```bash
+brew install --cask xquartz    # install in your mac zsh terminal
+```
+> But I think this dependency shall be removed in the Apollo source code if u don't use Advanced CyberRT Visualizer subsystem (this is for detecting CyberRT framework's effiency and probe maybe). Dreamview & Dreamview plus don't use this method for visualization.
 
 ### Steps
 
