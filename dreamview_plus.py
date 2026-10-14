@@ -1,7 +1,7 @@
 """
 Dreamview Plus websocket client.
 
-Author: Lejin Li, Japan
+Author: Lejin Li, Kyushu University & National Institute of Informatics, Japan
 Contact: li.lejin.147@s.kyushu-u.ac.jp
 
 Talks to a Dreamview Plus that is already running at ws://host:port/websocket.
