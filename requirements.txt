@@ -1,0 +1,7 @@
+# Runtime dependencies; pyproject.toml reads this file as its single source.
+# Geometry objects are used as dictionary keys, which requires Shapely 2.
+shapely>=2.0,<3
+networkx>=3.2,<4
+protobuf==7.36.2
+docker==7.2
+websocket-client>=1.8,<2
