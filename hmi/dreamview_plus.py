@@ -98,7 +98,7 @@ class DreamviewPlus:
                      in apple mac os Docker Desktop, we don't have Docker bridge
                      network, so we have to use localhost.
     :param int port: the port of the Dreamview Plus websocket server (old has been moved to 8899)
-                     TODO: multi-cnt start should assign other ports when launch Dreamview Plus.
+                     TODO: multi-ctn start should assign other ports when launch Dreamview Plus.
     :param float timeout: the timeout for the websocket connection.
     """
     host: str
@@ -119,9 +119,11 @@ class DreamviewPlus:
                          in apple mac os Docker Desktop, we don't have Docker bridge
                          network, so we have to use localhost.
         :param int port: the port of the Dreamview Plus websocket server (old has been moved to 8899)
-                         TODO: multi-cnt start should assign other ports when launch Dreamview Plus.
+                         TODO: multi-ctn start should assign other ports when launch Dreamview Plus.
         :param float timeout: the timeout for the websocket connection.
         """
+        if isinstance(timeout, bool) or not isfinite(timeout) or timeout <= 0:
+            raise ValueError("timeout must be finite and positive")
         self.host = host
         self.port = port
         self.timeout = timeout
