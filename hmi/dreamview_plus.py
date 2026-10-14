@@ -22,9 +22,11 @@ from logging import getLogger
 from google.protobuf.descriptor_pb2 import FieldDescriptorProto, FileDescriptorProto
 from google.protobuf.message import DecodeError, Message
 from google.protobuf.message_factory import GetMessages
-if __package__ and "." in __package__:
+if __package__:
+    from .interface import DreamviewInterface
     from ..message.msg_cls_v9 import message
 else:
+    from interface import DreamviewInterface
     from message.msg_cls_v9 import message
 
 # These HMI actions are the ones whose handler sends a response frame.
@@ -87,7 +89,7 @@ def _decode_hmi_status(raw: bytes) -> Optional[Message]:
         raise RuntimeError("/hmi returned an undecodable HMIStatus frame") from exc
 
 
-class DreamviewPlus:
+class DreamviewPlus(DreamviewInterface):
     """
     Demo representation of a Dreamview Plus websocket client.
     Note that the new version of Dreamvie_plus has a welcome page,

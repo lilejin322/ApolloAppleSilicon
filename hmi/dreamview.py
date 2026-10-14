@@ -21,8 +21,10 @@ from threading import Event, RLock, Thread
 from google.protobuf.message import Message
 from typing import Any, List, Optional, Tuple, Dict, Union, Callable
 if __package__:
+    from .interface import DreamviewInterface
     from ..message.msg_cls_v9 import message
 else:
+    from interface import DreamviewInterface
     from message.msg_cls_v9 import message
 
 logger = getLogger(__name__)
@@ -33,7 +35,7 @@ logger = getLogger(__name__)
 _IDLE_DRAIN_S = 1.0
 
 
-class Dreamview:
+class Dreamview(DreamviewInterface):
     """
     Legacy counterpart to DreamviewPlus, defaulting to port 8899.
 
