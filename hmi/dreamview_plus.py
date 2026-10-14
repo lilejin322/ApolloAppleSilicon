@@ -264,6 +264,24 @@ class DreamviewPlus:
         """
         self._hmi_action("CHANGE_OPERATION", "Record")
 
+    def get_sim_control(self) -> bool:
+        """
+        Get whether Sim Control is running a dynamic model.
+
+        The model, not the operation flag, publishes localization and chassis,
+        so this is whether HMIStatus has a current dynamic model. Leaving the
+        Sim Control operation clears it at once, and the backend clears it
+        within about a second once the sim_control process reports no model.
+        If that process becomes unreachable, the last model is kept.
+
+        :returns: True if a dynamic model is running.
+        :rtype: bool
+        :raises RuntimeError: An HMIStatus frame cannot be decoded.
+        :raises websocket.WebSocketException: No HMIStatus frame arrives in time,
+            or connecting, sending or receiving fails.
+        """
+        return bool(self._get_hmi_status().current_dynamic_model.strip())
+
     def start_module(self, module: str) -> None:
         """
         Turn on the distinct module, same effect as click on the panel in your browser.
