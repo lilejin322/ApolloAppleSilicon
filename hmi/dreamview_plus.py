@@ -22,7 +22,10 @@ from logging import getLogger
 from google.protobuf.descriptor_pb2 import FieldDescriptorProto, FileDescriptorProto
 from google.protobuf.message import DecodeError, Message
 from google.protobuf.message_factory import GetMessages
-from message.msg_cls_v9 import message
+if __package__ and "." in __package__:
+    from ..message.msg_cls_v9 import message
+else:
+    from message.msg_cls_v9 import message
 
 # These HMI actions are the ones whose handler sends a response frame.
 # Waiting on any other action hangs, because Dreamview Plus never replies.
@@ -474,6 +477,61 @@ class DreamviewPlus:
 
         heading = float(pose["heading"]) if "heading" in pose else None
         return Point(pose["x"], pose["y"]), heading
+
+    def setup_mode(self) -> None:
+        """
+        Ask HMI to start all modules in the current mode, without ACK.
+
+        Returning means the request was sent. Use get_modules() to observe
+        module status; this does not wait for modules to become ready.
+        """
+        self._hmi_action("SETUP_MODE")
+
+    def reset_mode(self) -> None:
+        """
+        Ask HMI to stop current mode's modules, without ACK.
+
+        This sets the backend shutdown flag and requests module shutdown.
+        Use get_modules() to observe status. Simulation reset is handled
+        separately by reset().
+        """
+        self._hmi_action("RESET_MODE")
+
+    def enter_auto_mode(self) -> None:
+        """
+        Request COMPLETE_AUTO_DRIVE, without a success acknowledgement.
+
+        The backend first switches to manual mode, then requests auto mode.
+        Returning does not establish that either transition succeeded.
+        """
+        self._hmi_action("ENTER_AUTO_MODE")
+
+    def disengage(self) -> None:
+        """
+        Request COMPLETE_MANUAL, without a success acknowledgement.
+
+        Returning means the request was sent, not that the chassis switched
+        to manual mode. Perfect Control always publishes auto mode.
+        """
+        self._hmi_action("DISENGAGE")
+
+    def reset(self) -> None:
+        """
+        Request world-cache and active simulation-model reset and check its ACK.
+
+        Perfect Control clears its route header/trajectory but retains pose
+        and does not explicitly zero speed/acceleration. Timers and ADS modules
+        keep running. This does not send CLEAR_PLANNING to Planning. The world
+        cache clears asynchronously, even if the model reset fails; success
+        does not establish that the world update has completed. Clearing is
+        applied on a simworld update, which requires a stream subscription.
+
+        :raises RuntimeError: Reset fails or its response has no success code.
+        :raises websocket.WebSocketException: Sending or receiving fails.
+        """
+        info = self._request("Reset", {})
+        if info.get("code") != 0:
+            raise RuntimeError(f"Reset failed: {info.get('message', info)}")
 
     def _hmi_action(self, action: str, value: Any = None):
         """
