@@ -12,18 +12,77 @@ old Dreamview 1.0, so the websocket client should be rewritten as follow.
 import json
 import time
 import uuid
-from math import isfinite
 import websocket
+from websocket import WebSocket
+from functools import lru_cache
+from math import isfinite
 from shapely import Point
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 from logging import getLogger
+from google.protobuf.descriptor_pb2 import FieldDescriptorProto, FileDescriptorProto
+from google.protobuf.message import DecodeError, Message
+from google.protobuf.message_factory import GetMessages
+from message.msg_cls_v9 import message
 
 # These HMI actions are the ones whose handler sends a response frame.
 # Waiting on any other action hangs, because Dreamview Plus never replies.
 _ACK_ACTIONS = {"CHANGE_MAP", "CHANGE_OPERATION", "CHANGE_MODE"}
 
+# The backend adds a connection to its broadcast list only after the handshake,
+# so a one-shot HMIStatus broadcast can miss a just-opened /hmi connection.
+_HMI_RESUBSCRIBE_S = 1.0
+
 
 logger = getLogger(__name__)
+
+
+@lru_cache(maxsize=None)
+def _stream_data_cls() -> type:
+    """
+    Build the StreamData envelope used by Dreamview Plus binary streams.
+
+    It is defined in modules/dreamview_plus/proto/data_handler.proto, which is
+    not part of the bundled common_msgs descriptor.
+
+    :returns: The StreamData message class.
+    :rtype: type
+    """
+    file_proto = FileDescriptorProto(
+        name="modules/dreamview_plus/proto/data_handler.proto",
+        package="apollo.dreamview", syntax="proto2",
+    )
+    stream_data = file_proto.message_type.add(name="StreamData")
+    for number, name, field_type in (
+        (1, "type", FieldDescriptorProto.TYPE_STRING),
+        (2, "action", FieldDescriptorProto.TYPE_STRING),
+        (3, "data_name", FieldDescriptorProto.TYPE_STRING),
+        (4, "channel_name", FieldDescriptorProto.TYPE_STRING),
+        (5, "data", FieldDescriptorProto.TYPE_BYTES),
+    ):
+        stream_data.field.add(name=name, number=number, type=field_type,
+                              label=FieldDescriptorProto.LABEL_OPTIONAL)
+    return GetMessages([file_proto])["apollo.dreamview.StreamData"]
+
+
+def _decode_hmi_status(raw: bytes) -> Optional[Message]:
+    """
+    Decode the HMIStatus carried by a /hmi StreamData frame.
+
+    :param raw: A frame received from /hmi; text frames are str.
+    :returns: The HMIStatus, or None if the frame does not carry one
+    :rtype: Optional[Message]
+    :raises RuntimeError: The frame cannot be decoded.
+    """
+    if not isinstance(raw, bytes):
+        return None
+    try:
+        stream = _stream_data_cls().FromString(raw)
+        if stream.data_name != "hmistatus":
+            return None
+        return message("apollo.dreamview.HMIStatus").FromString(stream.data)
+    except DecodeError as exc:
+        raise RuntimeError("/hmi returned an undecodable HMIStatus frame") from exc
+
 
 class DreamviewPlus:
     """
@@ -34,22 +93,38 @@ class DreamviewPlus:
 
     memo: I think this class is multi-thread safe from outside, i.e., each thread create their
     instance, call the public method simultaneously.
-    """
 
-    def __init__(self, host="localhost", port: int = 8888,
+    :param str host: the host of the Dreamview Plus websocket server,
+                     in apple mac os Docker Desktop, we don't have Docker bridge
+                     network, so we have to use localhost.
+    :param int port: the port of the Dreamview Plus websocket server (old has been moved to 8899)
+                     TODO: multi-cnt start should assign other ports when launch Dreamview Plus.
+    :param float timeout: the timeout for the websocket connection.
+    """
+    host: str
+    """The host ip address"""
+    port: int
+    """The port of DreamviewPlus, default to 8888 in version 9.0+"""
+    timeout: float
+    """The websocket timeout, also the overall deadline of get_modules()"""
+    ws: WebSocket
+    """The websocket connection for Dreamview to its backend"""
+
+    def __init__(self, host: str = "localhost", port: int = 8888,
                  timeout: float = 20.0) -> None:
         """
         Constructor
 
         :param str host: the host of the Dreamview Plus websocket server,
                          in apple mac os Docker Desktop, we don't have Docker bridge
-                         network, so we have to use localhost
+                         network, so we have to use localhost.
         :param int port: the port of the Dreamview Plus websocket server (old has been moved to 8899)
-                         TODO: multi-cnt start should assign other ports when launch Dreamview Plus
-        :param float timeout: the timeout for the websocket connection
+                         TODO: multi-cnt start should assign other ports when launch Dreamview Plus.
+        :param float timeout: the timeout for the websocket connection.
         """
         self.host = host
         self.port = port
+        self.timeout = timeout
         url = f"ws://{self.host}:{self.port}/websocket"
         self.ws = websocket.create_connection(url, timeout=timeout)
 
@@ -79,7 +154,7 @@ class DreamviewPlus:
         """
         Select the mode, just to control the HMI layout
 
-        :param str mode: the mode to select, candidates=['Default', 'Pnc', 'Perception', 'Vehicle Test']
+        :param str mode: the mode to select, candidates=['Default', 'Pnc', 'Perception', 'Vehicle Test'].
         """
         self._hmi_action("CHANGE_MODE", mode)
 
@@ -109,7 +184,7 @@ class DreamviewPlus:
         No suggestion for use but an API, I think it's better to modify the tag using script directly
         modify target: /apollo/modules/common/data/global_flagfile.txt
         
-        :param str map_name: the map name, note that should convert the name to pass in CAPITAL & SPACE
+        :param str map_name: the map name, note that should convert the name to pass in CAPITAL & SPACE.
         E.g.                 borregas_ave -> 'Borregas Ave'
                              san_mateo    -> 'San Mateo'
                              shalun       -> 'Shalun'
@@ -140,7 +215,8 @@ class DreamviewPlus:
         publishes localization and chassis.
 
         :param str dynamic_model: currently only "Simulation Perfect Control" has been implemented
-                                  This means that users can define their only vehicle 'dynamic model' for PnC testing
+                                  This means that users can define their only vehicle 'dynamic model'
+                                  for PnC testing.
         """
         self._hmi_action("CHANGE_OPERATION", "Sim_Control")
         self._hmi_action("LOAD_DYNAMIC_MODELS")
@@ -158,10 +234,10 @@ class DreamviewPlus:
 
     def start_module(self, module: str) -> None:
         """
-        Turn on the distinct module, same effect as click on the panel in your browser
+        Turn on the distinct module, same effect as click on the panel in your browser.
 
         :param str module: the module you want to call up, same as 'source cyber_setup.bash & cyber_launch start'
-                           command in the ctn
+                           command in the ctn.
         cyber_launch E.g.
             cyber_launch  start  /apollo/modules/prediction/launch/prediction.launch
 
@@ -170,25 +246,58 @@ class DreamviewPlus:
 
     def stop_module(self, module: str) -> None:
         """
-        Stop the module, same effect as click on the panel in your browser
+        Stop the module, same effect as click on the panel in your browser.
 
         :param str module: the module you want to stop, same as 'source cyber_setup.bash & cyber_launch stop'
-                           command in the ctn
+                           command in the ctn.
         
         cyber_launch E.g.
             cyber_launch stop /apollo/modules/planning/planning_component/launch/planning.launch
         """
         self._hmi_action("STOP_MODULE", module)
 
-    def send_routing_request(self, points: List[Point], heading: Optional[float] = None):
+    def get_modules(self) -> Dict[str, bool]:
+        """
+        Get the running state of the current mode's modules.
+
+        Dreamview Plus pushes HMIStatus only as a stream on /hmi, so this opens a
+        short-lived /hmi connection and subscribes with dataFrequencyMs=0: the
+        backend broadcasts one frame without replacing the shared stream timer
+        that the browser uses. It never unsubscribes, since that stops the
+        browser's stream. No backend state is left behind, so instances in
+        other threads may call it at the same time.
+
+        The states are Monitor's observations of each module's processes; they
+        stop updating while Monitor is not running.
+
+        NOTE: Currently this function should not be used, the Dreamview plus backend
+              has bugs that will read the legacy Dreamview 1.0's config txt, which
+              will return all modules [false]
+
+        :returns: {module_name: running}, for the current mode's modules only.
+        :rtype: Dict[str, bool]
+        :raises RuntimeError: An HMIStatus frame cannot be decoded.
+        :raises websocket.WebSocketTimeoutException: No HMIStatus frame arrives
+            within ``timeout``.
+        :raises websocket.WebSocketException: Connecting, sending or receiving fails.
+        """
+        hmi_ws: WebSocket = websocket.create_connection(
+            f"ws://{self.host}:{self.port}/hmi", timeout=self.timeout)
+        try:
+            return dict(self._recv_hmi_status(hmi_ws).modules)
+        finally:
+            hmi_ws.close()
+
+    def send_routing_request(self, points: List[Point],
+                             heading: Optional[float] = None) -> None:
         """
         Send ordered waypoints and a destination from the current vehicle pose.
 
         :param List[Point] points: Non-empty list of Shapely Points in map coordinates.
                                    The last point is the destination; earlier points are
                                    intermediate waypoints, not an explicit start pose.
-                                   Only x and y are used
-        :param Optional[float] heading: Optional destination heading in radians, default None
+                                   Only x and y are used.
+        :param Optional[float] heading: Optional destination heading in radians, default None.
         """
         if not points:
             raise ValueError("points must contain at least one Point")
@@ -220,8 +329,8 @@ class DreamviewPlus:
         :returns: (paths, routing_time), with each path represented by an
                   ordered list of Shapely Points. Path boundaries and any z
                   coordinates are preserved. No route is represented by [].
-                  routing_time is the backend's routingTime, in seconds
-        :raises RuntimeError: If the request fails or route data is invalid
+                  routing_time is the backend's routingTime, in seconds.
+        :raises RuntimeError: If the request fails or route data is invalid.
 
         This reads cached route data from backend; it does not wait for a new route or
         establish that the route belongs to the latest routing request.
@@ -272,9 +381,9 @@ class DreamviewPlus:
         Sim Control must be enabled before calling this method.
 
         :param Point point: Non-empty Shapely Point in map coordinates.
-                            Only x and y are used
+                            Only x and y are used.
         :param float heading: Initial heading in radians, default 0.0
-                              this value is mandatory in the dvp backend
+                              this value is mandatory in the dvp backend.
         """
         if not isinstance(point, Point):
             raise TypeError("point must be a Shapely Point")
@@ -321,7 +430,7 @@ class DreamviewPlus:
         heading = float(pose["heading"]) if "heading" in pose else None
         return Point(pose["x"], pose["y"]), heading
 
-    def _hmi_action(self, action, value=None):
+    def _hmi_action(self, action: str, value: Any = None):
         """
         Send an HMI action and wait only for actions in ``_ACK_ACTIONS``.
 
@@ -331,7 +440,7 @@ class DreamviewPlus:
 
         :param str action: Backend HMI action name, such as ``CHANGE_MAP``.
         :param value: Optional JSON-serializable action value; omitted if None.
-        :returns: None.
+        :returns: None
         :raises RuntimeError: The response contains a nonzero error code.
         :raises websocket.WebSocketException: Sending or receiving fails,
             including a socket timeout.
@@ -347,7 +456,41 @@ class DreamviewPlus:
         if code not in (None, 0):
             raise RuntimeError(f"{action} failed: {response.get('message', response)}")
 
-    def _request(self, msg_type, info):
+    def _recv_hmi_status(self, hmi_ws: WebSocket) -> Message:
+        """
+        Trigger one-shot HMIStatus broadcasts and return the first one on ``hmi_ws``.
+
+        The subscribe is resent every ``_HMI_RESUBSCRIBE_S`` in case the backend
+        had not registered ``hmi_ws`` yet. Its reply on ``ws`` has no request ID
+        and is discarded by a later ``_recv_response``. Frames pushed by the
+        browser's stream are accepted too, as each one is a full snapshot.
+
+        :param hmi_ws: An open /hmi connection.
+        :returns: The HMIStatus message.
+        :rtype: Message
+        :raises RuntimeError: An HMIStatus frame cannot be decoded
+        :raises websocket.WebSocketTimeoutException: No HMIStatus frame arrives
+            within ``timeout``.
+        """
+        now = time.monotonic()
+        deadline = now + self.timeout
+        resend_at = now
+        while now < deadline:
+            if now >= resend_at:
+                self._send("subscribe", {"websocketName": "hmistatus",
+                                         "dataFrequencyMs": 0})
+                resend_at = now + _HMI_RESUBSCRIBE_S
+            hmi_ws.settimeout(min(resend_at, deadline) - now)
+            try:
+                status = _decode_hmi_status(hmi_ws.recv())
+            except websocket.WebSocketTimeoutException:
+                status = None
+            if status is not None:
+                return status
+            now = time.monotonic()
+        raise websocket.WebSocketTimeoutException("No HMIStatus frame received on /hmi")
+
+    def _request(self, msg_type: str, info: Dict[str, Any]) -> Dict[str, Any]:
         """
         Send a request and wait for the response with its generated request ID.
 
@@ -355,7 +498,7 @@ class DreamviewPlus:
         The returned payload is not checked for application-level errors.
 
         :param str msg_type: Backend message type, such as ``GetInitData``.
-        :param dict info: JSON-serializable request payload.
+        :param Dict[str, Any] info: JSON-serializable request payload.
         :returns: The matching response's ``data.info``, or an empty dict if absent.
         :raises websocket.WebSocketException: Sending or receiving fails,
             including a socket timeout.
@@ -363,7 +506,7 @@ class DreamviewPlus:
         request_id = self._send(msg_type, info)
         return self._recv_response(request_id)
 
-    def _send(self, msg_type, info):
+    def _send(self, msg_type: str, info: Dict[str, Any]) -> str:
         """
         Send a JSON message with a new UUID request ID without waiting for a reply.
 
@@ -386,7 +529,7 @@ class DreamviewPlus:
         self.ws.send(json.dumps(payload))
         return request_id
 
-    def _recv_response(self, request_id):
+    def _recv_response(self, request_id: str) -> Dict[str, Any]:
         """
         Read messages until ``data.requestId`` matches the requested ID.
 
