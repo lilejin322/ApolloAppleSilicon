@@ -193,6 +193,21 @@ class DreamviewPlus:
         """
         self._hmi_action("CHANGE_MAP", map_name)
 
+    def get_current_map(self) -> str:
+        """
+        Get the currently selected map.
+
+        No request returns it, so it is read from one HMIStatus frame on /hmi,
+        the same way as get_modules().
+
+        :returns: Map name, such as "Borregas Ave".
+        :rtype: str
+        :raises RuntimeError: No map is selected, or the frame cannot be decoded.
+        :raises websocket.WebSocketException: No HMIStatus frame arrives in time,
+            or connecting, sending or receiving fails.
+        """
+        return self._status_name("current_map")
+
     def select_vehicle(self, vehicle: str) -> None:
         """
         Select the vehicle, note that this will also copy the corresponding vehicle's sensor configs
@@ -207,6 +222,21 @@ class DreamviewPlus:
         """
 
         self._hmi_action("CHANGE_VEHICLE", vehicle)
+
+    def get_current_vehicle(self) -> str:
+        """
+        Get the currently selected vehicle.
+
+        No request returns it, so it is read from one HMIStatus frame on /hmi,
+        the same way as get_modules().
+
+        :returns: Vehicle name, such as "Mkz Example".
+        :rtype: str
+        :raises RuntimeError: No vehicle is selected, or the frame cannot be decoded.
+        :raises websocket.WebSocketException: No HMIStatus frame arrives in time,
+            or connecting, sending or receiving fails.
+        """
+        return self._status_name("current_vehicle")
 
     def start_sim_control(self, dynamic_model="Simulation Perfect Control") -> None:
         """
@@ -274,7 +304,7 @@ class DreamviewPlus:
 
         NOTE: Currently this function should not be used, the Dreamview plus backend
               has bugs that will read the legacy Dreamview 1.0's config txt, which
-              will return all modules [false]
+              will return all modules [false] in 'Default' mode
 
         :returns: {module_name: running}, for the current mode's modules only.
         :rtype: Dict[str, bool]
@@ -283,12 +313,7 @@ class DreamviewPlus:
             within ``timeout``.
         :raises websocket.WebSocketException: Connecting, sending or receiving fails.
         """
-        hmi_ws: WebSocket = websocket.create_connection(
-            f"ws://{self.host}:{self.port}/hmi", timeout=self.timeout)
-        try:
-            return dict(self._recv_hmi_status(hmi_ws).modules)
-        finally:
-            hmi_ws.close()
+        return dict(self._get_hmi_status().modules)
 
     def send_routing_request(self, points: List[Point],
                              heading: Optional[float] = None) -> None:
@@ -458,39 +483,60 @@ class DreamviewPlus:
         if code not in (None, 0):
             raise RuntimeError(f"{action} failed: {response.get('message', response)}")
 
-    def _recv_hmi_status(self, hmi_ws: WebSocket) -> Message:
+    def _get_hmi_status(self) -> Message:
         """
-        Trigger one-shot HMIStatus broadcasts and return the first one on ``hmi_ws``.
+        Read one HMIStatus over a short-lived /hmi connection.
 
-        The subscribe is resent every ``_HMI_RESUBSCRIBE_S`` in case the backend
-        had not registered ``hmi_ws`` yet. Its reply on ``ws`` has no request ID
-        and is discarded by a later ``_recv_response``. Frames pushed by the
-        browser's stream are accepted too, as each one is a full snapshot.
+        /hmi is opened first, then one-shot broadcasts are triggered with
+        dataFrequencyMs=0. The subscribe is resent every ``_HMI_RESUBSCRIBE_S``
+        in case the backend had not registered the connection yet. Its reply on
+        ``ws`` has no request ID and is discarded by a later ``_recv_response``.
+        Frames pushed by the browser's stream are accepted too, as each one is
+        a full snapshot.
 
-        :param hmi_ws: An open /hmi connection.
         :returns: The HMIStatus message.
         :rtype: Message
-        :raises RuntimeError: An HMIStatus frame cannot be decoded
+        :raises RuntimeError: An HMIStatus frame cannot be decoded.
         :raises websocket.WebSocketTimeoutException: No HMIStatus frame arrives
             within ``timeout``.
+        :raises websocket.WebSocketException: Connecting, sending or receiving fails.
         """
-        now = time.monotonic()
-        deadline = now + self.timeout
-        resend_at = now
-        while now < deadline:
-            if now >= resend_at:
-                self._send("subscribe", {"websocketName": "hmistatus",
-                                         "dataFrequencyMs": 0})
-                resend_at = now + _HMI_RESUBSCRIBE_S
-            hmi_ws.settimeout(min(resend_at, deadline) - now)
-            try:
-                status = _decode_hmi_status(hmi_ws.recv())
-            except websocket.WebSocketTimeoutException:
-                status = None
-            if status is not None:
-                return status
+        hmi_ws: WebSocket = websocket.create_connection(
+            f"ws://{self.host}:{self.port}/hmi", timeout=self.timeout)
+        try:
             now = time.monotonic()
-        raise websocket.WebSocketTimeoutException("No HMIStatus frame received on /hmi")
+            deadline = now + self.timeout
+            resend_at = now
+            while now < deadline:
+                if now >= resend_at:
+                    self._send("subscribe", {"websocketName": "hmistatus",
+                                             "dataFrequencyMs": 0})
+                    resend_at = now + _HMI_RESUBSCRIBE_S
+                hmi_ws.settimeout(min(resend_at, deadline) - now)
+                try:
+                    status = _decode_hmi_status(hmi_ws.recv())
+                except websocket.WebSocketTimeoutException:
+                    status = None
+                if status is not None:
+                    return status
+                now = time.monotonic()
+            raise websocket.WebSocketTimeoutException("No HMIStatus frame received on /hmi")
+        finally:
+            hmi_ws.close()
+
+    def _status_name(self, field: str) -> str:
+        """
+        Read a name field of HMIStatus, such as ``current_map``.
+
+        :param str field: The HMIStatus field name.
+        :returns: The non-empty field value.
+        :rtype: str
+        :raises RuntimeError: The field is empty, i.e. nothing is selected.
+        """
+        value = getattr(self._get_hmi_status(), field)
+        if not value.strip():
+            raise RuntimeError(f"HMIStatus returned a missing or invalid {field}")
+        return value
 
     def _request(self, msg_type: str, info: Dict[str, Any]) -> Dict[str, Any]:
         """
