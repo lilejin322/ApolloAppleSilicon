@@ -1,5 +1,5 @@
 """
-Channel that communicates with the CyberRT framework via cyber_bridge.
+Artifact that publish-subscribe with the CyberRT framework via cyber_bridge.
 
 Adapted from the CyberRT bridge client in DoppelTest:
 
@@ -7,6 +7,9 @@ Adapted from the CyberRT bridge client in DoppelTest:
     Autonomous Driving Software," ICSE 2023.
 
 We thank the authors for their contributions.
+
+New Version NOTE: Compatible with version 1.0 from op (1) to (4),
+                  op(5) & (6) must re-compile the cpp for the apollo in ctn
 """
 
 import select
@@ -16,7 +19,8 @@ from pathlib import Path
 from math import isfinite
 from logging import getLogger
 from collections import defaultdict
-from typing import Any, DefaultDict, List, Set, Union
+from typing import DefaultDict, List, Set, Union
+from google.protobuf.message import Message
 from threading import Lock, RLock, Thread, current_thread
 from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 from .channel import Channel, Channels
@@ -53,6 +57,24 @@ class CyberBridge:
     reception; ``close`` is final, and a new instance must register its readers
     and writers again.
     """
+    host: str
+    """The host ip address"""
+    port: int
+    """The port of cyber_bridge, default to 9090"""
+    timeout: float
+    """The socket timeout max time"""
+    descriptor_path: Path
+    """The protobuf message descriptor path"""
+    channels: Channels
+    """The candidate channels"""
+    services: Services
+    """The candidate services"""
+    conn: socket.socket
+    """The socket connection"""
+    subscribers: DefaultDict[str, List]
+    """The registered subscribers"""
+    publishable_channel: Set[str]
+    """The registered publishers"""
 
     MAX_FIELD_SIZE = 64 * 1024 * 1024
 
@@ -61,23 +83,26 @@ class CyberBridge:
         """
         Constructor
 
-        :param str host: the host ip address
-        :param int port: the port
-        :param descriptor_path: Descriptor bundle for registration and typed definitions.
-        :param time
+        :param str host: The host ip address
+        :param int port: The port of cyber_bridge, default to 9090
+        :param float timeout: The socket timeout max time
+        :param descriptor_path: Descriptor bundle for registration and typed definitions
         """
         if timeout <= 0 or not isfinite(timeout):
             raise ValueError("timeout must be finite and positive")
-        self.descriptor_path = DescriptorBundle(descriptor_path).descriptor_path
+        self.host: str = host
+        self.port: int = port
+        self.timeout: float = timeout
+        self.descriptor_path: Path = DescriptorBundle(descriptor_path).descriptor_path
         self.channels = Channels(self.descriptor_path)
         self.services = Services(self.descriptor_path)
+        # Create the TCP connection using socket
         self.conn = socket.create_connection((host, port), timeout=timeout)
         self.conn.setblocking(False)
-        self.timeout = timeout
         self.subscribers: DefaultDict[str, List] = defaultdict(list)
         self.publishable_channel: Set[str] = set()
         self._spinning = False
-        self.t = None
+        self._receive_thread = None
         self._closed = False
         self._buffer = bytearray()
         self._send_lock = Lock()
@@ -89,19 +114,53 @@ class CyberBridge:
 
     @property
     def connected(self) -> bool:
-        """Whether the connection is open; False after close or disconnect."""
+        """
+        Whether the connection is open; False after close or disconnect.
+        
+        :returns: The connected status
+        :rtype: bool
+        """
         return not self._closed
 
     @property
     def spinning(self) -> bool:
-        """Whether the receive thread is dispatching; ``stop`` keeps the connection."""
+        """
+        Whether the receive thread is dispatching; ``stop`` keeps the connection.
+        
+        :returns: The spinning status
+        :rtype: bool
+        """
         return self._spinning
 
     @staticmethod
     def __prepare_bytes(data: bytes) -> bytes:
+        """
+        Prefix a byte field with its length for the CyberBridge wire protocol.
+
+        :param bytes data: The raw bytes to encode as a length-prefixed field.
+        :returns: A four-byte unsigned little-endian length followed by the data.
+        :rtype: bytes
+        :raises OverflowError: If the data length exceeds the uint32 range.
+        """
         return len(data).to_bytes(4, "little") + data
 
     def _send(self, data: bytes):
+        """
+        Send all bytes without interleaving concurrent callers' data.
+
+        Retry partial writes until all data is sent or ``self.timeout`` expires.
+        The timeout starts after acquiring the send lock. A socket error,
+        invalid socket state or timeout closes the connection and fails pending
+        service calls; the original exception is re-raised.
+
+        :param bytes data: The complete encoded CyberBridge packet to send.
+        :returns: None after all bytes have been sent to the socket.
+        :rtype: None
+        :raises ConnectionError: If the connection is closed or a send returns zero.
+        :raises TimeoutError: If sending does not finish within ``self.timeout``.
+        :raises OSError: If waiting for or writing to the socket fails.
+        :raises ValueError: If the socket is invalid for ``select``.
+        """
         # A frame may require several writes. Keep concurrent callers' frames
         # together, and never continue a connection after an incomplete write.
         with self._send_lock:
@@ -129,6 +188,30 @@ class CyberBridge:
                 raise
 
     def add_subscriber(self, channel: Channel, cb):
+        """
+        Register a local callback and request a reader for the channel.
+
+        Incoming bytes are parsed with ``channel.msg_cls`` before calling
+        ``cb(message)`` on the receive thread. Multiple callbacks may be
+        registered for the same channel. Call ``spin()`` to start reception.
+        Keep callbacks short and call synchronous services from another thread.
+
+        Op 2 has no acknowledgement: returning confirms transmission of the
+        reader request, not server-side reader creation. If sending fails,
+        this callback registration is removed and the exception is re-raised.
+
+        :param Channel channel: The channel name and protobuf message class.
+        :param callable cb: A callback accepting one decoded protobuf message.
+        :returns: None after the reader request has been sent.
+        :rtype: None
+        :raises TypeError: If ``channel`` is not ``Channel``.
+        :raises ConnectionError: If the connection is closed or breaks during send.
+        :raises TimeoutError: If sending exceeds the connection timeout.
+        :raises OSError: If waiting for or writing to the socket fails.
+        :raises ValueError: If the socket is invalid for ``select``.
+        """
+        if not isinstance(channel, Channel):
+            raise TypeError("channel must be a Channel instance")
         def cb_wrapper(data):
             parsed_msg = channel.msg_cls()
             parsed_msg.ParseFromString(data)
@@ -146,11 +229,31 @@ class CyberBridge:
             raise
 
     def add_publisher(self, channel: Channel):
-        """Send the selected descriptors before this connection's first writer.
+        """
+        Request a writer for the channel, registering descriptors if needed.
+
+        Send the selected descriptor bundle before this connection's first
+        writer request. Later writer requests reuse that registration. A
+        channel name already registered locally is skipped, including when
+        multiple threads request it concurrently. Call this method before
+        publishing messages on the channel.
 
         Op 1 and op 3 have no acknowledgement. Local state records successful
-        transmission, not server acknowledgement of writer creation.
+        transmission, not server acknowledgement of writer creation. If
+        sending fails, the channel is not added to the local publisher set.
+
+        :param Channel channel: The channel name and protobuf message class.
+        :returns: None after transmission, or if the channel is already registered.
+        :rtype: None
+        :raises TypeError: If ``channel`` is not ``Channel``.
+        :raises ConnectionError: If the connection is closed or breaks during send.
+        :raises TimeoutError: If sending exceeds the connection timeout.
+        :raises OSError: If waiting for or writing to the socket fails.
+        :raises ValueError: If the socket is invalid for ``select``.
+        :raises OverflowError: If a field length or descriptor count exceeds uint32.
         """
+        if not isinstance(channel, Channel):
+            raise TypeError("channel must be a Channel instance")
         with self._publisher_lock:
             if channel.name in self.publishable_channel:
                 return
@@ -169,49 +272,88 @@ class CyberBridge:
             self.publishable_channel.add(channel.name)
 
     def publish(self, channel: Channel, data: bytes):
-        """Publish serialized protobuf bytes after registering the publisher."""
+        """
+        Send serialized protobuf bytes on the specified channel.
+
+        Call ``add_publisher(channel)`` first; this method does not register
+        or check the publisher. Serialize the message with
+        ``SerializeToString()`` before calling. The payload is sent unchanged
+        and is not validated against ``channel.msg_cls``.
+
+        Op 4 has no acknowledgement. Returning confirms transmission to the
+        socket, not delivery to Cyber readers.
+
+        :param Channel channel: The channel on which to publish the message.
+        :param bytes data: The serialized protobuf message payload.
+        :returns: None after the publish packet has been sent.
+        :rtype: None
+        :raises TypeError: If ``data`` is not ``bytes``.
+        :raises ConnectionError: If the connection is closed or breaks during send.
+        :raises TimeoutError: If sending exceeds the connection timeout.
+        :raises OSError: If waiting for or writing to the socket fails.
+        :raises ValueError: If the socket is invalid for ``select``.
+        :raises OverflowError: If a field length exceeds the uint32 range.
+        """
+        if not isinstance(channel, Channel):
+            raise TypeError("channel must be a Channel instance")
         if not isinstance(data, bytes):
             raise TypeError("data must be serialized protobuf bytes")
         self._send(BridgeOp.Publish
                    + self.__prepare_bytes(to_bytes(channel.name))
                    + self.__prepare_bytes(data))
 
-    def call_service(self, service: Union[str, Service], request: Any,
-                     response_cls=None, timeout=5.0, *, request_type=None):
-        """Call an Apollo Cyber service and return its protobuf response.
+    def call_service(self, service: Service, request: Message,
+                     timeout: float = 5.0) -> Message:
+        """
+        Call an Apollo Cyber service and wait for its matching response.
 
-        ``service`` is a ``Service`` (e.g. ``bridge.services.LaneFollow``), which
-        supplies the name, request type and response class, or a service name.
-        ``request`` may be a protobuf message, or bytes accompanied by the full
-        protobuf ``request_type`` name. Omit ``response_cls`` with a name to
-        return bytes. Timeout raises ``TimeoutError``; op 6 with ok=0 raises
-        ``ServiceCallError``; disconnect/stop raises ``ConnectionError``.
-        A local timeout does not cancel work already submitted to Apollo.
-        ``timeout`` limits response waiting; writes use the connection timeout.
+        Reception starts automatically. Concurrent calls are matched to their
+        responses by request ID. This method must be called outside the receive
+        thread so that subscriber callbacks do not block response processing.
+
+        The ``Service`` defines the endpoint, request class and response class.
+        The request must be an instance of that class from the same schema.
+        Serialization and response parsing are handled internally.
+
+        ``timeout`` limits response waiting after sending; writes use
+        ``self.timeout``. A response timeout leaves the connection open and
+        does not cancel work already submitted to Apollo. Late responses to
+        timed-out requests are discarded.
+
+        :param Service service: The endpoint and its protobuf message classes.
+        :param Message request: An instance of ``service.request_cls``.
+        :param float timeout: A finite, positive response timeout in seconds,
+            defaulting to 5.0.
+        :returns: The response decoded as an instance of ``service.response_cls``.
+        :rtype: Message
+        :raises TypeError: If ``service`` is not a ``Service`` or the request
+            is not an instance of its declared request class.
+        :raises ValueError: If the timeout or socket is invalid.
+        :raises RuntimeError: If called from the receive thread or while the
+            previous receive thread is still stopping.
+        :raises ConnectionError: If the connection is closed, reception stops,
+            or the peer disconnects before the response arrives.
+        :raises TimeoutError: If sending or waiting for the response times out.
+        :raises ServiceCallError: If the bridge returns op 6 with ``ok=0``.
+        :raises OSError: If waiting for or writing to the socket fails.
+        :raises OverflowError: If request IDs are exhausted or a field length
+            exceeds the uint32 range.
+        :raises google.protobuf.message.EncodeError: If the request cannot be
+            serialized, such as when required fields are missing.
+        :raises google.protobuf.message.DecodeError: If the response cannot be
+            parsed by the selected response class.
         """
         if timeout <= 0 or not isfinite(timeout):
             raise ValueError("timeout must be finite and positive")
-        if isinstance(service, Service):
-            if request_type is None:
-                request_type = service.request_cls.DESCRIPTOR.full_name
-            if response_cls is None:
-                response_cls = service.response_cls
-            service = service.name
-        if current_thread() is self.t:
+        if not isinstance(service, Service):
+            raise TypeError("service must be a Service definition")
+        if not isinstance(request, service.request_cls):
+            raise TypeError("request must be an instance of service.request_cls")
+        if current_thread() is self._receive_thread:
             raise RuntimeError("call_service cannot block the subscriber thread")
-        if isinstance(request, bytes):
-            if not request_type:
-                raise ValueError("request_type is required for serialized requests")
-            payload = request
-        else:
-            actual_type = request.DESCRIPTOR.full_name
-            if request_type is not None and request_type != actual_type:
-                raise ValueError("request_type does not match the protobuf request")
-            request_type = actual_type
-            payload = request.SerializeToString()
-        fields = (self.__prepare_bytes(to_bytes(service))
-                  + self.__prepare_bytes(to_bytes(request_type))
-                  + self.__prepare_bytes(payload))
+        fields = (self.__prepare_bytes(to_bytes(service.name))
+                  + self.__prepare_bytes(to_bytes(service.request_cls.DESCRIPTOR.full_name))
+                  + self.__prepare_bytes(request.SerializeToString()))
         self.spin()
         future = Future()
         with self._state_lock:
@@ -228,13 +370,11 @@ class CyberBridge:
             try:
                 response = future.result(timeout=timeout)
             except FutureTimeoutError as exc:
-                raise TimeoutError(f"CyberBridge service {service!r} timed out") from exc
+                raise TimeoutError(f"CyberBridge service {service.name!r} timed out") from exc
         finally:
             with self._state_lock:
                 self._pending.pop(request_id, None)
-        if response_cls is None:
-            return response
-        message = response_cls()
+        message = service.response_cls()
         message.ParseFromString(response)
         return message
 
@@ -347,17 +487,17 @@ class CyberBridge:
                 raise ConnectionError("CyberBridge connection is closed")
             if self._spinning:
                 return
-            if self.t is not None and self.t.is_alive():
+            if self._receive_thread is not None and self._receive_thread.is_alive():
                 raise RuntimeError("CyberBridge receive thread is still stopping")
             self._spinning = True
-            self.t = Thread(target=self._spin, name="CyberBridge", daemon=True)
-            self.t.start()
+            self._receive_thread = Thread(target=self._spin, name="CyberBridge", daemon=True)
+            self._receive_thread.start()
 
     def stop(self):
         """Pause reception and fail pending calls; safe before spin or in a callback."""
         with self._state_lock:
             self._spinning = False
-            thread = self.t
+            thread = self._receive_thread
             self._fail_pending(ConnectionError("CyberBridge reception stopped"))
         if thread is not None and thread is not current_thread():
             thread.join()
