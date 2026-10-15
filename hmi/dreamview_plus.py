@@ -112,7 +112,10 @@ class DreamviewPlus(DreamviewInterface):
     :param int port: the port of the Dreamview Plus websocket server (old has been moved to 8899)
                      TODO: multi-ctn start should assign other ports when launch Dreamview Plus.
     :param float timeout: the timeout for the websocket connection.
+    :param str | Path descriptor_path: Required protobuf descriptor bundle used by this client.
     """
+    descriptor_path: Path
+    """The protobuf message descriptor path"""
     host: str
     """The host ip address"""
     port: int
