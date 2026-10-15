@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from threading import RLock
-from typing import Tuple, Set, Iterator, Dict
+from typing import Tuple, Set, Iterator, Dict, Type
 
 from google.protobuf.descriptor_pb2 import FileDescriptorSet
 from google.protobuf.message import Message
@@ -74,7 +74,7 @@ class DescriptorBundle(metaclass=_DescriptorBundleCache):
 
         self._descriptor_set = self._load_descriptor_set()
         self._pool = DescriptorPool()
-        self._messages: Dict[str, type[Message]] = {}
+        self._messages: Dict[str, Type[Message]] = {}
         self._names: Dict[str, list[str]] = {}
         self._full_names: Dict[str, None] = {}
         files = {file.name: file for file in self._descriptor_set.file}
@@ -153,7 +153,7 @@ class DescriptorBundle(metaclass=_DescriptorBundleCache):
             for file_descriptor in self._descriptor_set.file
         )
 
-    def messages(self) -> dict[str, type[Message]]:
+    def messages(self) -> Dict[str, Type[Message]]:
         """
         Generate and cache all message classes, including nested messages.
 
@@ -162,17 +162,17 @@ class DescriptorBundle(metaclass=_DescriptorBundleCache):
 
         :returns: A mapping from fully qualified protobuf message names to
                   their dynamically generated Python classes
-        :rtype: dict[str, type[Message]]
+        :rtype: Dict[str, Type[Message]]
         """
         return {name: self.message(name) for name in self._full_names}
 
-    def message(self, full_name: str) -> type[Message]:
+    def message(self, full_name: str) -> Type[Message]:
         """
         Resolve and cache a message class by full name or unique short name.
 
         :param str full_name: Fully qualified protobuf message name or unique short name
         :returns: The corresponding protobuf message class
-        :rtype: type[Message]
+        :rtype: Type[Message]
         :raises KeyError: If the name is missing or ambiguous in this bundle
         """
         if full_name not in self._full_names:
@@ -216,14 +216,14 @@ class DescriptorBundle(metaclass=_DescriptorBundleCache):
         """
         return full_name in self._full_names or len(self._names.get(full_name, [])) == 1
 
-    def __getitem__(self, full_name: str) -> type[Message]:
+    def __getitem__(self, full_name: str) -> Type[Message]:
         """
         Return a message class using dictionary-style access.
         E.g., Header = bundle["apollo.common.Header"]
 
         :param str full_name: Fully qualified protobuf message name or unique short name
         :returns: The dynamically generated protobuf message class
-        :rtype: type[Message]
+        :rtype: Type[Message]
         :raises KeyError: If the name is missing or ambiguous in this bundle
         """
         return self.message(full_name)
