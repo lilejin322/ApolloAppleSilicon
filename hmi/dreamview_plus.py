@@ -9,6 +9,8 @@ Note that the format of the wb backend of Dreamview Plus is different from the
 old Dreamview 1.0, so the websocket client should be rewritten as follow.
 """
 
+from __future__ import annotations
+
 import json
 import time
 import uuid
@@ -16,6 +18,7 @@ import websocket
 from websocket import WebSocket
 from functools import lru_cache
 from math import isfinite
+from pathlib import Path
 from shapely import Point
 from typing import Dict, List, Optional, Tuple, Any
 from logging import getLogger
@@ -24,10 +27,10 @@ from google.protobuf.message import DecodeError, Message
 from google.protobuf.message_factory import GetMessages
 if __package__:
     from .interface import DreamviewInterface
-    from ..message.msg_cls_v9 import message
+    from ..message.descriptor import DescriptorBundle
 else:
     from interface import DreamviewInterface
-    from message.msg_cls_v9 import message
+    from message.descriptor import DescriptorBundle
 
 # These HMI actions are the ones whose handler sends a response frame.
 # Waiting on any other action hangs, because Dreamview Plus never replies.
@@ -69,11 +72,12 @@ def _stream_data_cls() -> type:
     return GetMessages([file_proto])["apollo.dreamview.StreamData"]
 
 
-def _decode_hmi_status(raw: bytes) -> Optional[Message]:
+def _decode_hmi_status(raw: bytes, descriptor_path: str | Path) -> Optional[Message]:
     """
     Decode the HMIStatus carried by a /hmi StreamData frame.
 
     :param raw: A frame received from /hmi; text frames are str.
+    :param str | Path descriptor_path: Descriptor bundle for HMIStatus and, if present, StreamData.
     :returns: The HMIStatus, or None if the frame does not carry one
     :rtype: Optional[Message]
     :raises RuntimeError: The frame cannot be decoded.
@@ -81,10 +85,13 @@ def _decode_hmi_status(raw: bytes) -> Optional[Message]:
     if not isinstance(raw, bytes):
         return None
     try:
-        stream = _stream_data_cls().FromString(raw)
+        bundle = DescriptorBundle(descriptor_path)
+        stream_cls = (bundle.message("apollo.dreamview.StreamData")
+                      if bundle.has_message("apollo.dreamview.StreamData") else _stream_data_cls())
+        stream = stream_cls.FromString(raw)
         if stream.data_name != "hmistatus":
             return None
-        return message("apollo.dreamview.HMIStatus").FromString(stream.data)
+        return bundle.message("apollo.dreamview.HMIStatus").FromString(stream.data)
     except DecodeError as exc:
         raise RuntimeError("/hmi returned an undecodable HMIStatus frame") from exc
 
@@ -116,7 +123,7 @@ class DreamviewPlus(DreamviewInterface):
     """The websocket connection for Dreamview to its backend"""
 
     def __init__(self, host: str = "localhost", port: int = 8888,
-                 timeout: float = 20.0) -> None:
+                 timeout: float = 20.0, *, descriptor_path: str | Path) -> None:
         """
         Constructor
 
@@ -126,9 +133,11 @@ class DreamviewPlus(DreamviewInterface):
         :param int port: the port of the Dreamview Plus websocket server (old has been moved to 8899)
                          TODO: multi-ctn start should assign other ports when launch Dreamview Plus.
         :param float timeout: the timeout for the websocket connection.
+        :param str | Path descriptor_path: Required protobuf descriptor bundle used by this client.
         """
         if isinstance(timeout, bool) or not isfinite(timeout) or timeout <= 0:
             raise ValueError("timeout must be finite and positive")
+        self.descriptor_path = DescriptorBundle(descriptor_path).descriptor_path
         self.host = host
         self.port = port
         self.timeout = timeout
@@ -146,7 +155,7 @@ class DreamviewPlus(DreamviewInterface):
 
     def __enter__(self):
         """
-        Usage: with DreamviewPlus() as dvp:
+        Usage: with DreamviewPlus(descriptor_path="/schemas/apollo.desc") as dvp:
                    dvp.selectmode('Pnc')
                    dvp.start_sim_control()
                    dv.start_module("Planning")
@@ -592,7 +601,7 @@ class DreamviewPlus(DreamviewInterface):
                     resend_at = now + _HMI_RESUBSCRIBE_S
                 hmi_ws.settimeout(min(resend_at, deadline) - now)
                 try:
-                    status = _decode_hmi_status(hmi_ws.recv())
+                    status = _decode_hmi_status(hmi_ws.recv(), self.descriptor_path)
                 except websocket.WebSocketTimeoutException:
                     status = None
                 if status is not None:

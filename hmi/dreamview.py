@@ -9,12 +9,15 @@ from a command means it was sent, not that Apollo completed it. Query replies
 are matched by type, since this protocol has no request IDs.
 """
 
+from __future__ import annotations
+
 import json
 import select
 import time
 import websocket
 from websocket import WebSocket
 from math import isfinite
+from pathlib import Path
 from logging import getLogger
 from shapely.geometry import Point
 from threading import Event, RLock, Thread
@@ -22,10 +25,10 @@ from google.protobuf.message import Message
 from typing import Any, List, Optional, Tuple, Dict, Union, Callable
 if __package__:
     from .interface import DreamviewInterface
-    from ..message.msg_cls_v9 import message
+    from ..message.descriptor import DescriptorBundle
 else:
     from interface import DreamviewInterface
-    from message.msg_cls_v9 import message
+    from message.descriptor import DescriptorBundle
 
 logger = getLogger(__name__)
 
@@ -66,7 +69,7 @@ class Dreamview(DreamviewInterface):
     """The websocket connection for Dreamview to its backend"""
 
     def __init__(self, host="localhost", port: int = 8899,
-                 timeout: float = 20.0) -> None:
+                 timeout: float = 20.0, *, descriptor_path: str | Path) -> None:
         """
         Constructor
 
@@ -76,9 +79,11 @@ class Dreamview(DreamviewInterface):
         :param int port: the port of the legacy Dreamview websocket server (new has been moved to 8888)
                          TODO: multi-ctn start should assign other ports when launch legacy Dreamview.
         :param float timeout: the timeout for the websocket connection.
+        :param str | Path descriptor_path: Required protobuf descriptor bundle used by this client.
         """
         if isinstance(timeout, bool) or not isfinite(timeout) or timeout <= 0:
             raise ValueError("timeout must be finite and positive")
+        self.descriptor_path = DescriptorBundle(descriptor_path).descriptor_path
         self.host = host
         self.port = port
         self.timeout = timeout
@@ -105,7 +110,7 @@ class Dreamview(DreamviewInterface):
 
     def __enter__(self):
         """
-        Usage: with Dreamview() as dv:
+        Usage: with Dreamview(descriptor_path="/schemas/apollo.desc") as dv:
                    dv.selectmode('Pnc')
                    dv.start_sim_control()
                    dv.start_module("Planning")
@@ -590,7 +595,7 @@ class Dreamview(DreamviewInterface):
 
     def _get_simulation_world(self, planning: bool = False) -> Message:
         """
-        Decode a binary SimulationWorld protobuf from the bundled schema.
+        Decode a binary SimulationWorld protobuf from this client's schema.
 
         Reads cached world data. Requests sent before the world is ready are
         dropped without a delayed response, so the call can time out.
@@ -601,7 +606,7 @@ class Dreamview(DreamviewInterface):
         :returns: The decoded apollo.dreamview.SimulationWorld protobuf containing
                   the backend's cached vehicle, object and planning state.
         :rtype: Message
-        :raises KeyError: SimulationWorld is not defined in the bundled schema.
+        :raises KeyError: SimulationWorld is not defined in the selected schema.
         :raises google.protobuf.message.DecodeError: The binary response cannot
             be parsed as a SimulationWorld protobuf.
         :raises websocket.WebSocketTimeoutException: No binary response arrives
@@ -610,18 +615,18 @@ class Dreamview(DreamviewInterface):
         :raises websocket.WebSocketException: Sending or receiving fails,
             including a closed connection.
         """
-        world_cls = message("apollo.dreamview.SimulationWorld")
+        world_cls = DescriptorBundle(self.descriptor_path).message("apollo.dreamview.SimulationWorld")
         raw = self._request("RequestSimulationWorld", None, planning=planning)
         world = world_cls()
         world.ParseFromString(raw)
         return world
 
     @staticmethod
-    def _number(value) -> float:
+    def _number(value: int | float) -> float:
         """
         Validate a finite int or float and convert it to float.
 
-        :param Union[int, float] value: Numeric value to validate. Booleans are
+        :param int | float value: Numeric value to validate. Booleans are
                                        rejected even though bool subclasses int.
         :returns: The validated value converted to float.
         :rtype: float
