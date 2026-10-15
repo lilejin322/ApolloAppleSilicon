@@ -11,6 +11,9 @@ decodes the reply (op 6).
 Author: Lejin Li, Kyushu University & National Institute of Informatics, Japan
 Contact: li.lejin.147@s.kyushu-u.ac.jp
 
+NOTE: Must be used for the corresponding new cpp files,
+      old bridge server in apollo source code does not support (5) & (6)!
+
 Example::
 
     bridge = CyberBridge("127.0.0.1", descriptor_path=desc)
