@@ -2,11 +2,16 @@
 Channel that communicate with CyberRT framework in the Docker container.
 """
 
+from __future__ import annotations
+
 from pathlib import Path
 from typing import Type
 from dataclasses import dataclass
 from google.protobuf.message import Message
-from message.descriptor import DescriptorBundle
+if "." in __package__:
+    from ..message.descriptor import DescriptorBundle
+else:
+    from message.descriptor import DescriptorBundle
 
 
 @dataclass
