@@ -18,12 +18,11 @@ else:
 class Channel:
     """
     Class representing information regarding cyber bridge channels.
-
-    :param str name: The name of the channel
-    :param Type[Message] msg_cls: The protobuf message class, not an instance
     """
     name: str
+    """The name of the channel"""
     msg_cls: Type[Message]
+    """The protobuf message class, not an instance"""
 
 
 class Channels:

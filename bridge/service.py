@@ -1,5 +1,20 @@
 """
-Service that communicate with CyberRT framework in the Docker container.
+Cyber service definitions for Apollo's external command interface.
+
+Since Apollo 9.0, routing and driving commands are sent as Cyber services
+under ``/apollo/external_command/`` instead of being published on the
+``RoutingRequest`` channel. Each ``Service`` pairs a service name with its
+protobuf request and response classes, resolved from a descriptor bundle.
+``CyberBridge.call_service`` sends the request over the bridge (op 5) and
+decodes the reply (op 6).
+
+Author: Lejin Li, Kyushu University & National Institute of Informatics, Japan
+Contact: li.lejin.147@s.kyushu-u.ac.jp
+
+Example::
+
+    bridge = CyberBridge("127.0.0.1", descriptor_path=desc)
+    status = bridge.call_service(bridge.services.LaneFollow, command)
 """
 
 from __future__ import annotations
@@ -21,15 +36,14 @@ class ServiceCallError(RuntimeError):
 @dataclass
 class Service:
     """
-    Class representing information regarding Cyber services
-
-    :param str name: The name of the service
-    :param Type[Message] request_cls: The protobuf request message class, not an instance
-    :param Type[Message] response_cls: The protobuf response message class, not an instance
+    Class representing information regarding cyber bridge services.
     """
     name: str
+    """"The name of the service"""
     request_cls: Type[Message]
+    """The protobuf request message class, not an instance"""
     response_cls: Type[Message]
+    """The protobuf response message class, not an instance"""
 
 
 class Services:
