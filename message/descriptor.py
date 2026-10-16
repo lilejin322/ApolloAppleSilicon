@@ -9,8 +9,6 @@ https://buf.build/docs/reference/compilation-and-descriptors/#descriptor-product
 https://googleapis.dev/python/protobuf/latest/google/protobuf/descriptor.html
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 from threading import RLock
 from typing import Tuple, Set, Iterator, Dict, Type
