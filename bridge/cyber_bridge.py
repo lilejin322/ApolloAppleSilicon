@@ -21,7 +21,7 @@ from pathlib import Path
 from math import isfinite
 from logging import getLogger
 from collections import defaultdict
-from typing import DefaultDict, Dict, List, Type, Union, Callable, Any
+from typing import DefaultDict, Dict, List, Type, Callable, Optional, Tuple
 from google.protobuf.message import Message
 from threading import Lock, RLock, Thread, current_thread
 from concurrent.futures import Future, TimeoutError as FutureTimeoutError
@@ -81,14 +81,14 @@ class CyberBridge:
     MAX_FIELD_SIZE = 64 * 1024 * 1024
 
     def __init__(self, host: str, port=9090, timeout=5.0, *,
-                 descriptor_path: Union[str, Path]) -> None:
+                 descriptor_path: str | Path) -> None:
         """
         Constructor
 
         :param str host: The host ip address
         :param int port: The port of cyber_bridge, default to 9090
         :param float timeout: The socket timeout max time
-        :param descriptor_path: Descriptor bundle for registration and typed definitions
+        :param str | Path descriptor_path: Descriptor bundle for registration and typed definitions
         """
         if timeout <= 0 or not isfinite(timeout):
             raise ValueError("timeout must be finite and positive")
@@ -146,7 +146,7 @@ class CyberBridge:
         """
         return len(data).to_bytes(4, "little") + data
 
-    def _send(self, data: bytes):
+    def _send(self, data: bytes) -> None:
         """
         Send all bytes without interleaving concurrent callers' data.
 
@@ -156,8 +156,6 @@ class CyberBridge:
         service calls; the original exception is re-raised.
 
         :param bytes data: The complete encoded CyberBridge packet to send.
-        :returns: None after all bytes have been sent to the socket.
-        :rtype: None
         :raises ConnectionError: If the connection is closed or a send returns zero.
         :raises TimeoutError: If sending does not finish within ``self.timeout``.
         :raises OSError: If waiting for or writing to the socket fails.
@@ -189,7 +187,7 @@ class CyberBridge:
                 self._terminate(ConnectionError(f"CyberBridge send failed: {exc}"))
                 raise
 
-    def add_subscriber(self, channel: Channel, cb: Callable[[Message], None]):
+    def add_subscriber(self, channel: Channel, cb: Callable[[Message], None]) -> None:
         """
         Register a local callback and request a reader for the channel.
 
@@ -204,8 +202,6 @@ class CyberBridge:
 
         :param Channel channel: The channel name and protobuf message class.
         :param Callable[[Message], None] cb: A callback accepting one decoded protobuf message.
-        :returns: None after the reader request has been sent.
-        :rtype: None
         :raises TypeError: If ``channel`` is not ``Channel``.
         :raises ConnectionError: If the connection is closed or breaks during send.
         :raises TimeoutError: If sending exceeds the connection timeout.
@@ -230,7 +226,7 @@ class CyberBridge:
                 self.subscribers[channel.name].remove(cb_wrapper)
             raise
 
-    def add_publisher(self, channel: Channel):
+    def add_publisher(self, channel: Channel) -> None:
         """
         Request a writer for the channel, registering descriptors if needed.
 
@@ -246,8 +242,6 @@ class CyberBridge:
         sending fails, the channel is not added to the local publisher registry.
 
         :param Channel channel: The channel name and protobuf message class.
-        :returns: None after transmission, or if the channel is already registered.
-        :rtype: None
         :raises TypeError: If ``channel`` is not ``Channel``.
         :raises ConnectionError: If the connection is closed or breaks during send.
         :raises TimeoutError: If sending exceeds the connection timeout.
@@ -290,8 +284,6 @@ class CyberBridge:
 
         :param Channel channel: The channel on which to publish the message.
         :param Message msg: An instance of the registered protobuf message class.
-        :returns: None after the publish packet has been sent.
-        :rtype: None
         :raises TypeError: If ``channel`` is not a ``Channel`` or ``msg`` is not
             an instance of the registered message class.
         :raises RuntimeError: If no publisher is registered for the channel.
@@ -394,7 +386,22 @@ class CyberBridge:
         message.ParseFromString(response)
         return message
 
-    def _read_field(self, offset):
+    def _read_field(self, offset: int) -> Optional[Tuple[bytes, int]]:
+        """
+        Read a length-prefixed byte field from the receive buffer.
+
+        The field starts with a four-byte unsigned little-endian length.
+        Return None if the length prefix or payload is incomplete, allowing
+        the caller to wait for more TCP data. The buffer is not modified.
+
+        :param int offset: The nonnegative byte offset of the length prefix
+            within ``self._buffer``.
+        :returns: A tuple of the payload bytes and the offset immediately after
+            the field, or None if the complete field has not arrived.
+        :rtype: Optional[Tuple[bytes, int]]
+        :raises ValueError: If the declared payload length exceeds
+            ``MAX_FIELD_SIZE``.
+        """
         if len(self._buffer) < offset + 4:
             return None
         size = int.from_bytes(self._buffer[offset:offset + 4], "little")
@@ -405,8 +412,29 @@ class CyberBridge:
             return None
         return bytes(self._buffer[offset + 4:end]), end
 
-    def on_read(self, data: bytes):
-        """Consume a TCP chunk, retaining partial frames and dispatching all frames."""
+    def on_read(self, data: bytes) -> None:
+        """
+        Buffer a TCP chunk and dispatch every complete frame in arrival order.
+
+        A chunk may contain part of a frame or multiple frames. Incomplete
+        frames remain in ``self._buffer`` until more data arrives; complete
+        frames are removed before dispatch.
+
+        Op 4 frames are passed to ``receive_publish()`` for channel-based
+        callback dispatch. Op 6 frames resolve the pending service call with
+        the matching request ID, supplying response bytes on success or a
+        ``ServiceCallError`` on bridge failure. Responses with no matching
+        pending call, including late responses after a timeout, are discarded.
+
+        Normally called by the receive thread. Calls must not overlap because
+        access to the receive buffer is not protected by a lock. Protocol
+        errors propagate to the receive loop, which terminates the connection.
+
+        :param bytes data: The next raw chunk read from the TCP connection.
+        :raises ValueError: If an operation is unsupported, a service response
+            status is not 0 or 1, or a field exceeds ``MAX_FIELD_SIZE``.
+        :raises UnicodeDecodeError: If a published channel name is not ASCII.
+        """
         self._buffer.extend(data)
         while self._buffer:
             op = self._buffer[0]
@@ -446,8 +474,28 @@ class CyberBridge:
             else:
                 raise ValueError(f"Unknown CyberBridge operation: {op}")
 
-    def receive_publish(self, data: bytes):
-        """Dispatch one complete op-4 frame (normally called by on_read)."""
+    def receive_publish(self, data: bytes) -> None:
+        """
+        Dispatch one complete publish frame to the channel's subscribers.
+
+        Extract the ASCII channel name and serialized payload from an op 4
+        frame. Pass the payload to a snapshot of the registered callbacks in
+        registration order. Wrappers created by ``add_subscriber()`` decode
+        the payload with the channel's message class before calling user code.
+
+        Callbacks run synchronously on the calling thread, normally the receive
+        thread. Payload decoding and callback exceptions are logged separately
+        for each callback so remaining subscribers can still run. Callback
+        return values are ignored.
+
+        If reception is stopped on entry, or the channel has no subscribers,
+        no callbacks are invoked. This method assumes ``on_read()`` has already
+        assembled a complete frame and checked its field lengths.
+
+        :param bytes data: A complete frame containing op 4, a length-prefixed
+            channel name, and a length-prefixed serialized message payload.
+        :raises UnicodeDecodeError: If the channel name is not ASCII.
+        """
         if not self._spinning:
             return
         topic_length = int.from_bytes(data[1:5], "little")
@@ -463,7 +511,21 @@ class CyberBridge:
             except Exception:
                 logger.exception("CyberBridge subscriber failed on %s", topic)
 
-    def _fail_pending(self, error):
+    def _fail_pending(self, error: Exception) -> None:
+        """
+        Fail all pending service calls and clear their request records.
+
+        Set the supplied exception on each pending Future so calls waiting in
+        ``future.result()`` wake and raise it. The exception is delivered to
+        those waiting threads rather than raised directly by this method.
+        The state lock protects the operation against concurrent request
+        registration and response handling. An empty registry requires no action.
+
+        Used when reception stops or the connection terminates, so callers do
+        not have to wait for their individual response timeouts.
+
+        :param Exception error: The exception to deliver to every pending call.
+        """
         with self._state_lock:
             for future in self._pending.values():
                 future.set_exception(error)
