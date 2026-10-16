@@ -21,7 +21,8 @@ from pathlib import Path
 from math import isfinite
 from logging import getLogger
 from collections import defaultdict
-from typing import DefaultDict, Dict, List, Type, Callable, Optional, Tuple
+from types import TracebackType
+from typing import DefaultDict, Dict, List, Type, Callable, Optional, Tuple, Self
 from google.protobuf.message import Message
 from threading import Lock, RLock, Thread, current_thread
 from concurrent.futures import Future, TimeoutError as FutureTimeoutError
@@ -319,6 +320,23 @@ class CyberBridge:
         responses by request ID. This method must be called outside the receive
         thread so that subscriber callbacks do not block response processing.
 
+        Invalid usage: calling a service synchronously from a subscriber
+        callback on the same bridge raises ``RuntimeError``::
+
+            service = bridge.services.QueryStatus
+
+            def on_localization(msg):
+                request = service.request_cls(command_id=123)
+                bridge.call_service(service, request)  # Raises RuntimeError.
+
+            bridge.add_subscriber(bridge.channels.Localization, on_localization)
+            bridge.spin()
+
+        The callback runs on the receive thread. Waiting for a service response
+        there would prevent that same thread from processing the response.
+        Instead, have the callback enqueue work for the main thread or another
+        worker thread, and call ``call_service()`` from that thread.
+
         The ``Service`` defines the endpoint, request class and response class.
         The request must be an instance of that class from the same schema.
         Serialization and response parsing are handled internally.
@@ -531,7 +549,23 @@ class CyberBridge:
                 future.set_exception(error)
             self._pending.clear()
 
-    def _terminate(self, error):
+    def _terminate(self, error: Exception) -> None:
+        """
+        Mark the connection closed, fail pending calls, and close the socket.
+
+        Update the closed and spinning flags under the state lock, then deliver
+        ``error`` to all pending service calls through ``_fail_pending()``.
+        Shut down both socket directions and release the socket. Shutdown
+        errors are ignored so socket closure is still attempted.
+
+        This operation is final; further communication requires a new bridge
+        instance. It requests the receive loop to exit but does not join its
+        thread, so it can also be called by the receive thread itself.
+
+        :param Exception error: The exception delivered to pending service calls.
+        :raises OSError: If closing the socket fails. Errors from ``shutdown()``
+            are suppressed.
+        """
         with self._state_lock:
             self._closed = True
             self._spinning = False
@@ -542,7 +576,23 @@ class CyberBridge:
             pass
         self.conn.close()
 
-    def _spin(self):
+    def _spin(self) -> None:
+        """
+        Receive and dispatch TCP data while ``self._spinning`` is true.
+
+        Used as the background thread target by ``spin()``. Wait for socket
+        readability with a 0.1-second maximum idle wait, then read up to 65,536
+        bytes and pass them to ``on_read()``. Data arrival wakes the wait early;
+        this is not a fixed 10 Hz processing loop. Retry ``BlockingIOError``
+        because another read attempt may be needed on the nonblocking socket.
+
+        An empty read indicates peer disconnection. Exceptions from waiting,
+        reading or frame processing terminate the connection and fail pending
+        service calls with a ``ConnectionError`` containing the failure reason.
+        Exceptions caught here are handled internally rather than re-raised.
+
+        :raises OSError: If socket closure inside ``_terminate()`` fails.
+        """
         while self._spinning:
             try:
                 readable, _, _ = select.select([self.conn], [], [], 0.1)
@@ -559,7 +609,23 @@ class CyberBridge:
                 self._terminate(ConnectionError(f"CyberBridge receive failed: {exc}"))
                 return
 
-    def spin(self):
+    def spin(self) -> None:
+        """
+        Start a background daemon thread to receive and dispatch bridge messages.
+
+        Return immediately after starting the thread. Repeated calls while
+        reception is active have no effect. The state lock ensures concurrent
+        callers do not start multiple receive threads.
+
+        Call after registering subscribers to begin receiving their messages.
+        ``call_service()`` also starts reception automatically. After ``stop()``
+        completes, this method can resume reception on the same connection.
+        A closed or disconnected bridge requires a new instance.
+
+        :raises ConnectionError: If the connection is closed.
+        :raises RuntimeError: If the previous receive thread is still stopping
+            or a new thread cannot be started.
+        """
         with self._state_lock:
             if self._closed:
                 raise ConnectionError("CyberBridge connection is closed")
@@ -571,8 +637,25 @@ class CyberBridge:
             self._receive_thread = Thread(target=self._spin, name="CyberBridge", daemon=True)
             self._receive_thread.start()
 
-    def stop(self):
-        """Pause reception and fail pending calls; safe before spin or in a callback."""
+    def stop(self) -> None:
+        """
+        Pause reception and fail pending service calls while keeping TCP open.
+
+        Clear the spinning flag and deliver a ``ConnectionError`` with the
+        message "CyberBridge reception stopped" to every pending service call.
+        Existing subscriber callbacks and publisher registrations are retained.
+        Use ``spin()`` to resume reception on the same connection;
+        ``call_service()`` also resumes reception automatically.
+
+        When called outside the receive thread, wait for that thread to exit.
+        A callback already executing is not interrupted, so a blocked callback
+        can delay this method indefinitely. When called from a subscriber
+        callback, skip joining the current thread; the receive loop exits after
+        its current processing completes.
+
+        Safe to call before ``spin()`` or repeatedly. Pending service calls fail
+        locally; work already submitted to Apollo is not cancelled.
+        """
         with self._state_lock:
             self._spinning = False
             thread = self._receive_thread
@@ -580,12 +663,64 @@ class CyberBridge:
         if thread is not None and thread is not current_thread():
             thread.join()
 
-    def close(self):
+    def close(self) -> None:
+        """
+        Permanently close the connection and stop reception.
+
+        Fail pending service calls with a ``ConnectionError`` carrying the
+        message "CyberBridge connection closed", shut down and close the socket,
+        then wait for the receive thread to exit. When called from a subscriber
+        callback, skip joining the current thread; it exits after its current
+        processing completes. An executing callback is not interrupted.
+
+        Unlike ``stop()``, this method releases the connection. Further
+        communication requires a new bridge instance and registration of its
+        readers and writers. Calling ``close()`` again is safe after a successful
+        close. This method is also called when leaving a ``with`` block.
+
+        :raises OSError: If closing the socket fails. Errors from ``shutdown()``
+            are suppressed by ``_terminate()``.
+        """
         self._terminate(ConnectionError("CyberBridge connection closed"))
         self.stop()
 
-    def __enter__(self):
+    def __enter__(self) -> Self:
+        """
+        Return this bridge as the context managed by a ``with`` block.
+
+        Keep one block open for the whole scenario, registering publishers and
+        subscribers before using them. For example::
+
+            with CyberBridge(host, descriptor_path=desc) as bridge:
+                bridge.add_publisher(channel)
+                bridge.add_subscriber(channel, callback)
+                bridge.spin()
+                # Publish messages and perform scenario operations here.
+
+        Leaving the block calls ``close()``, including when an exception occurs.
+        The instance cannot be reused afterward. Further communication requires
+        a new bridge instance and re-registering every publisher and subscriber;
+        registrations are not inherited by the new connection.
+
+        :returns: This bridge instance.
+        :rtype: CyberBridge
+        """
         return self
 
-    def __exit__(self, exc_type, exc_value, traceback):
+    def __exit__(self, exc_type: Optional[Type[BaseException]],
+                 exc_value: Optional[BaseException],
+                 traceback: Optional[TracebackType]) -> None:
+        """
+        Close the bridge when leaving the ``with`` block.
+
+        Call ``close()`` on both normal and exceptional exits, closing the TCP
+        connection and failing pending service calls. To communicate again,
+        create a new bridge and register its publishers and subscribers again.
+        An exception raised inside the block propagates after cleanup.
+
+        :param Optional[Type[BaseException]] exc_type: Exception type, or None.
+        :param Optional[BaseException] exc_value: Exception instance, or None.
+        :param Optional[TracebackType] traceback: Exception traceback, or None.
+        :raises OSError: If closing the socket fails.
+        """
         self.close()

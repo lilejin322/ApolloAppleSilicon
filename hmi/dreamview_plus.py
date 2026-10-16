@@ -20,7 +20,8 @@ from functools import lru_cache
 from math import isfinite
 from pathlib import Path
 from shapely import Point
-from typing import Dict, List, Optional, Tuple, Any
+from types import TracebackType
+from typing import Dict, List, Optional, Tuple, Any, Type, Self
 from logging import getLogger
 from google.protobuf.descriptor_pb2 import FieldDescriptorProto, FileDescriptorProto
 from google.protobuf.message import DecodeError, Message
@@ -156,17 +157,29 @@ class DreamviewPlus(DreamviewInterface):
         except Exception as e:
             logger.error(f"Error occurred while closing websocket: {e}")
 
-    def __enter__(self):
+    def __enter__(self) -> Self:
         """
         Usage: with DreamviewPlus(descriptor_path="/schemas/apollo.desc") as dvp:
                    dvp.selectmode('Pnc')
                    dvp.start_sim_control()
                    dv.start_module("Planning")
                # leave with will call __exit__()
+        
+        :returns: This dreamviewplus instance
+        :rtype: DreamviewPlus
         """
         return self
 
-    def __exit__(self, exc_type, exc, tb):
+    def __exit__(self, exc_type: Optional[Type[BaseException]],
+                 exc_value: Optional[BaseException],
+                 traceback: Optional[TracebackType]) -> None:
+        """
+        Close the client when leaving its context.
+
+        :param Optional[Type[BaseException]] exc_type: Exception type, or None.
+        :param Optional[BaseException] exc_value: Exception instance, or None.
+        :param Optional[TracebackType] traceback: Exception traceback, or None.
+        """
         self.close()
 
     def select_mode(self, mode: str) -> None:

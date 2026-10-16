@@ -22,7 +22,8 @@ from logging import getLogger
 from shapely.geometry import Point
 from threading import Event, RLock, Thread
 from google.protobuf.message import Message
-from typing import Any, List, Optional, Tuple, Dict, Union, Callable
+from types import TracebackType
+from typing import Any, List, Optional, Tuple, Dict, Union, Callable, Type, Self
 if __package__:
     from .interface import DreamviewInterface
     from ..message.descriptor import DescriptorBundle
@@ -111,17 +112,29 @@ class Dreamview(DreamviewInterface):
                 logger.exception(f"Error closing Dreamview websocket: {e}")
         self._drainer.join()
 
-    def __enter__(self):
+    def __enter__(self) -> Self:
         """
         Usage: with Dreamview(descriptor_path="/schemas/apollo.desc") as dv:
                    dv.selectmode('Pnc')
                    dv.start_sim_control()
                    dv.start_module("Planning")
                # leave with will call __exit__()
+
+        :returns: This dreamview instance
+        :rtype: Dreamview
         """
         return self
 
-    def __exit__(self, exc_type, exc, tb):
+    def __exit__(self, exc_type: Optional[Type[BaseException]],
+                 exc_value: Optional[BaseException],
+                 traceback: Optional[TracebackType]) -> None:
+        """
+        Close the client when leaving its context.
+
+        :param Optional[Type[BaseException]] exc_type: Exception type, or None.
+        :param Optional[BaseException] exc_value: Exception instance, or None.
+        :param Optional[TracebackType] traceback: Exception traceback, or None.
+        """
         self.close()
 
     def select_mode(self, mode: str) -> None:
