@@ -9,8 +9,6 @@ from a command means it was sent, not that Apollo completed it. Query replies
 are matched by type, since this protocol has no request IDs.
 """
 
-from __future__ import annotations
-
 import json
 import select
 import time

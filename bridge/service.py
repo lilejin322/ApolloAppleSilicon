@@ -20,8 +20,6 @@ Example::
     status = bridge.call_service(bridge.services.LaneFollow, command)
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 from typing import Type
 from dataclasses import dataclass

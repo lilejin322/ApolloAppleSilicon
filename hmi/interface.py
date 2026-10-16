@@ -5,12 +5,10 @@ Author: Lejin Li, Kyushu University & National Institute of Informatics, Japan
 Contact: li.lejin.147@s.kyushu-u.ac.jp
 """
 
-from __future__ import annotations
-
 from abc import ABC, abstractmethod
 from types import TracebackType
 from shapely.geometry import Point
-from typing import Dict, List, Optional, Tuple, Type
+from typing import Dict, List, Optional, Tuple, Type, Self
 
 
 class DreamviewInterface(ABC):
@@ -31,7 +29,7 @@ class DreamviewInterface(ABC):
         ...
 
     @abstractmethod
-    def __enter__(self) -> DreamviewInterface:
+    def __enter__(self) -> Self:
         """
         Enter the client context.
 

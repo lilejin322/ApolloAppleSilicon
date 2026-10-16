@@ -9,8 +9,6 @@ Note that the format of the wb backend of Dreamview Plus is different from the
 old Dreamview 1.0, so the websocket client should be rewritten as follow.
 """
 
-from __future__ import annotations
-
 import json
 import time
 import uuid

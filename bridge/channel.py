@@ -2,8 +2,6 @@
 Channel that communicate with CyberRT framework in the Docker container.
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 from typing import Type
 from dataclasses import dataclass
