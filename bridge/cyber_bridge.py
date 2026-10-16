@@ -9,7 +9,9 @@ Adapted from the CyberRT bridge client in DoppelTest:
 We thank the authors for their contributions.
 
 New Version NOTE: Compatible with version 1.0 from op (1) to (4),
-                  op(5) & (6) must re-compile the cpp for the apollo in ctn
+                  but the publish() need to adjust to publish(channel, msg)
+                  rather than old API publish(channel, msg.SerializeToString())
+                  op(5) & (6) must re-compile the new cpp for the apollo in ctn
 """
 
 import select
@@ -19,7 +21,7 @@ from pathlib import Path
 from math import isfinite
 from logging import getLogger
 from collections import defaultdict
-from typing import DefaultDict, List, Set, Union
+from typing import DefaultDict, Dict, List, Type, Union, Callable, Any
 from google.protobuf.message import Message
 from threading import Lock, RLock, Thread, current_thread
 from concurrent.futures import Future, TimeoutError as FutureTimeoutError
@@ -72,9 +74,9 @@ class CyberBridge:
     conn: socket.socket
     """The socket connection"""
     subscribers: DefaultDict[str, List]
-    """The registered subscribers"""
-    publishable_channel: Set[str]
-    """The registered publishers"""
+    """The registered subscribers and their callback functions"""
+    publishable_channel: Dict[str, Type[Message]]
+    """The registered channel names and their protobuf message classes"""
 
     MAX_FIELD_SIZE = 64 * 1024 * 1024
 
@@ -100,7 +102,7 @@ class CyberBridge:
         self.conn = socket.create_connection((host, port), timeout=timeout)
         self.conn.setblocking(False)
         self.subscribers: DefaultDict[str, List] = defaultdict(list)
-        self.publishable_channel: Set[str] = set()
+        self.publishable_channel: Dict[str, Type[Message]] = {}
         self._spinning = False
         self._receive_thread = None
         self._closed = False
@@ -187,7 +189,7 @@ class CyberBridge:
                 self._terminate(ConnectionError(f"CyberBridge send failed: {exc}"))
                 raise
 
-    def add_subscriber(self, channel: Channel, cb):
+    def add_subscriber(self, channel: Channel, cb: Callable[[Message], None]):
         """
         Register a local callback and request a reader for the channel.
 
@@ -201,7 +203,7 @@ class CyberBridge:
         this callback registration is removed and the exception is re-raised.
 
         :param Channel channel: The channel name and protobuf message class.
-        :param callable cb: A callback accepting one decoded protobuf message.
+        :param Callable[[Message], None] cb: A callback accepting one decoded protobuf message.
         :returns: None after the reader request has been sent.
         :rtype: None
         :raises TypeError: If ``channel`` is not ``Channel``.
@@ -234,13 +236,14 @@ class CyberBridge:
 
         Send the selected descriptor bundle before this connection's first
         writer request. Later writer requests reuse that registration. A
-        channel name already registered locally is skipped, including when
-        multiple threads request it concurrently. Call this method before
-        publishing messages on the channel.
+        channel name already registered with the same message class is skipped,
+        including when multiple threads request it concurrently. Registering
+        the same name with a different message class is rejected. Call this
+        method before publishing messages on the channel.
 
         Op 1 and op 3 have no acknowledgement. Local state records successful
         transmission, not server acknowledgement of writer creation. If
-        sending fails, the channel is not added to the local publisher set.
+        sending fails, the channel is not added to the local publisher registry.
 
         :param Channel channel: The channel name and protobuf message class.
         :returns: None after transmission, or if the channel is already registered.
@@ -249,13 +252,16 @@ class CyberBridge:
         :raises ConnectionError: If the connection is closed or breaks during send.
         :raises TimeoutError: If sending exceeds the connection timeout.
         :raises OSError: If waiting for or writing to the socket fails.
-        :raises ValueError: If the socket is invalid for ``select``.
+        :raises ValueError: If the channel name is already registered with a
+            different message class, or the socket is invalid for ``select``.
         :raises OverflowError: If a field length or descriptor count exceeds uint32.
         """
         if not isinstance(channel, Channel):
             raise TypeError("channel must be a Channel instance")
         with self._publisher_lock:
             if channel.name in self.publishable_channel:
+                if self.publishable_channel[channel.name] is not channel.msg_cls:
+                    raise ValueError(f"Publisher already registered with a different message class: {channel.name!r}")
                 return
             data = b""
             if not self._descriptors_registered:
@@ -269,38 +275,48 @@ class CyberBridge:
                      + self.__prepare_bytes(to_bytes(channel.msg_cls.DESCRIPTOR.full_name)))
             self._send(data)
             self._descriptors_registered = True
-            self.publishable_channel.add(channel.name)
+            self.publishable_channel[channel.name] = channel.msg_cls
 
-    def publish(self, channel: Channel, data: bytes):
+    def publish(self, channel: Channel, msg: Message) -> None:
         """
-        Send serialized protobuf bytes on the specified channel.
+        Serialize and publish a protobuf message on a registered channel.
 
-        Call ``add_publisher(channel)`` first; this method does not register
-        or check the publisher. Serialize the message with
-        ``SerializeToString()`` before calling. The payload is sent unchanged
-        and is not validated against ``channel.msg_cls``.
+        Call ``add_publisher(channel)`` first. The channel's message class must
+        match its registered class, and ``msg`` must be an instance of that
+        class from the same schema. Serialization is handled internally.
 
         Op 4 has no acknowledgement. Returning confirms transmission to the
         socket, not delivery to Cyber readers.
 
         :param Channel channel: The channel on which to publish the message.
-        :param bytes data: The serialized protobuf message payload.
+        :param Message msg: An instance of the registered protobuf message class.
         :returns: None after the publish packet has been sent.
         :rtype: None
-        :raises TypeError: If ``data`` is not ``bytes``.
+        :raises TypeError: If ``channel`` is not a ``Channel`` or ``msg`` is not
+            an instance of the registered message class.
+        :raises RuntimeError: If no publisher is registered for the channel.
         :raises ConnectionError: If the connection is closed or breaks during send.
         :raises TimeoutError: If sending exceeds the connection timeout.
         :raises OSError: If waiting for or writing to the socket fails.
-        :raises ValueError: If the socket is invalid for ``select``.
+        :raises ValueError: If the channel's message class differs from the
+            registered class, or the socket is invalid for ``select``.
         :raises OverflowError: If a field length exceeds the uint32 range.
+        :raises google.protobuf.message.EncodeError: If the message cannot be
+            serialized, such as when required fields are missing.
         """
         if not isinstance(channel, Channel):
             raise TypeError("channel must be a Channel instance")
-        if not isinstance(data, bytes):
-            raise TypeError("data must be serialized protobuf bytes")
-        self._send(BridgeOp.Publish
-                   + self.__prepare_bytes(to_bytes(channel.name))
-                   + self.__prepare_bytes(data))
+        with self._publisher_lock:
+            if channel.name not in self.publishable_channel:
+                raise RuntimeError(f"Publisher is not registered for channel {channel.name!r}")
+            msg_cls = self.publishable_channel[channel.name]
+            if channel.msg_cls is not msg_cls:
+                raise ValueError(f"Channel message class differs from registered publisher: {channel.name!r}")
+            if not isinstance(msg, msg_cls):
+                raise TypeError("msg must be an instance of the registered message class")
+            self._send(BridgeOp.Publish
+                       + self.__prepare_bytes(to_bytes(channel.name))
+                       + self.__prepare_bytes(msg.SerializeToString()))
 
     def call_service(self, service: Service, request: Message,
                      timeout: float = 5.0) -> Message:
