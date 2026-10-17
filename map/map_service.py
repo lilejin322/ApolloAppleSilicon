@@ -113,29 +113,64 @@ class MapService:
     Each service can switch maps independently. Treat shared protobuf objects,
     tables, graphs, and derived relations as read-only. Pass ``load_only=True``
     to access tables without spatial indexes or routing graphs.
+
+    :param str | Path descriptor_path: Path to the protobuf descriptor set used to decode map messages.
+    :param str | Path | None map_path: Binary map file to load immediately; None leaves the service empty.
+    :param bool load_only: If True, load only object tables without building the lane index or routing graph.
     """
+    descriptor_path: Path
+    """Resolved path to the protobuf descriptor set used to decode map objects."""
+    map_path: Optional[Path]
+    """Resolved map file path; None before loading or after loading from a protobuf message."""
+    lane_table: Dict[str, Message]
+    """Lane protobuf messages keyed by lane ID."""
+    junction_table: Dict[str, Message]
+    """Junction protobuf messages keyed by junction ID."""
+    crosswalk_table: Dict[str, Message]
+    """Crosswalk protobuf messages keyed by crosswalk ID."""
+    signal_table: Dict[str, Message]
+    """Traffic signal protobuf messages keyed by signal ID."""
+    stop_sign_table: Dict[str, Message]
+    """Stop sign protobuf messages keyed by stop sign ID."""
+    overlap_table: Dict[str, Message]
+    """Overlap protobuf messages keyed by overlap ID."""
+    road_table: Dict[str, Message]
+    """Road protobuf messages keyed by road ID, retained for junction membership analysis."""
     lane_index: Optional[STRtree]
-    
-    kSearchRadius = 3.0
+    """Spatial index of complete lane centerlines; None until the index is built."""
+    routing_graph: Optional[nx.DiGraph]
+    """Directed lane topology with F/L/R direction_type edges; None until the graph is built."""
+
+    kSearchRadius: float = 3.0
     """Search radius in meters for nearby lanes filtered by heading."""
-    kMaxHeadingDiff = 1.0
+    kMaxHeadingDiff: float = 1.0
     """Exclusive upper bound in radians on the absolute lane heading difference."""
-    FLAGS_min_length_for_lane_change = 1.0
+    FLAGS_min_length_for_lane_change: float = 1.0
     """Minimum source lane length in meters required to add lane-change edges."""
 
     def __init__(
-        self, descriptor_path: Union[str, Path], *,
-        map_path: Union[str, Path, None] = None, load_only: bool = False,
-    ) -> None:
+        self, descriptor_path: str | Path, *,
+        map_path: str | Path | None = None,
+        load_only: bool = False) -> None:
+        """
+        Constructor
+
+        :param str | Path descriptor_path: Path to the protobuf descriptor set used to decode map messages.
+        :param str | Path | None map_path: Binary map file to load immediately; None leaves the service empty.
+        :param bool load_only: If True, load only object tables without building the lane index or routing graph.
+        """
         self.descriptor_path = DescriptorBundle(descriptor_path).descriptor_path
         self._reset()
         if map_path is not None:
             self.load_map_from_file(map_path, load_only=load_only)
 
     def _reset(self) -> None:
+        """
+        Clear this service's map path, object tables, indexes, graph, and derived caches.
+        """
         self.__dict__.pop("relations", None)
-        self.map_path: Optional[Path] = None
-        self.lane_index = None
+        self.map_path: str | Path | None = None
+        self.lane_index: Optional[STRtree] = None
         self.lane_table: Dict[str, Message] = dict()
         self.junction_table: Dict[str, Message] = dict()
         self.crosswalk_table: Dict[str, Message] = dict()
@@ -153,16 +188,27 @@ class MapService:
         self._centerlines: Dict[str, LineString] = dict()
         self._centerline_profiles: Dict[str, CenterlineProfile] = dict()
 
-    def load_map_from_file(self, filename: Union[str, Path], load_only: bool = False):
-        """Reuse a file snapshot; a failed load leaves this service unchanged."""
+    def load_map_from_file(self, filename: str | Path, load_only: bool = False) -> None:
+        """
+        Reuse a file snapshot; a failed load leaves this service unchanged.
+
+        :param str | Path filename: Path to the binary Apollo map file to load using this service's descriptor set.
+        :param bool load_only: If True, expose only object tables without a lane index or routing graph.
+        """
         self._adopt_map(self._snapshot(_resolve(filename), load_only))
 
     def _snapshot(self, path: Path, load_only: bool) -> "MapService":
-        """Return the shared snapshot of a map file, reading it on first use.
+        """
+        Return the shared snapshot of a map file, reading it on first use.
 
         Path aliases share one snapshot, and the file is read at most once until
         ``clear_cache``. A load is published only when every step succeeded, so
         a failed first load caches nothing and the next caller reads again.
+
+        :param Path path: Resolved absolute path to the binary Apollo map file.
+        :param bool load_only: If True, return the tables-only view; otherwise return the indexed view.
+        :returns: Shared map service snapshot with the requested level of initialization.
+        :rtype: MapService
         """
         key = (type(self), path, self.descriptor_path)
         cached = _snapshots.get(key)
@@ -186,21 +232,29 @@ class MapService:
         return cached.tables if load_only else cached.indexed
 
     def _adopt_map(self, snapshot: "MapService") -> None:
+        """
+        Adopt the snapshot's map state by sharing its objects and derived data.
+
+        :param MapService snapshot: Prepared service whose map state replaces this service's current state.
+        """
         # Drop relations bound to the previous map if the snapshot has none yet.
         self.__dict__.pop("relations", None)
         self.__dict__.update(snapshot.__dict__)
 
     @classmethod
     def clear_cache(
-        cls, map_path: Union[str, Path, None] = None, *,
-        descriptor_path: Union[str, Path, None] = None,
-    ) -> None:
-        """Evict matching file snapshots without changing existing services.
+        cls, map_path: str | Path | None = None, *,
+        descriptor_path: str | Path | None = None) -> None:
+        """
+        Evict matching file snapshots without changing existing services.
 
         With no filters, evict all snapshots for this class. An eviction waits
         for loads in progress, so nothing read before it stays cached. Reload a
         service afterwards to read changed files; descriptor bundles retain
         their own independent immutable-file cache.
+
+        :param str | Path | None map_path: Restrict eviction to this resolved map file path; None matches all map paths.
+        :param str | Path | None descriptor_path: Restrict eviction to this resolved descriptor path; None matches all descriptor paths.
         """
         path = None if map_path is None else _resolve(map_path)
         schema = None if descriptor_path is None else _resolve(descriptor_path)
@@ -209,8 +263,14 @@ class MapService:
                         and (path is None or key[1] == path) and (schema is None or key[2] == schema)]:
                 del _snapshots[key]
 
-    def load_map_from_proto(self, map: Message, load_only: bool = False):
-        """Replace this service's map; a failed load leaves it unchanged."""
+    def load_map_from_proto(self, map: Message, load_only: bool = False) -> None:
+        """
+        Replace this service's map; a failed load leaves it unchanged.
+
+        :param Message map: Apollo HD map message created using this service's descriptor set.
+        :param bool load_only: If True, load only object tables without building the lane index or routing graph.
+        :raises TypeError: If map is not an apollo.hdmap.Map instance from this service's descriptor set.
+        """
         expected = DescriptorBundle(self.descriptor_path).message("apollo.hdmap.Map")
         if not isinstance(map, expected):
             raise TypeError("map must use the service's descriptor_path schema")
@@ -221,6 +281,12 @@ class MapService:
         self._adopt_map(staged)
 
     def _populate(self, map: Message, load_only: bool) -> None:
+        """
+        Populate object tables by ID and optionally build the lane index and routing graph.
+
+        :param Message map: Decoded Apollo HD map message whose objects populate this service's tables.
+        :param bool load_only: If True, populate only object tables; otherwise also build the lane index and routing graph.
+        """
         obj_table_map = [
             (map.lane, self.lane_table),
             (map.junction, self.junction_table),
@@ -334,6 +400,7 @@ class MapService:
 
     @property
     def non_junction_lanes(self) -> List[str]:
+        """Lane IDs outside all junction memberships, in table order."""
         outside = self.get_lanes_not_in_junction()
         return [lane for lane in self.lane_table if lane in outside]
 
@@ -458,6 +525,7 @@ class MapService:
 
     @cached_property
     def relations(self) -> MapRelations:
+        """Lazy overlap, signal, junction, and geometric connectivity relationships for this map."""
         return MapRelations(self)
 
     def get_signals_wrt(self, signal_id: str) -> List[Tuple[str, str]]:
