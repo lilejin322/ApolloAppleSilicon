@@ -12,12 +12,14 @@ from functools import cached_property
 from math import isfinite
 from pathlib import Path
 from threading import Lock
-from typing import Dict, Iterable, List, NamedTuple, Optional, Tuple, Union
+from typing import Dict, List, NamedTuple, Optional, Tuple
 from google.protobuf.message import Message
 from shapely import STRtree
 from shapely.geometry import LineString, Point
 
-from .geometry import CenterlineProfile, curve_to_line, normalize_angle
+from .geometry import (
+    CenterlineProfile, SpatialIndex, curve_to_line, curves_to_lines, normalize_angle, polygon_to_shape,
+)
 from .relations import MapRelations
 from .types import LaneSignalOverlap, LaneStopLine, PositionEstimate
 from ..message.descriptor import DescriptorBundle
@@ -29,9 +31,9 @@ class _Snapshot(NamedTuple):
     """
 
     tables: "MapService"
-    """Shared decoded tables and lazy relations, without a lane index or routing graph."""
+    """Shared decoded tables and lazy relations, without spatial indexes or a routing graph."""
     indexed: Optional["MapService"] = None
-    """Reusable view with a lane index and routing graph; None until a full load succeeds."""
+    """Reusable view with spatial indexes and a routing graph; None until a full load succeeds."""
 
 _snapshots: Dict[Tuple[type, Path, Path], _Snapshot] = {}
 """File snapshots by service class, resolved map path, and descriptor path."""
@@ -116,7 +118,7 @@ class MapService:
 
     :param str | Path descriptor_path: Path to the protobuf descriptor set used to decode map messages.
     :param str | Path | None map_path: Binary map file to load immediately; None leaves the service empty.
-    :param bool load_only: If True, load only object tables without building the lane index or routing graph.
+    :param bool load_only: If True, load only object tables without building spatial indexes or the routing graph.
     """
     descriptor_path: Path
     """Resolved path to the protobuf descriptor set used to decode map objects."""
@@ -136,8 +138,6 @@ class MapService:
     """Overlap protobuf messages keyed by overlap ID."""
     road_table: Dict[str, Message]
     """Road protobuf messages keyed by road ID, retained for junction membership analysis."""
-    lane_index: Optional[STRtree]
-    """Spatial index of complete lane centerlines; None until the index is built."""
     routing_graph: Optional[nx.DiGraph]
     """Directed lane topology with F/L/R direction_type edges; None until the graph is built."""
 
@@ -157,7 +157,7 @@ class MapService:
 
         :param str | Path descriptor_path: Path to the protobuf descriptor set used to decode map messages.
         :param str | Path | None map_path: Binary map file to load immediately; None leaves the service empty.
-        :param bool load_only: If True, load only object tables without building the lane index or routing graph.
+        :param bool load_only: If True, load only object tables without building spatial indexes or the routing graph.
         """
         self.descriptor_path = DescriptorBundle(descriptor_path).descriptor_path
         self._reset()
@@ -170,7 +170,6 @@ class MapService:
         """
         self.__dict__.pop("relations", None)
         self.map_path: str | Path | None = None
-        self.lane_index: Optional[STRtree] = None
         self.lane_table: Dict[str, Message] = dict()
         self.junction_table: Dict[str, Message] = dict()
         self.crosswalk_table: Dict[str, Message] = dict()
@@ -180,10 +179,11 @@ class MapService:
         # Retained for junction membership (Road.junction_id); no road queries.
         self.road_table: Dict[str, Message] = dict()
 
-        # Lane IDs in lane index order: STRtree results are positions in this list.
-        self._indexed_lanes: List[str] = list()
+        # Lane, junction, crosswalk, signal, and stop-sign indexes by kind; None
+        # until build_spatial_indexes().
+        self._indexes: Optional[Dict[str, SpatialIndex]] = None
 
-        # None until build_routing_graph(), as lane_index is for spatial queries.
+        # None until build_routing_graph(), as the indexes are for spatial queries.
         self.routing_graph: Optional[nx.DiGraph] = None
         self._centerlines: Dict[str, LineString] = dict()
         self._centerline_profiles: Dict[str, CenterlineProfile] = dict()
@@ -193,7 +193,7 @@ class MapService:
         Reuse a file snapshot; a failed load leaves this service unchanged.
 
         :param str | Path filename: Path to the binary Apollo map file to load using this service's descriptor set.
-        :param bool load_only: If True, expose only object tables without a lane index or routing graph.
+        :param bool load_only: If True, expose only object tables without spatial indexes or a routing graph.
         """
         self._adopt_map(self._snapshot(_resolve(filename), load_only))
 
@@ -225,7 +225,7 @@ class MapService:
                 if not load_only and cached.indexed is None:
                     indexed = type(self)(self.descriptor_path)
                     indexed._adopt_map(cached.tables)
-                    indexed.build_lane_index()
+                    indexed.build_spatial_indexes()
                     indexed.build_routing_graph()
                     cached = cached._replace(indexed=indexed)
                 _snapshots[key] = cached
@@ -268,7 +268,7 @@ class MapService:
         Replace this service's map; a failed load leaves it unchanged.
 
         :param Message map: Apollo HD map message created using this service's descriptor set.
-        :param bool load_only: If True, load only object tables without building the lane index or routing graph.
+        :param bool load_only: If True, load only object tables without building spatial indexes or the routing graph.
         :raises TypeError: If map is not an apollo.hdmap.Map instance from this service's descriptor set.
         """
         expected = DescriptorBundle(self.descriptor_path).message("apollo.hdmap.Map")
@@ -282,10 +282,10 @@ class MapService:
 
     def _populate(self, map: Message, load_only: bool) -> None:
         """
-        Populate object tables by ID and optionally build the lane index and routing graph.
+        Populate object tables by ID and optionally build the spatial indexes and routing graph.
 
         :param Message map: Decoded Apollo HD map message whose objects populate this service's tables.
-        :param bool load_only: If True, populate only object tables; otherwise also build the lane index and routing graph.
+        :param bool load_only: If True, populate only object tables; otherwise also build the spatial indexes and routing graph.
         """
         obj_table_map = [
             (map.lane, self.lane_table),
@@ -301,36 +301,99 @@ class MapService:
                 table_name[obj.id.id] = obj
 
         if not load_only:
-            self.build_lane_index()
+            self.build_spatial_indexes()
             self.build_routing_graph()
 
-    def get_lanes(self, point: Optional[Point] = None, distance=0.0) -> Iterable[str]:
+    def get_lanes(self, point: Optional[Point] = None, distance=0.0) -> List[str]:
+        """
+        Get lane IDs: all lanes in map order when ``distance`` is 0 (``point`` is
+        then ignored), otherwise the lanes within ``distance`` metres of ``point``,
+        nearest first and equally near ones by ID.
+
+        :param Optional[Point] point: Query position in map coordinates; required
+            when ``distance`` is positive.
+        :param float distance: Search radius in metres from ``point`` to each lane's
+            centerline; 0 lists every lane.
+        :returns: Lane IDs, in map order or nearest first.
+        :rtype: List[str]
+        :raises ValueError: If ``distance`` is negative or not finite, or ``point``
+            has non-finite coordinates.
+        :raises TypeError: If ``distance`` is positive and ``point`` is not a Point.
+        :raises RuntimeError: If ``distance`` is positive and the map was loaded
+            with ``load_only=True``, which builds no spatial indexes.
+        """
+        return self._query("lane", self.lane_table, point, distance)
+
+    def get_junctions(self, point: Optional[Point] = None, distance=0.0) -> List[str]:
+        """
+        Get junction IDs, as ``get_lanes`` does for lanes: all junctions in map
+        order, or those whose polygon lies within ``distance`` metres of
+        ``point``, nearest first. A junction containing ``point`` is at distance 0.
+
+        :param Optional[Point] point: Query position; required when ``distance`` is positive.
+        :param float distance: Search radius in metres; 0 lists every junction.
+        :returns: Junction IDs, in map order or nearest first.
+        :rtype: List[str]
+        :raises ValueError, TypeError, RuntimeError: As ``get_lanes``.
+        """
+        return self._query("junction", self.junction_table, point, distance)
+
+    def get_crosswalks(self, point: Optional[Point] = None, distance=0.0) -> List[str]:
+        """
+        Get crosswalk IDs: all in map order, or those whose polygon lies within
+        ``distance`` metres of ``point``, nearest first, as ``get_junctions``.
+
+        :param Optional[Point] point: Query position; required when ``distance`` is positive.
+        :param float distance: Search radius in metres; 0 lists every crosswalk.
+        :returns: Crosswalk IDs, in map order or nearest first.
+        :rtype: List[str]
+        :raises ValueError, TypeError, RuntimeError: As ``get_lanes``.
+        """
+        return self._query("crosswalk", self.crosswalk_table, point, distance)
+
+    def get_signals(self, point: Optional[Point] = None, distance=0.0) -> List[str]:
+        """
+        Get signal IDs: all in map order, or those with a stop line within
+        ``distance`` metres of ``point``, nearest first. As in Apollo, signals are
+        located by their stop lines; a signal without one is never found nearby.
+
+        :param Optional[Point] point: Query position; required when ``distance`` is positive.
+        :param float distance: Search radius in metres; 0 lists every signal.
+        :returns: Signal IDs, in map order or nearest first.
+        :rtype: List[str]
+        :raises ValueError, TypeError, RuntimeError: As ``get_lanes``.
+        """
+        return self._query("signal", self.signal_table, point, distance)
+
+    def get_stop_signs(self, point: Optional[Point] = None, distance=0.0) -> List[str]:
+        """
+        Get stop-sign IDs: all in map order, or those with a stop line within
+        ``distance`` metres of ``point``, nearest first, as ``get_signals``.
+
+        :param Optional[Point] point: Query position; required when ``distance`` is positive.
+        :param float distance: Search radius in metres; 0 lists every stop sign.
+        :returns: Stop-sign IDs, in map order or nearest first.
+        :rtype: List[str]
+        :raises ValueError, TypeError, RuntimeError: As ``get_lanes``.
+        """
+        return self._query("stop sign", self.stop_sign_table, point, distance)
+
+    def _query(self, kind: str, table: Dict[str, Message], point: Optional[Point],
+               distance: float) -> List[str]:
+        """
+        All IDs of ``table`` in map order, or those of the ``kind`` index near ``point``.
+        
+        :param str kind: 
+        :param Dict[str, Message] table:
+        :param Optional[Point] point: 
+        :param float distance: 
+        """
         if not isfinite(distance) or distance < 0:
             raise ValueError("distance must be finite and nonnegative")
         if distance == 0.0:
-            return self.lane_table.keys()
+            return list(table)
         _validate_point(point)
-        return self._lanes_within(point, distance)
-
-    def get_junctions(self, point: Optional[Point] = None, distance=0.0) -> Iterable[str]:
-        if distance == 0.0:
-            return self.junction_table.keys()
-        raise NotImplementedError()
-
-    def get_crosswalks(self, point: Optional[Point] = None, distance=0.0) -> Iterable[str]:
-        if distance == 0.0:
-            return self.crosswalk_table.keys()
-        raise NotImplementedError()
-
-    def get_signals(self, point: Optional[Point] = None, distance=0.0) -> Iterable[str]:
-        if distance == 0.0:
-            return self.signal_table.keys()
-        raise NotImplementedError()
-
-    def get_stop_signs(self, point: Optional[Point] = None, distance=0.0) -> Iterable[str]:
-        if distance == 0.0:
-            return self.stop_sign_table.keys()
-        raise NotImplementedError()
+        return self._index(kind).within(point, distance)
 
     def get_lane_by_id(self, lane_id: str) -> Message:
         return self.lane_table[lane_id]
@@ -430,14 +493,41 @@ class MapService:
                 for pid in known(lane.right_neighbor_forward_lane_id):
                     self.routing_graph.add_edge(lane_id, pid, direction_type='R')
 
-    def build_lane_index(self):
-        # Whole centerlines: queries need lane IDs, and GEOS measures the exact
-        # distance to every segment of each candidate. Coincident lanes keep
-        # separate entries.
-        self._indexed_lanes = list(self.lane_table)
-        self.lane_index = STRtree([
-            self.get_lane_central_curve_by_id(lane_id) for lane_id in self._indexed_lanes
-        ])
+    def build_spatial_indexes(self) -> None:
+        """
+        Build the STRtree indexes for position queries, as Apollo's HDMapImpl
+        does: complete lane centerlines, junction and crosswalk polygons, and
+        signal and stop-sign stop lines.
+
+        GEOS measures the exact distance to every candidate's whole geometry,
+        and coincident lanes keep separate entries. Objects other than lanes may
+        lack their geometry; they are left out, so position queries never
+        return them.
+
+        :raises ValueError: If a lane centerline, polygon, or stop line is malformed.
+        """
+        self._indexes = {
+            "lane": SpatialIndex.build("lane", self.lane_table,
+                                       lambda lane: self.get_lane_central_curve_by_id(lane.id.id)),
+            "junction": SpatialIndex.build("junction", self.junction_table,
+                                           lambda junction: polygon_to_shape(junction.polygon)),
+            "crosswalk": SpatialIndex.build("crosswalk", self.crosswalk_table,
+                                            lambda crosswalk: polygon_to_shape(crosswalk.polygon)),
+            "signal": SpatialIndex.build("signal", self.signal_table,
+                                         lambda signal: curves_to_lines(signal.stop_line)),
+            "stop sign": SpatialIndex.build("stop sign", self.stop_sign_table,
+                                            lambda stop_sign: curves_to_lines(stop_sign.stop_line)),
+        }
+
+    @property
+    def lane_index(self) -> Optional[STRtree]:
+        """
+        The spatial index of complete lane centerlines.
+
+        :returns: The STRtree, or None if the map was loaded with ``load_only=True``.
+        :rtype: Optional[STRtree]
+        """
+        return None if self._indexes is None else self._indexes["lane"].tree
 
     def get_lane_coord_and_heading(
         self, lane_id: str, s: float
@@ -473,11 +563,10 @@ class MapService:
 
     def get_nearest_lane(self, point: Point) -> str:
         _validate_point(point)
-        indices = self._lane_index().query_nearest(point)
-        if len(indices) == 0:
+        lane_id = self._index("lane").nearest(point)
+        if lane_id is None:
             raise ValueError("Map has no lanes")
-        # Equally near lanes, such as coincident ones, resolve to the earliest.
-        return self._indexed_lanes[min(indices)]
+        return lane_id
 
     def get_nearest_lanes_with_heading(
         self, point: Point, heading: float
@@ -488,7 +577,7 @@ class MapService:
         if not isfinite(heading):
             raise ValueError("heading must be finite")
         candidates = []
-        for lane_id in self._lanes_within(point, self.kSearchRadius):
+        for lane_id in self._index("lane").within(point, self.kSearchRadius):
             profile = self._centerline_profile(lane_id)
             # Resolve the closest projection before filtering. A farther segment
             # of this lane must not qualify it. Ties use the first point along
@@ -500,14 +589,10 @@ class MapService:
         candidates.sort()
         return [lane_id for _, _, lane_id in candidates]
 
-    def _lanes_within(self, point: Point, distance: float) -> set[str]:
-        indices = self._lane_index().query(point, predicate="dwithin", distance=distance)
-        return {self._indexed_lanes[index] for index in indices}
-
-    def _lane_index(self) -> STRtree:
-        if self.lane_index is None:
-            raise RuntimeError("Lane index is unavailable; load with load_only=False")
-        return self.lane_index
+    def _index(self, kind: str) -> SpatialIndex:
+        if self._indexes is None:
+            raise RuntimeError("Spatial indexes are unavailable; load with load_only=False")
+        return self._indexes[kind]
 
     def _routing_graph(self) -> nx.DiGraph:
         if self.routing_graph is None:
@@ -517,7 +602,7 @@ class MapService:
     def get_position(self, point: Point) -> PositionEstimate:
         """Project a point onto the nearest lane's complete centerline."""
         _validate_point(point)
-        self._lane_index()
+        self._index("lane")
         if not self.lane_table:
             return PositionEstimate()
         lane_id = self.get_nearest_lane(point)
