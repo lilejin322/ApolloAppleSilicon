@@ -159,6 +159,23 @@ class SpatialIndex(NamedTuple, Generic[T]):
         return self.items[min(indices)] if len(indices) else None
 
 
+def chord_heading(line: LineString, start: float, end: float) -> float:
+    """
+    Return the direction of the chord between two positions along a line.
+
+    Over a few metres a chord follows the line's course, unlike one densely
+    sampled segment, whose direction a few centimetres can change by degrees.
+
+    :param LineString line: The line.
+    :param float start: Metres along the line from its first point to the chord's start.
+    :param float end: Metres to the chord's end, greater than ``start``.
+    :returns: Direction in radians within ``[-pi, pi]``.
+    :rtype: float
+    """
+    a, b = line.interpolate(start), line.interpolate(end)
+    return atan2(b.y - a.y, b.x - a.x)
+
+
 def normalize_angle(angle: float) -> float:
     """
     Normalize an angle to the range [-pi, pi).

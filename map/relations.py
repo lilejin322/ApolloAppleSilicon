@@ -8,14 +8,17 @@ Contact: li.lejin.147@s.kyushu-u.ac.jp
 from collections import defaultdict
 from functools import cached_property
 from math import atan2, cos, degrees, hypot, isfinite, sin
-from typing import TYPE_CHECKING, Iterator, Mapping
+from typing import TYPE_CHECKING, Callable, Iterable, Iterator, Mapping, NamedTuple, Optional
 import networkx as nx
+from shapely import make_valid
 from google.protobuf.message import Message
-from shapely.geometry import LineString, Point
+from shapely.geometry import LineString, MultiPoint, Point
+from shapely.geometry.base import BaseGeometry
 from shapely.ops import substring
 
-from .geometry import curve_to_line, normalize_angle
+from .geometry import chord_heading, curve_to_line, normalize_angle, polygon_to_shape
 from .types import LaneSignalOverlap, LaneStopLine
+from ..utils import require_nonnegative
 
 if TYPE_CHECKING:
     from .map_service import MapService
@@ -27,13 +30,18 @@ OPPOSING_APPROACH = 135.0
 """Signals whose controlled lanes enter more than this many degrees apart are opposing."""
 LEFT_TURN = 45.0
 """A movement turning left by more than this many degrees, or any U-turn, yields to oncoming traffic."""
+DIRECTION_CHORD = 5.0
+"""Metres over which lane directions are measured, as chords rather than single segments."""
+CROSSING_CLEARANCE = 1.0
+"""Metres from the ends of two movements within which meeting is a merge or diverge, not a crossing."""
 
 
 def _overlap_ids(obj) -> set[str]:
     return {overlap.id for overlap in obj.overlap_id}
 
 
-def forward_links(lane_id: str, lane: Message, lanes: Mapping[str, Message]) -> Iterator[tuple[str, str]]:
+def forward_links(lane_id: str, lane: Message,
+                  lanes: Mapping[str, Message]) -> Iterator[tuple[str, str]]:
     """
     Yield the forward (from, to) lane pairs that one lane declares.
 
@@ -53,9 +61,46 @@ def forward_links(lane_id: str, lane: Message, lanes: Mapping[str, Message]) -> 
             yield lane_id, other.id
 
 
-def _validate_max_distance(max_distance: float) -> None:
-    if not isfinite(max_distance) or max_distance < 0:
-        raise ValueError("max_distance must be finite and nonnegative")
+class _Movement(NamedTuple):
+    """One path of a signal's traffic, judged inside its junction."""
+
+    yields: bool
+    """Whether it turns left or makes a U-turn, and so yields to oncoming traffic."""
+    line: Optional[BaseGeometry]
+    """Its course after the signal, inside the junction polygon if it has one, as one line."""
+
+
+def _cross_inside(first: Optional[BaseGeometry], second: Optional[BaseGeometry]) -> bool:
+    """
+    Whether two movement lines cross away from their ends.
+
+    Only meeting farther than ``CROSSING_CLEARANCE`` from where either line
+    starts or ends counts, so merges, diverges, and lines that barely touch near
+    an end do not. Shared stretches, as of movements meeting head-on, count
+    wherever they extend beyond that clearance.
+
+    :rtype: bool
+    """
+    if first is None or second is None:
+        return False
+    hit = first.intersection(second)
+    if hit.is_empty:
+        return False
+    ends = MultiPoint([coords for line in (first, second) for part in getattr(line, "geoms", [line])
+                       for coords in (part.coords[0], part.coords[-1])])
+    return not hit.difference(ends.buffer(CROSSING_CLEARANCE)).is_empty
+
+
+def _meet(left: Iterable[tuple[str, BaseGeometry]], right: Iterable[tuple[str, BaseGeometry]]) -> bool:
+    """
+    Whether a lane geometry on one side intersects that of a different lane on the other.
+
+    :param left: (lane ID, geometry) pairs.
+    :param right: (lane ID, geometry) pairs.
+    :rtype: bool
+    """
+    right = list(right)
+    return any(a != b and x.intersects(y) for a, x in left for b, y in right)
 
 
 class MapRelations:
@@ -166,7 +211,7 @@ class MapRelations:
         association is authoritative; matching individual curves is geometric,
         so every curve within max_distance is returned, never a guessed one.
         """
-        _validate_max_distance(max_distance)
+        require_nonnegative(max_distance=max_distance)
         signal = self._service.get_signal_by_id(signal_id)
         self._service.get_lane_by_id(lane_id)  # Unknown IDs are errors, even if unassociated.
         overlaps = [record for record in self.lane_signal_overlaps[lane_id]
@@ -209,7 +254,7 @@ class MapRelations:
 
     def get_lane_stop_lines(self, lane_id: str, max_distance: float) -> tuple[LaneStopLine, ...]:
         # Validate even when the lane has no signals and nothing is matched.
-        _validate_max_distance(max_distance)
+        require_nonnegative(max_distance=max_distance)
         return tuple(
             match
             for signal_id in self.signals_for_lane[lane_id]
@@ -217,12 +262,8 @@ class MapRelations:
         )
 
     def is_conflict_lanes(self, lane_ids1: list[str], lane_ids2: list[str]) -> bool:
-        return any(
-            left != right and self._service.get_lane_central_curve_by_id(left).intersects(
-                self._service.get_lane_central_curve_by_id(right)
-            )
-            for left in lane_ids1 for right in lane_ids2
-        )
+        curve = self._service.get_lane_central_curve_by_id
+        return _meet(((lane, curve(lane)) for lane in lane_ids1), ((lane, curve(lane)) for lane in lane_ids2))
 
     @cached_property
     def forward_successors(self) -> dict[str, list[str]]:
@@ -283,10 +324,18 @@ class MapRelations:
         graph.add_nodes_from(sorted(self._service.signal_table))
         evidence = defaultdict(list)
         for junction_id, signals in sorted(self.signals_at_junction.items()):
-            paths = {signal: self.movement_paths(signal, junction_id) for signal in signals}
+            area = self._junction_areas.get(junction_id)
+            movements: dict[str, list[_Movement]] = {}
+
+            def movements_of(signal: str) -> list[_Movement]:
+                if signal not in movements:
+                    movements[signal] = [self._movement(signal, path, area)
+                                         for path in self.movement_paths(signal, junction_id)]
+                return movements[signal]
+
             for index, left in enumerate(signals):
                 for right in signals[index + 1:]:
-                    relation = self._relation(left, right, paths)
+                    relation = self._relation(left, right, movements_of)
                     if relation is not None:
                         evidence[left, right].append((junction_id, left, right, relation))
         for (left, right), records in sorted(evidence.items()):
@@ -325,7 +374,8 @@ class MapRelations:
             if data["relation"] == "EQ" and groups[left] is not groups[right]:
                 data["relation"] = "NE"
 
-    def _relation(self, left: str, right: str, paths: Mapping[str, list[tuple[str, ...]]]) -> str | None:
+    def _relation(self, left: str, right: str,
+                  movements_of: Callable[[str], list[_Movement]]) -> str | None:
         left_lanes = self.lanes_controlled_by_signal[left]
         right_lanes = self.lanes_controlled_by_signal[right]
         if left_lanes and left_lanes == right_lanes:
@@ -340,22 +390,27 @@ class MapRelations:
             return "EQ"
         if between <= OPPOSING_APPROACH:
             return "NE"
-        unyielding = any(not self._turns_left(left, p) and not self._turns_left(right, q)
-                         and self._movements_conflict(left, p, right, q)
-                         for p in paths[left] for q in paths[right])
+        unyielding = any(not p.yields and not q.yields and _cross_inside(p.line, q.line)
+                         for p in movements_of(left) for q in movements_of(right))
         return "NE" if unyielding else "EQ"
 
-    def _direction(self, lane_id: str, *, at_end: bool = False, s: float = 0.0) -> float:
-        """Segment direction at geometric s, using the outgoing segment at a vertex."""
-        coords = list(self._service.get_lane_central_curve_by_id(lane_id).coords)
-        if not at_end:
-            travelled = 0.0
-            for (x1, y1), (x2, y2) in zip(coords, coords[1:]):
-                travelled += hypot(x2 - x1, y2 - y1)
-                if s < travelled:
-                    return atan2(y2 - y1, x2 - x1)
-        (x1, y1), (x2, y2) = coords[-2], coords[-1]
-        return atan2(y2 - y1, x2 - x1)
+    def _heading(self, lane_id: str, s: float) -> float:
+        """Lane direction over a ``DIRECTION_CHORD`` chord from s, shifted back to fit in the lane."""
+        line = self._service.get_lane_central_curve_by_id(lane_id)
+        end = min(max(s, 0.0) + DIRECTION_CHORD, line.length)
+        return chord_heading(line, max(end - DIRECTION_CHORD, 0.0), end)
+
+    def _path_line(self, signal_id: str, path: tuple[str, ...]) -> LineString:
+        """A movement's course from its signal along all its lanes, as one line."""
+        coords = []
+        for index, lane_id in enumerate(path):
+            line = self._service.get_lane_central_curve_by_id(lane_id)
+            if index == 0 and self._signal_entries[signal_id, lane_id] > 0:
+                line = substring(line, self._signal_entries[signal_id, lane_id], line.length)
+            for point in getattr(line, "coords", ()):
+                if not coords or coords[-1] != point:
+                    coords.append(point)
+        return LineString(coords if len(coords) > 1 else coords * 2)
 
     @cached_property
     def _signal_entries(self) -> dict[tuple[str, str], float]:
@@ -377,27 +432,46 @@ class MapRelations:
         lanes = self.lanes_controlled_by_signal[signal_id]
         if not lanes or any((signal_id, lane) not in self._signal_entries for lane in lanes):
             return None
-        directions = [self._direction(lane, s=self._signal_entries[signal_id, lane]) for lane in lanes]
+        directions = [self._heading(lane, self._signal_entries[signal_id, lane]) for lane in lanes]
         x, y = sum(map(cos, directions)), sum(map(sin, directions))
         return None if hypot(x, y) < 1e-9 * len(lanes) else atan2(y, x)
 
-    def _turns_left(self, signal_id: str, path: tuple[str, ...]) -> bool:
-        """Whether a movement turns left or makes a U-turn after its signal overlap."""
-        turn = degrees(normalize_angle(self._direction(path[-1], at_end=True)
-                                       - self._direction(path[0], s=self._signal_entries[signal_id, path[0]])))
-        return turn > LEFT_TURN or turn < -OPPOSING_APPROACH
+    @cached_property
+    def _junction_areas(self) -> dict[str, Optional[BaseGeometry]]:
+        """Each junction's polygon, made valid; None where it has no usable polygon."""
+        areas = {}
+        for junction_id, junction in self._service.junction_table.items():
+            try:
+                area = polygon_to_shape(junction.polygon)
+            except ValueError:
+                area = None
+            areas[junction_id] = area if area is None or area.is_valid else make_valid(area)
+        return areas
 
-    def _movement_curves(self, signal_id: str, path: tuple[str, ...]) -> Iterator[tuple[str, LineString | Point]]:
-        """Lane geometries after the signal, excluding the uncontrolled upstream prefix."""
-        for index, lane_id in enumerate(path):
-            line = self._service.get_lane_central_curve_by_id(lane_id)
-            if index == 0:
-                line = substring(line, self._signal_entries[signal_id, lane_id], line.length)
-            yield lane_id, line
+    def _movement(self, signal_id: str, path: tuple[str, ...], area: Optional[BaseGeometry]) -> _Movement:
+        """
+        Judge one movement inside its junction.
 
-    def _movements_conflict(self, left: str, p: tuple[str, ...], right: str, q: tuple[str, ...]) -> bool:
-        left_curves, right_curves = list(self._movement_curves(left, p)), list(self._movement_curves(right, q))
-        return any(a != b and x.intersects(y) for a, x in left_curves for b, y in right_curves)
+        Only its course after the signal counts, and only inside the junction
+        polygon when there is one: exit lanes overlap a junction where they
+        start but may run far beyond it. The turn compares chords along the
+        whole course, across lane joins, at the signal and where it leaves the
+        junction, so no single short segment decides it.
+        """
+        course = self._path_line(signal_id, path)
+        inside, leave = course, course.length
+        if area is not None and course.length > 0:
+            clipped = course.intersection(area)
+            ends = [course.project(Point(coords)) for part in getattr(clipped, "geoms", [clipped])
+                    for coords in getattr(part, "coords", ())]
+            if ends and max(ends) > 0:  # Otherwise it never enters the polygon: judge it whole.
+                inside, leave = clipped, max(ends)
+        if leave == 0:
+            return _Movement(False, None)
+        reach = min(DIRECTION_CHORD, leave)
+        turn = degrees(normalize_angle(chord_heading(course, leave - reach, leave)
+                                       - chord_heading(course, 0.0, min(DIRECTION_CHORD, course.length))))
+        return _Movement(turn > LEFT_TURN or turn < -OPPOSING_APPROACH, inside)
 
     def get_signals_wrt(self, signal_id: str) -> list[tuple[str, str]]:
         if signal_id not in self._service.signal_table:

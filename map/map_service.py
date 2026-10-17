@@ -25,6 +25,7 @@ from .geometry import (
 from .relations import MapRelations, forward_links
 from .types import LaneMarking, LaneSignalOverlap, LaneStopLine, PositionEstimate
 from ..message.descriptor import DescriptorBundle
+from ..utils import require_nonnegative
 
 
 class _Snapshot(NamedTuple):
@@ -71,45 +72,23 @@ def _read_map(path: Path, descriptor_path: Path) -> Message:
     return DescriptorBundle(descriptor_path).message("apollo.hdmap.Map").FromString(path.read_bytes())
 
 
-def _validate_point(point: Point) -> None:
-    """
-    Validate that the given value is a non-empty Shapely point with finite coordinates.
-
-    :param Point point: Point to validate
-    :raises TypeError: If ``point`` is not a Shapely ``Point``.
-    :raises ValueError: If ``point`` is empty or contains non-finite x or y coordinates.
-    """
-    if not isinstance(point, Point):
-        raise TypeError(f"point must be a shapely Point, not {type(point).__name__}")
-    if point.is_empty or not (isfinite(point.x) and isfinite(point.y)):
-        raise ValueError("point must have finite x and y coordinates")
-
-
-def _validate_distance(distance: float) -> None:
-    """
-    Validate a search radius.
-
-    :param float distance: Radius in metres.
-    :raises ValueError: If ``distance`` is negative or not finite.
-    """
-    if not isfinite(distance) or distance < 0:
-        raise ValueError("distance must be finite and nonnegative")
-
-
-def _validate_geometry(geometry: BaseGeometry) -> None:
+def _validate_geometry(geometry: BaseGeometry, name: str = "geometry",
+                       kind: type = BaseGeometry) -> None:
     """
     Validate that the given value is a non-empty Shapely geometry with finite coordinates.
 
     :param BaseGeometry geometry: Geometry to validate.
-    :raises TypeError: If ``geometry`` is not a Shapely geometry.
+    :param str name: The argument's name, for error messages.
+    :param type kind: The Shapely type required, such as ``Point``.
+    :raises TypeError: If ``geometry`` is not of that type.
     :raises ValueError: If ``geometry`` is empty or has non-finite coordinates.
     """
-    if not isinstance(geometry, BaseGeometry):
-        raise TypeError(f"geometry must be a shapely geometry, not {type(geometry).__name__}")
+    if not isinstance(geometry, kind):
+        raise TypeError(f"{name} must be a shapely {kind.__name__}, not {type(geometry).__name__}")
     if geometry.is_empty:
-        raise ValueError("geometry must not be empty")
+        raise ValueError(f"{name} must not be empty")
     if not all(isfinite(bound) for bound in geometry.bounds):
-        raise ValueError("geometry must have finite coordinates")
+        raise ValueError(f"{name} must have finite coordinates")
 
 
 def is_allowed_to_cross(boundary: Message) -> bool:
@@ -422,10 +401,10 @@ class MapService:
         :raises RuntimeError: If ``distance`` is positive and the map was loaded
             with ``load_only=True``, which builds no spatial indexes.
         """
-        _validate_distance(distance)
+        require_nonnegative(distance=distance)
         if distance == 0.0:
             return list(table)
-        _validate_point(point)
+        _validate_geometry(point, "point", Point)
         return self._index(kind).within(point, distance)
 
     def get_lane_markings(self, geometry: BaseGeometry, distance: float = 0.0) -> List[LaneMarking]:
@@ -448,7 +427,7 @@ class MapService:
         :raises RuntimeError: If the map was loaded with ``load_only=True``,
             which builds no spatial indexes.
         """
-        _validate_distance(distance)
+        require_nonnegative(distance=distance)
         _validate_geometry(geometry)
         return self._index("lane marking").within(geometry, distance)
 
@@ -721,7 +700,7 @@ class MapService:
         :raises RuntimeError: If the map was loaded with ``load_only=True``,
             which builds no spatial indexes.
         """
-        _validate_point(point)
+        _validate_geometry(point, "point", Point)
         lane_id = self._index("lane").nearest(point)
         if lane_id is None:
             raise ValueError("Map has no lanes")
@@ -759,7 +738,7 @@ class MapService:
         :raises RuntimeError: If the map was loaded with ``load_only=True``,
             which builds no spatial indexes.
         """
-        _validate_point(point)
+        _validate_geometry(point, "point", Point)
         self._index("lane")
         if not self.lane_table:
             return PositionEstimate()
