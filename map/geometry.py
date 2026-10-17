@@ -27,7 +27,7 @@ def curve_to_line(curve: Message) -> LineString:
     :rtype: LineString
     :raises ValueError: If fewer than two points remain after deduplication.
     """
-    points = []
+    points: List[Tuple[float, float]] = []
     for segment in curve.segment:
         for point in segment.line_segment.point:
             coordinate = (point.x, point.y)
@@ -47,7 +47,7 @@ def polygon_to_shape(polygon: Message) -> Optional[Polygon]:
     :rtype: Optional[Polygon]
     :raises ValueError: If the polygon has fewer than three points.
     """
-    points = [(point.x, point.y) for point in polygon.point]
+    points: List[Tuple[float, float]] = [(point.x, point.y) for point in polygon.point]
     if not points:
         return None
     if len(points) < 3:
@@ -64,7 +64,7 @@ def curves_to_lines(curves: Iterable[Message]) -> Optional[MultiLineString]:
     :rtype: Optional[MultiLineString]
     :raises ValueError: If a curve has fewer than two distinct points.
     """
-    lines = [curve_to_line(curve) for curve in curves]
+    lines: List[LineString] = [curve_to_line(curve) for curve in curves]
     return MultiLineString(lines) if lines else None
 
 
@@ -84,10 +84,11 @@ def split_boundary(boundary: Message) -> List[Tuple[float, float, Message, LineS
     """
     if not boundary.curve.segment or not boundary.boundary_type:
         return []
-    line = curve_to_line(boundary.curve)
-    pieces = sorted(boundary.boundary_type, key=lambda piece: piece.s)
-    starts = [min(max(piece.s, 0.0), line.length) for piece in pieces]
-    ends = starts[1:] + [line.length]
+    line: LineString = curve_to_line(boundary.curve)
+    # LaneBoundaryType messages, in order of their start s along the curve.
+    pieces: List[Message] = sorted(boundary.boundary_type, key=lambda piece: piece.s)
+    starts: List[float] = [min(max(piece.s, 0.0), line.length) for piece in pieces]
+    ends: List[float] = starts[1:] + [line.length]
     # Most boundaries have one piece covering the whole curve; substring is slow.
     return [(start, end, piece, line if (start, end) == (0.0, line.length) else substring(line, start, end))
             for start, end, piece in zip(starts, ends, pieces) if end > start]
@@ -121,7 +122,7 @@ class SpatialIndex(NamedTuple, Generic[T]):
         ids, geometries = [], []
         for object_id, obj in objects.items():
             try:
-                shape = geometry(obj)
+                shape: Optional[BaseGeometry] = geometry(obj)
             except ValueError as error:
                 raise ValueError(f"invalid geometry for {kind} {object_id!r}: {error}") from error
             if shape is not None:
@@ -184,9 +185,13 @@ class CenterlineProfile:
                             and segment headings.
     """
     line: LineString
+    """The centerline the profile describes."""
     cumulative_s: List[float]
+    """Metres from the first point to each vertex; one more entry than there are segments."""
     headings: List[float]
+    """Direction of each segment in radians, from its start vertex to its end vertex."""
     midpoint_s: List[float]
+    """Metres from the first point to each segment's midpoint, where its heading is anchored."""
 
     def __init__(self, line: LineString) -> None:
         """
@@ -195,13 +200,13 @@ class CenterlineProfile:
         :param LineString line: The lane centerline used to compute cumulative distances
                                 and segment headings.
         """
-        coords = list(line.coords)
-        pairs = list(zip(coords, coords[1:]))
-        lengths = [hypot(x2 - x1, y2 - y1) for (x1, y1), (x2, y2) in pairs]
-        self.line = line
-        self.cumulative_s = [0.0, *accumulate(lengths)]
-        self.headings = [atan2(y2 - y1, x2 - x1) for (x1, y1), (x2, y2) in pairs]
-        self.midpoint_s = [start + length / 2 for start, length in zip(self.cumulative_s, lengths)]
+        coords: List[Tuple[float, float]] = list(line.coords)
+        pairs: List[Tuple[Tuple[float, float], Tuple[float, float]]] = list(zip(coords, coords[1:]))
+        lengths: List[float] = [hypot(x2 - x1, y2 - y1) for (x1, y1), (x2, y2) in pairs]
+        self.line: LineString = line
+        self.cumulative_s: List[float] = [0.0, *accumulate(lengths)]
+        self.headings: List[float] = [atan2(y2 - y1, x2 - x1) for (x1, y1), (x2, y2) in pairs]
+        self.midpoint_s: List[float] = [start + length / 2 for start, length in zip(self.cumulative_s, lengths)]
 
     def heading_at(self, s: float) -> float:
         """
@@ -217,12 +222,12 @@ class CenterlineProfile:
         :returns: Heading in radians within ``[-pi, pi)``.
         :rtype: float
         """
-        index = bisect_right(self.midpoint_s, s)
+        index: int = bisect_right(self.midpoint_s, s)
         if index == 0:
             return self.headings[0]
         if index == len(self.headings):
             return self.headings[-1]
         start, end = self.midpoint_s[index - 1], self.midpoint_s[index]
-        before = self.headings[index - 1]
-        turn = normalize_angle(self.headings[index] - before)
+        before: float = self.headings[index - 1]
+        turn: float = normalize_angle(self.headings[index] - before)
         return normalize_angle(before + turn * (s - start) / (end - start))
