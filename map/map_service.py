@@ -22,7 +22,7 @@ from .geometry import (
     CenterlineProfile, SpatialIndex, curve_to_line, curves_to_lines, polygon_to_shape,
     split_boundary,
 )
-from .relations import MapRelations
+from .relations import MapRelations, forward_links
 from .types import LaneMarking, LaneSignalOverlap, LaneStopLine, PositionEstimate
 from ..message.descriptor import DescriptorBundle
 
@@ -583,10 +583,7 @@ class MapService:
             return [x.id for x in ids if x.id in self.lane_table]
 
         for lane_id, lane in self.lane_table.items():
-            for pid in known(lane.predecessor_id):
-                self.routing_graph.add_edge(pid, lane_id, direction_type='F')
-            for pid in known(lane.successor_id):
-                self.routing_graph.add_edge(lane_id, pid, direction_type='F')
+            self.routing_graph.add_edges_from(forward_links(lane_id, lane, self.lane_table), direction_type='F')
 
             if lane.length < MapService.FLAGS_min_length_for_lane_change:
                 continue
@@ -690,6 +687,16 @@ class MapService:
         return Point(ip.x, ip.y), profile.heading_at(s)
 
     def _centerline_profile(self, lane_id: str) -> CenterlineProfile:
+        """
+        Return a lane's centerline profile for heading queries, built once per loaded map.
+
+        :param str lane_id: Lane ID.
+        :returns: Cumulative s and midpoint-interpolated headings of the
+            lane's complete centerline.
+        :rtype: CenterlineProfile
+        :raises KeyError: If the map has no such lane.
+        :raises ValueError: If the centerline has fewer than two distinct points.
+        """
         # Derived from immutable lane geometry, so handles sharing a cached
         # snapshot may also share these lazily built profiles.
         profile = self._centerline_profiles.get(lane_id)
@@ -699,6 +706,21 @@ class MapService:
         return profile
 
     def get_nearest_lane(self, point: Point) -> str:
+        """
+        Get the lane whose complete centerline is nearest to a point.
+
+        Lanes of every type are considered. Equally near lanes, such as
+        coincident ones, resolve to the earliest in map order.
+
+        :param Point point: Query position in map coordinates.
+        :returns: The nearest lane ID.
+        :rtype: str
+        :raises TypeError: If ``point`` is not a Shapely Point.
+        :raises ValueError: If ``point`` is empty or has non-finite coordinates,
+            or the map has no lanes.
+        :raises RuntimeError: If the map was loaded with ``load_only=True``,
+            which builds no spatial indexes.
+        """
         _validate_point(point)
         lane_id = self._index("lane").nearest(point)
         if lane_id is None:
@@ -706,12 +728,37 @@ class MapService:
         return lane_id
 
     def _index(self, kind: str) -> SpatialIndex:
+        """
+        Return one of the indexes built by ``build_spatial_indexes``.
+
+        :param str kind: ``"lane"``, ``"junction"``, ``"crosswalk"``,
+            ``"signal"``, ``"stop sign"``, or ``"lane marking"``.
+        :returns: The index of that kind.
+        :rtype: SpatialIndex
+        :raises RuntimeError: If the map was loaded with ``load_only=True``,
+            which builds no spatial indexes.
+        """
         if self._indexes is None:
             raise RuntimeError("Spatial indexes are unavailable; load with load_only=False")
         return self._indexes[kind]
 
     def get_position(self, point: Point) -> PositionEstimate:
-        """Project a point onto the nearest lane's complete centerline."""
+        """
+        Project a point onto the nearest lane's complete centerline.
+
+        The lane is chosen as by ``get_nearest_lane``, among lanes of every
+        type. ``s`` is the unrounded geometric distance in metres along that
+        centerline to the closest point, clamped to its ends, so it can be
+        passed to ``get_lane_coord_and_heading``.
+
+        :param Point point: Query position in map coordinates.
+        :returns: The lane ID and ``s``; both None if the map has no lanes.
+        :rtype: PositionEstimate
+        :raises TypeError: If ``point`` is not a Shapely Point.
+        :raises ValueError: If ``point`` is empty or has non-finite coordinates.
+        :raises RuntimeError: If the map was loaded with ``load_only=True``,
+            which builds no spatial indexes.
+        """
         _validate_point(point)
         self._index("lane")
         if not self.lane_table:
@@ -721,48 +768,171 @@ class MapService:
 
     @cached_property
     def relations(self) -> MapRelations:
-        """Lazy overlap, signal, junction, and geometric connectivity relationships for this map."""
+        """
+        Lazy overlap and signal relationships for this map.
+
+        Covers lanes overlapping each junction, lane-signal overlaps and
+        their intervals, signals controlling each lane, signal stop lines
+        matched to lanes, and the signal EQ/NE graph. Each relationship is
+        computed on first access and needs no spatial index. Handles loaded
+        from the same file share one instance; loading another map replaces it.
+
+        :returns: The relationships of the currently loaded map.
+        :rtype: MapRelations
+        """
         return MapRelations(self)
 
     def get_signals_wrt(self, signal_id: str) -> List[Tuple[str, str]]:
+        """
+        Get the signals related to a signal at the same junction, with their relation.
+
+        ``"EQ"`` signals show the same colour; ``"NE"`` signals are never green
+        together. As at a junction with circular lights, signals whose
+        controlled lanes enter from the same or the opposing approach are EQ,
+        left turns and U-turns yielding to oncoming traffic, and signals of
+        crossing approaches are NE. Opposing signals are NE instead if their
+        movements cross where neither turns left, as at a skewed junction.
+        Apollo maps carry no signal phases, so this is inferred from lane
+        geometry, not read; signals controlling no lanes are unrelated.
+
+        :param str signal_id: Signal ID.
+        :returns: (other signal ID, ``"EQ"`` or ``"NE"``) pairs.
+        :rtype: List[Tuple[str, str]]
+        :raises KeyError: If the map has no such signal.
+        """
         return self.relations.get_signals_wrt(signal_id)
 
     def get_lanes_controlled_by_signal(self, signal_id: str) -> List[str]:
-        """Return lane IDs associated with the signal by explicit overlaps."""
+        """
+        Return lane IDs associated with the signal by explicit overlaps.
+
+        A lane is controlled when one overlap holds both the lane and the
+        signal. These are only the lanes the signal overlaps, often short entry
+        pieces; ``relations.movement_paths`` follows them through a junction.
+
+        :param str signal_id: Signal ID.
+        :returns: Controlled lane IDs, sorted; empty if the signal overlaps no lane.
+        :rtype: List[str]
+        :raises KeyError: If the map has no such signal.
+        """
         return list(self.relations.lanes_controlled_by_signal[signal_id])
 
     def get_signals_for_lane(self, lane_id: str) -> List[str]:
-        """Return signal IDs associated with the lane by explicit overlaps."""
+        """
+        Return signal IDs associated with the lane by explicit overlaps.
+
+        A signal controls the lane when one overlap holds both. Lanes after a
+        controlled entry piece are not associated, even though its signal
+        governs the traffic on them.
+
+        :param str lane_id: Lane ID.
+        :returns: Signal IDs, sorted; empty if no signal overlaps the lane.
+        :rtype: List[str]
+        :raises KeyError: If the map has no such lane.
+        """
         return list(self.relations.signals_for_lane[lane_id])
 
-    def get_signal_lane_overlaps(self, signal_id: str) -> tuple[LaneSignalOverlap, ...]:
-        """Return all lane intervals associated with a signal, in lane metres."""
+    def get_signal_lane_overlaps(self, signal_id: str) -> Tuple[LaneSignalOverlap, ...]:
+        """
+        Return all lane intervals associated with a signal, in lane metres.
+
+        Each record is one overlap between the signal and one lane, with the
+        interval's ``start_s`` and ``end_s`` as stored in the map; missing
+        values stay None. Separate overlaps on the same lane are all kept.
+        These ``s`` values come from the map, not from the centerline geometry
+        used by ``get_position``, so they may differ slightly.
+
+        :param str signal_id: Signal ID.
+        :returns: Records ordered by lane ID, then overlap ID and interval;
+            empty if the signal overlaps no lane.
+        :rtype: Tuple[LaneSignalOverlap, ...]
+        :raises KeyError: If the map has no such signal.
+        """
         return self.relations.signal_lane_overlaps[signal_id]
 
-    def get_lane_signal_overlaps(self, lane_id: str) -> tuple[LaneSignalOverlap, ...]:
-        """Return all signal intervals on a lane, retaining separate overlaps."""
+    def get_lane_signal_overlaps(self, lane_id: str) -> Tuple[LaneSignalOverlap, ...]:
+        """
+        Return all signal intervals on a lane, retaining separate overlaps.
+
+        The lane's own overlap references are followed; only overlaps holding
+        this lane and an existing signal count. Records are as in
+        ``get_signal_lane_overlaps``: ``s`` values as stored in the map, None
+        where missing.
+
+        :param str lane_id: Lane ID.
+        :returns: Records ordered by overlap ID, signal ID, and interval;
+            empty if no signal overlaps the lane.
+        :rtype: Tuple[LaneSignalOverlap, ...]
+        :raises KeyError: If the map has no such lane.
+        """
         return self.relations.lane_signal_overlaps[lane_id]
 
-    def get_signal_stop_lines(
-        self, signal_id: str, lane_id: str, *, max_distance: float = 1.0
-    ) -> tuple[LaneStopLine, ...]:
-        """Match a signal's stop lines to this lane's overlap intervals.
+    def get_signal_stop_lines(self, signal_id: str, lane_id: str, *,
+                              max_distance: float = 1.0) -> Tuple[LaneStopLine, ...]:
+        """
+        Match a signal's stop lines to this lane's overlap intervals.
 
         max_distance is a geometric tolerance in metres, not a search radius
         around the vehicle. Multiple candidates are retained; no nearest-only
         fallback is used. The returned geometry is the full signal stop line.
+
+        Apollo stores no lane ID on a stop line, so each of the signal's stop
+        lines is kept when it lies within ``max_distance`` of the stretch of
+        this lane's centerline covered by one of their overlap intervals.
+        Intervals without both ends, or outside the centerline, are skipped;
+        an interval running past the centerline's end is clipped to it.
+
+        :param str signal_id: Signal ID.
+        :param str lane_id: Lane ID.
+        :param float max_distance: Largest distance in metres between a stop
+            line and an overlap interval of the lane.
+        :returns: One record per matching stop line, in the signal's stop-line
+            order; empty if the signal and lane share no usable overlap
+            interval or the signal has no stop line.
+        :rtype: Tuple[LaneStopLine, ...]
+        :raises KeyError: If the map has no such signal or lane.
+        :raises ValueError: If ``max_distance`` is negative or not finite, or a
+            stop line of the signal is malformed.
         """
         return self.relations.get_signal_stop_lines(signal_id, lane_id, max_distance)
 
-    def get_lane_stop_lines(
-        self, lane_id: str, *, max_distance: float = 1.0
-    ) -> tuple[LaneStopLine, ...]:
-        """Return matching stop lines from every signal associated with a lane.
+    def get_lane_stop_lines(self, lane_id: str, *,
+                            max_distance: float = 1.0) -> Tuple[LaneStopLine, ...]:
+        """
+        Return matching stop lines from every signal associated with a lane.
 
         Stop-sign stop lines are not included. Shared geometry keeps separate
         records for each signal so that signal provenance is preserved.
+
+        Equivalent to ``get_signal_stop_lines`` for each signal of
+        ``get_signals_for_lane``. Only signals overlapping this lane count, so
+        a lane following a controlled entry piece usually has none.
+
+        :param str lane_id: Lane ID.
+        :param float max_distance: As in ``get_signal_stop_lines``.
+        :returns: Matching stop lines, ordered by signal ID, then by each
+            signal's stop-line order.
+        :rtype: Tuple[LaneStopLine, ...]
+        :raises KeyError: If the map has no such lane.
+        :raises ValueError: If ``max_distance`` is negative or not finite, even
+            when the lane has no signal, or a matched signal's stop line is
+            malformed.
         """
         return self.relations.get_lane_stop_lines(lane_id, max_distance)
 
-    def is_conflict_lanes(self, lane_ids1: List[str], lane_ids2: List[str]) -> bool:
+    def is_conflict_lanes(self, lane_ids1: List[str],
+                          lane_ids2: List[str]) -> bool:
+        """
+        Whether any lane of one group meets a different lane of the other.
+
+        Lanes meet when their complete centerlines intersect, including a mere
+        touch where they merge or diverge at a shared end point. A lane listed
+        in both groups does not conflict with itself.
+
+        :param List[str] lane_ids1: Lane IDs of the first group.
+        :param List[str] lane_ids2: Lane IDs of the second group.
+        :returns: True if some pair of different lanes intersects.
+        :rtype: bool
+        :raises KeyError: If either group names an unknown lane.
+        """
         return self.relations.is_conflict_lanes(lane_ids1, lane_ids2)

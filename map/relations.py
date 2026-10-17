@@ -2,21 +2,50 @@
 
 from collections import defaultdict
 from functools import cached_property
-from math import isfinite
-from typing import TYPE_CHECKING
+from math import atan2, cos, degrees, isfinite, sin
+from typing import TYPE_CHECKING, Iterator, Mapping
 
 import networkx as nx
+from google.protobuf.message import Message
 from shapely.ops import substring
 
-from .geometry import curve_to_line
+from .geometry import curve_to_line, normalize_angle
 from .types import LaneSignalOverlap, LaneStopLine
 
 if TYPE_CHECKING:
     from .map_service import MapService
 
 
+SAME_APPROACH = 45.0
+"""Signals whose controlled lanes enter within this many degrees share an approach."""
+OPPOSING_APPROACH = 135.0
+"""Signals whose controlled lanes enter more than this many degrees apart are opposing."""
+LEFT_TURN = 45.0
+"""A movement turning left by more than this many degrees, or any U-turn, yields to oncoming traffic."""
+
+
 def _overlap_ids(obj) -> set[str]:
     return {overlap.id for overlap in obj.overlap_id}
+
+
+def forward_links(lane_id: str, lane: Message, lanes: Mapping[str, Message]) -> Iterator[tuple[str, str]]:
+    """
+    Yield the forward (from, to) lane pairs that one lane declares.
+
+    A lane links each known predecessor to itself and itself to each known
+    successor; unknown IDs are skipped, as in Apollo's ``GraphCreator::AddEdge``.
+
+    :param str lane_id: The lane's ID.
+    :param Message lane: The ``apollo.hdmap.Lane`` message.
+    :param Mapping[str, Message] lanes: All lanes by ID.
+    :rtype: Iterator[tuple[str, str]]
+    """
+    for other in lane.predecessor_id:
+        if other.id in lanes:
+            yield other.id, lane_id
+    for other in lane.successor_id:
+        if other.id in lanes:
+            yield lane_id, other.id
 
 
 def _validate_max_distance(max_distance: float) -> None:
@@ -25,11 +54,11 @@ def _validate_max_distance(max_distance: float) -> None:
 
 
 class MapRelations:
-    """Lazy overlap, signal, and geometric connectivity analysis.
+    """Lazy overlap and signal analysis.
 
-    Signal EQ/NE labels retain the old parser's geometric heuristic. They
-    describe shared controlled lanes or intersecting centerlines, not verified
-    traffic-light phase constraints.
+    Signal EQ/NE labels model a junction with circular lights from the lanes
+    each signal controls; Apollo maps carry no signal phases, so they are
+    inferred, not read.
     """
 
     def __init__(self, service: "MapService") -> None:
@@ -191,19 +220,99 @@ class MapRelations:
         )
 
     @cached_property
+    def forward_successors(self) -> dict[str, list[str]]:
+        """Each lane's forward successors, as in ``routing_graph``, without needing it."""
+        lanes = self._service.lane_table
+        successors: dict[str, dict[str, None]] = defaultdict(dict)
+        for lane_id, lane in lanes.items():
+            for source, target in forward_links(lane_id, lane, lanes):
+                successors[source][target] = None
+        return {lane_id: list(targets) for lane_id, targets in successors.items()}
+
+    def movement_paths(self, signal_id: str, junction_id: str) -> list[tuple[str, ...]]:
+        """
+        Return the lane paths a signal's traffic takes through a junction.
+
+        Signals may control only a short entry piece of each lane, so each
+        controlled lane is followed forward through every successor that still
+        overlaps the junction, until the path leaves it.
+
+        :param str signal_id: Signal ID.
+        :param str junction_id: A junction the signal belongs to.
+        :returns: Paths of lane IDs, each starting with a controlled lane.
+        :rtype: list[tuple[str, ...]]
+        """
+        inside = set(self.lanes_overlapping_junction[junction_id])
+        paths = []
+
+        def extend(path: tuple[str, ...]) -> None:
+            successors = [lane for lane in self.forward_successors.get(path[-1], ())
+                          if lane in inside and lane not in path]
+            if not successors:
+                paths.append(path)
+            for successor in successors:
+                extend(path + (successor,))
+
+        for lane_id in self.lanes_controlled_by_signal[signal_id]:
+            extend((lane_id,))
+        return paths
+
+    @cached_property
     def signal_graph(self) -> nx.Graph:
+        """
+        Signals at a shared junction joined by ``relation`` ``"EQ"`` (same colour)
+        or ``"NE"`` (never green together), as at a junction with circular lights:
+
+        - controlled lanes that are the same, or enter from the same approach: EQ;
+        - crossing approaches: NE;
+        - opposing approaches: EQ, as left turns yield to oncoming traffic, unless
+          movements cross where neither turns left (a skewed junction): NE.
+        """
         graph = nx.Graph()
         graph.add_nodes_from(self._service.signal_table)
-        for signals in self.signals_at_junction.values():
+        for junction_id, signals in self.signals_at_junction.items():
+            paths = {signal: self.movement_paths(signal, junction_id) for signal in signals}
             for index, left in enumerate(signals):
                 for right in signals[index + 1:]:
-                    left_lanes = self.lanes_controlled_by_signal[left]
-                    right_lanes = self.lanes_controlled_by_signal[right]
-                    if left_lanes and left_lanes == right_lanes:
-                        graph.add_edge(left, right, relation="EQ")
-                    elif self.is_conflict_lanes(left_lanes, right_lanes):
-                        graph.add_edge(left, right, relation="NE")
+                    relation = self._relation(left, right, paths)
+                    if relation is not None:
+                        graph.add_edge(left, right, relation=relation)
         return graph
+
+    def _relation(self, left: str, right: str, paths: Mapping[str, list[tuple[str, ...]]]) -> str | None:
+        left_lanes = self.lanes_controlled_by_signal[left]
+        right_lanes = self.lanes_controlled_by_signal[right]
+        if left_lanes and left_lanes == right_lanes:
+            return "EQ"
+        if not left_lanes or not right_lanes:
+            return None
+        between = abs(degrees(normalize_angle(self._approach(left) - self._approach(right))))
+        if between < SAME_APPROACH:
+            return "EQ"
+        if between <= OPPOSING_APPROACH:
+            return "NE"
+        unyielding = any(not self._turns_left(p) and not self._turns_left(q)
+                         and self.is_conflict_lanes(list(p), list(q))
+                         for p in paths[left] for q in paths[right])
+        return "NE" if unyielding else "EQ"
+
+    def _direction(self, lane_id: str, *, at_end: bool) -> float:
+        """Direction in radians of a lane's first or last centerline segment."""
+        coords = self._service.get_lane_central_curve_by_id(lane_id).coords
+        (x1, y1), (x2, y2) = (coords[-2], coords[-1]) if at_end else (coords[0], coords[1])
+        return atan2(y2 - y1, x2 - x1)
+
+    def _approach(self, signal_id: str) -> float:
+        """Mean entry direction in radians of the lanes a signal controls."""
+        directions = [self._direction(lane_id, at_end=False)
+                      for lane_id in self.lanes_controlled_by_signal[signal_id]]
+        return atan2(sum(map(sin, directions)), sum(map(cos, directions)))
+
+    def _turns_left(self, path: tuple[str, ...]) -> bool:
+        """Whether a movement turns left or makes a U-turn, judged over its whole path."""
+        turn = degrees(normalize_angle(self._direction(path[-1], at_end=True)
+                                       - self._direction(path[0], at_end=False)))
+        return turn > LEFT_TURN or turn < -OPPOSING_APPROACH
 
     def get_signals_wrt(self, signal_id: str) -> list[tuple[str, str]]:
         if signal_id not in self._service.signal_table:
