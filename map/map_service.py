@@ -793,7 +793,10 @@ class MapService:
         crossing approaches are NE. Opposing signals are NE instead if their
         movements cross where neither turns left, as at a skewed junction.
         Apollo maps carry no signal phases, so this is inferred from lane
-        geometry, not read; signals controlling no lanes are unrelated.
+        geometry at signal overlaps, not read; signals controlling no lanes
+        are unrelated. Missing or invalid overlap positions leave approaches
+        unknown. Conflicting inferred EQ preferences become NE when necessary
+        to keep each synchronous group free of NE constraints.
 
         :param str signal_id: Signal ID.
         :returns: (other signal ID, ``"EQ"`` or ``"NE"``) pairs.

@@ -1,23 +1,32 @@
 """
 Common geometry conversion and spatial indexing for map queries and relationship analysis.
+
+Author: Lejin Li, Kyushu University & National Institute of Informatics, Japan
+Contact: li.lejin.147@s.kyushu-u.ac.jp
 """
 
 from bisect import bisect_right
 from itertools import accumulate
 from math import atan2, hypot, pi
-from typing import Callable, Generic, Iterable, List, Mapping, NamedTuple, Optional, Tuple, TypeVar
-
 from google.protobuf.message import Message
 from shapely import STRtree
 from shapely.geometry import LineString, MultiLineString, Point, Polygon
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import substring
+from typing import Callable, Generic, Iterable, List, Mapping, NamedTuple, Optional, Tuple, TypeVar
 
 T = TypeVar("T")
 
 
 def curve_to_line(curve: Message) -> LineString:
-    """Read every line segment, omitting repeated segment endpoints."""
+    """
+    Read every line segment, omitting repeated segment endpoints.
+
+    :param Message curve: An ``apollo.hdmap.Curve`` message.
+    :returns: A line connecting all points, with consecutive duplicates removed.
+    :rtype: LineString
+    :raises ValueError: If fewer than two points remain after deduplication.
+    """
     points = []
     for segment in curve.segment:
         for point in segment.line_segment.point:
@@ -91,9 +100,10 @@ class SpatialIndex(NamedTuple, Generic[T]):
     Items are object IDs, or records such as ``LaneMarking``; they must be
     orderable, since equally near ones are returned in item order.
     """
-
     items: List[T]
+    """Object IDs or records, in the same order as the tree's geometries."""
     tree: STRtree
+    """Spatial index whose geometry indices correspond to positions in items."""
 
     @classmethod
     def build(cls, kind: str, objects: Mapping[str, Message],
@@ -103,7 +113,7 @@ class SpatialIndex(NamedTuple, Generic[T]):
 
         :param str kind: Object kind, for error messages.
         :param Mapping[str, Message] objects: Objects by ID.
-        :param geometry: Returns an object's geometry, or None to leave it out.
+        :param Callable[[Message], Optional[BaseGeometry]] geometry: Returns an object's geometry, or None to leave it out.
         :returns: The index of the IDs of the objects that have a geometry.
         :rtype: SpatialIndex[str]
         :raises ValueError: Naming the first object whose geometry is malformed.
@@ -149,11 +159,19 @@ class SpatialIndex(NamedTuple, Generic[T]):
 
 
 def normalize_angle(angle: float) -> float:
+    """
+    Normalize an angle to the range [-pi, pi).
+
+    :param float angle: Angle in radians.
+    :returns: The equivalent angle in radians within [-pi, pi).
+    :rtype: float
+    """
     return (angle + pi) % (2 * pi) - pi
 
 
 class CenterlineProfile:
-    """Cumulative s and segment headings of a centerline, for heading queries.
+    """
+    Cumulative s and segment headings of a centerline, for heading queries.
 
     Each segment's direction is anchored at its midpoint, and headings are
     interpolated between neighbouring midpoints. They are continuous and match
@@ -161,9 +179,22 @@ class CenterlineProfile:
     first and after the last midpoint, the end segment's direction is used.
     Apollo's LaneInfo::Heading interpolates between vertices instead, which
     turns ahead of the curve, so results are not identical to Apollo's.
+
+    :param LineString line: The lane centerline used to compute cumulative distances
+                            and segment headings.
     """
+    line: LineString
+    cumulative_s: List[float]
+    headings: List[float]
+    midpoint_s: List[float]
 
     def __init__(self, line: LineString) -> None:
+        """
+        Constructor
+
+        :param LineString line: The lane centerline used to compute cumulative distances
+                                and segment headings.
+        """
         coords = list(line.coords)
         pairs = list(zip(coords, coords[1:]))
         lengths = [hypot(x2 - x1, y2 - y1) for (x1, y1), (x2, y2) in pairs]
@@ -173,6 +204,19 @@ class CenterlineProfile:
         self.midpoint_s = [start + length / 2 for start, length in zip(self.cumulative_s, lengths)]
 
     def heading_at(self, s: float) -> float:
+        """
+        Get the heading at s, interpolated between neighbouring segment midpoints.
+
+        Between two midpoints the heading turns linearly with s, the shorter
+        way round; before the first and after the last midpoint it is the end
+        segment's direction, so any s, even outside the line, has a heading.
+        The line must have no zero-length segments, as ``curve_to_line``
+        guarantees.
+
+        :param float s: Metres along the line from its first point.
+        :returns: Heading in radians within ``[-pi, pi)``.
+        :rtype: float
+        """
         index = bisect_right(self.midpoint_s, s)
         if index == 0:
             return self.headings[0]
