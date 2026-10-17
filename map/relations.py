@@ -444,7 +444,7 @@ class MapRelations:
             area = self._junction_areas.get(junction_id)
             movements: Dict[str, List[_Movement]] = {}
 
-            def movements_of(signal: str) -> list[_Movement]:
+            def movements_of(signal: str) -> List[_Movement]:
                 if signal not in movements:
                     movements[signal] = [self._movement(signal, path, area)
                                          for path in self.movement_paths(signal, junction_id)]
@@ -501,7 +501,7 @@ class MapRelations:
                 data["relation"] = "NE"
 
     def _relation(self, left: str, right: str,
-                  movements_of: Callable[[str], list[_Movement]]) -> Optional[str]:
+                  movements_of: Callable[[str], List[_Movement]]) -> Optional[str]:
         """
         Infer one junction's relation between two of its signals.
 
