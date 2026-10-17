@@ -1,19 +1,19 @@
 """
-Re-implementation the map service using shapely STRtree for retrival
+Re-implementation the map service using shapely STRtree for retrival.
+Although apollo's source code using KDTree for searching, but the python version
+has performance issue, so a better way is to use the STRtree instead.
 
 Author: Lejin Li, Kyushu University & National Institute of Informatics, Japan
 Contact: li.lejin.147@s.kyushu-u.ac.jp
 """
 
+import networkx as nx
 from functools import cached_property
 from math import isfinite
 from pathlib import Path
 from threading import Lock
 from typing import Dict, Iterable, List, NamedTuple, Optional, Tuple, Union
-
 from google.protobuf.message import Message
-
-import networkx as nx
 from shapely import STRtree
 from shapely.geometry import LineString, Point
 
@@ -24,11 +24,14 @@ from ..message.descriptor import DescriptorBundle
 
 
 class _Snapshot(NamedTuple):
-    """One map file's shared data: its tables, and the indexed view once built."""
+    """
+    One map file's shared data: its tables, and the indexed view once built.
+    """
 
     tables: "MapService"
+    """Shared decoded tables and lazy relations, without a lane index or routing graph."""
     indexed: Optional["MapService"] = None
-
+    """Reusable view with a lane index and routing graph; None until a full load succeeds."""
 
 _snapshots: Dict[Tuple[type, Path, Path], _Snapshot] = {}
 """File snapshots by service class, resolved map path, and descriptor path."""
@@ -37,45 +40,88 @@ _snapshots_lock = Lock()
 an entry is only ever replaced by a complete, more indexed one."""
 
 
-def _resolve(path: Union[str, Path]) -> Path:
+def _resolve(path: str | Path) -> Path:
+    """
+    Resolve path util function
+
+    :param str | Path: Path to resolve. May be provided as a string or ``Path`` object.
+    :returns: The expanded and resolved absolute path
+    :rtype: Path
+    """
     return Path(path).expanduser().resolve()
 
 
 def _read_map(path: Path, descriptor_path: Path) -> Message:
-    """Decode a binary map file with the given schema, uncached."""
+    """
+    Decode a binary Apollo map file using the given protobuf descriptor.
+
+    The map file is read directly from disk and parsed as an
+    ``apollo.hdmap.Map`` message without caching.
+
+    :param Path path: Path to the binary Apollo map file
+    :param Path: descriptor_path: Path to the protobuf descriptor set used to
+        resolve the ``apollo.hdmap.Map`` message type
+    :returns: The decoded Apollo HD map protobuf message
+    :rtype: Message
+    """
     return DescriptorBundle(descriptor_path).message("apollo.hdmap.Map").FromString(path.read_bytes())
 
 
 def _validate_point(point: Point) -> None:
+    """
+    Validate that the given value is a non-empty Shapely point with finite coordinates.
+
+    :param Point point: Point to validate
+    :raises TypeError: If ``point`` is not a Shapely ``Point``.
+    :raises ValueError: If ``point`` is empty or contains non-finite x or y coordinates.
+    """
     if not isinstance(point, Point):
         raise TypeError(f"point must be a shapely Point, not {type(point).__name__}")
     if point.is_empty or not (isfinite(point.x) and isfinite(point.y)):
         raise ValueError("point must have finite x and y coordinates")
 
 
-def is_allowed_to_cross(boundary: Message):
+def is_allowed_to_cross(boundary: Message) -> bool:
+    """
+    Determine whether a lane boundary may be crossed based on its marking types.
+
+    A boundary is considered crossable only when it has at least one boundary
+    marking and every marking is dotted yellow or dotted white. Missing,
+    empty, or unsupported boundary markings are treated as non-crossable.
+
+    :param Message boundary: Apollo lane boundary protobuf message to inspect.
+    :returns: ``True`` if the boundary may be crossed, otherwise ``False``.
+    : rtype: bool
+    """
+    # Missing markings do not establish permission to cross the boundary.
+    if not boundary.boundary_type:
+        return False
     for boundary_type in boundary.boundary_type:
         # DOTTED_YELLOW = 1
-        # DOTTED_WHITE = 2
-        if boundary_type.types[0] not in [1, 2]:
+        # DOTTED_WHITE  = 2
+        if not boundary_type.types or boundary_type.types[0] not in [1, 2]:
             return False
+
     return True
 
 
 class MapService:
-    """Own map objects, spatial indexes, and topology for one loaded map.
+    """
+    Own map objects, spatial indexes, and topology for one loaded map.
 
     File loads share a cached snapshot keyed by map and descriptor paths.
     Each service can switch maps independently. Treat shared protobuf objects,
     tables, graphs, and derived relations as read-only. Pass ``load_only=True``
     to access tables without spatial indexes or routing graphs.
     """
-    kSearchRadius = 3.0
-    kMaxHeadingDiff = 1.0
-
-    FLAGS_min_length_for_lane_change = 1.0
-
     lane_index: Optional[STRtree]
+    
+    kSearchRadius = 3.0
+    """Search radius in meters for nearby lanes filtered by heading."""
+    kMaxHeadingDiff = 1.0
+    """Exclusive upper bound in radians on the absolute lane heading difference."""
+    FLAGS_min_length_for_lane_change = 1.0
+    """Minimum source lane length in meters required to add lane-change edges."""
 
     def __init__(
         self, descriptor_path: Union[str, Path], *,
@@ -170,6 +216,8 @@ class MapService:
             raise TypeError("map must use the service's descriptor_path schema")
         staged = type(self)(self.descriptor_path)
         staged._populate(map, load_only)
+        # Retained relations must keep this map even when the caller reloads.
+        _ = staged.relations
         self._adopt_map(staged)
 
     def _populate(self, map: Message, load_only: bool) -> None:
