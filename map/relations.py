@@ -6,8 +6,6 @@ from math import isfinite
 from typing import TYPE_CHECKING
 
 import networkx as nx
-from shapely import STRtree
-from shapely.geometry import Point
 from shapely.ops import substring
 
 from .geometry import curve_to_line
@@ -71,40 +69,6 @@ class MapRelations:
     def lanes_overlapping_junction(self) -> dict[str, list[str]]:
         """Lanes sharing an overlap with each junction, even only at one end."""
         return self._at_junction(self._service.lane_table)
-
-    @cached_property
-    def lanes_at_junction(self) -> dict[str, list[str]]:
-        """Membership priority: valid Lane.junction_id, road, then overlaps.
-
-        Junction polygons often cover a few metres of ordinary lanes entering
-        or leaving them, so an overlap alone overstates membership. Therefore
-        a lane's explicit junction wins; otherwise its road decides. Lanes in
-        no road, or in a road naming an unknown junction, fall back to overlaps.
-        Empty or unknown lane junction IDs do not override the fallbacks.
-        """
-        junctions = self._service.junction_table
-        decided: dict[str, set[str]] = {}
-        for road in self._service.road_table.values():
-            junction_id = road.junction_id.id if road.HasField("junction_id") else ""
-            if junction_id and junction_id not in junctions:
-                continue
-            for section in road.section:
-                for lane in section.lane_id:
-                    lane_junctions = decided.setdefault(lane.id, set())
-                    if junction_id:
-                        lane_junctions.add(junction_id)
-        for lane_id, lane in self._service.lane_table.items():
-            junction_id = lane.junction_id.id
-            if junction_id and junction_id in junctions:
-                decided[lane_id] = {junction_id}
-        result = {junction_id: set() for junction_id in junctions}
-        for junction_id, lanes in self.lanes_overlapping_junction.items():
-            result[junction_id].update(lane for lane in lanes if lane not in decided)
-        for lane_id, lane_junctions in decided.items():
-            if lane_id in self._service.lane_table:
-                for junction_id in lane_junctions:
-                    result[junction_id].add(lane_id)
-        return {junction_id: sorted(lanes) for junction_id, lanes in result.items()}
 
     @cached_property
     def lane_signal_overlaps(self) -> dict[str, tuple[LaneSignalOverlap, ...]]:
@@ -246,41 +210,3 @@ class MapRelations:
             raise KeyError(signal_id)
         return [(other, data["relation"])
                 for other, data in self.signal_graph[signal_id].items()]
-
-    @cached_property
-    def geometric_lane_graph(self) -> nx.DiGraph:
-        """Infer directed edges where lane endpoints are less than 1 mm apart.
-
-        Successors are added in lane table order.
-        """
-        lane_ids = list(self._service.lane_table)
-        lines = [self._service.get_lane_central_curve_by_id(lane_id) for lane_id in lane_ids]
-        starts = [Point(line.coords[0]) for line in lines]
-        index = STRtree(starts)
-        graph = nx.DiGraph()
-        graph.add_nodes_from(lane_ids)
-        for lane_id, line in zip(lane_ids, lines):
-            end = Point(line.coords[-1])
-            # dwithin includes the 1 mm boundary; the check below excludes it.
-            for position in sorted(index.query(end, predicate="dwithin", distance=0.001)):
-                if lane_ids[position] != lane_id and end.distance(starts[position]) < 0.001:
-                    graph.add_edge(lane_id, lane_ids[position])
-        return graph
-
-    def get_geometric_paths_from(self, lane_id: str, limit: int) -> list[list[str]]:
-        if lane_id not in self._service.lane_table:
-            raise KeyError(lane_id)
-        result = []
-        targets = self._service.get_lanes_not_in_junction()
-
-        def visit(path, remaining):
-            if remaining <= 0:
-                return
-            for successor in self.geometric_lane_graph.successors(path[-1]):
-                extended = path + [successor]
-                if successor in targets:
-                    result.append(extended)
-                visit(extended, remaining - 1)
-
-        visit([lane_id], limit)
-        return result

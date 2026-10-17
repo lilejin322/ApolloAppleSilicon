@@ -16,12 +16,14 @@ from typing import Dict, List, NamedTuple, Optional, Tuple
 from google.protobuf.message import Message
 from shapely import STRtree
 from shapely.geometry import LineString, Point
+from shapely.geometry.base import BaseGeometry
 
 from .geometry import (
-    CenterlineProfile, SpatialIndex, curve_to_line, curves_to_lines, normalize_angle, polygon_to_shape,
+    CenterlineProfile, SpatialIndex, curve_to_line, curves_to_lines, polygon_to_shape,
+    split_boundary,
 )
 from .relations import MapRelations
-from .types import LaneSignalOverlap, LaneStopLine, PositionEstimate
+from .types import LaneMarking, LaneSignalOverlap, LaneStopLine, PositionEstimate
 from ..message.descriptor import DescriptorBundle
 
 
@@ -83,6 +85,33 @@ def _validate_point(point: Point) -> None:
         raise ValueError("point must have finite x and y coordinates")
 
 
+def _validate_distance(distance: float) -> None:
+    """
+    Validate a search radius.
+
+    :param float distance: Radius in metres.
+    :raises ValueError: If ``distance`` is negative or not finite.
+    """
+    if not isfinite(distance) or distance < 0:
+        raise ValueError("distance must be finite and nonnegative")
+
+
+def _validate_geometry(geometry: BaseGeometry) -> None:
+    """
+    Validate that the given value is a non-empty Shapely geometry with finite coordinates.
+
+    :param BaseGeometry geometry: Geometry to validate.
+    :raises TypeError: If ``geometry`` is not a Shapely geometry.
+    :raises ValueError: If ``geometry`` is empty or has non-finite coordinates.
+    """
+    if not isinstance(geometry, BaseGeometry):
+        raise TypeError(f"geometry must be a shapely geometry, not {type(geometry).__name__}")
+    if geometry.is_empty:
+        raise ValueError("geometry must not be empty")
+    if not all(isfinite(bound) for bound in geometry.bounds):
+        raise ValueError("geometry must have finite coordinates")
+
+
 def is_allowed_to_cross(boundary: Message) -> bool:
     """
     Determine whether a lane boundary may be crossed based on its marking types.
@@ -93,7 +122,7 @@ def is_allowed_to_cross(boundary: Message) -> bool:
 
     :param Message boundary: Apollo lane boundary protobuf message to inspect.
     :returns: ``True`` if the boundary may be crossed, otherwise ``False``.
-    : rtype: bool
+    :rtype: bool
     """
     # Missing markings do not establish permission to cross the boundary.
     if not boundary.boundary_type:
@@ -136,15 +165,9 @@ class MapService:
     """Stop sign protobuf messages keyed by stop sign ID."""
     overlap_table: Dict[str, Message]
     """Overlap protobuf messages keyed by overlap ID."""
-    road_table: Dict[str, Message]
-    """Road protobuf messages keyed by road ID, retained for junction membership analysis."""
     routing_graph: Optional[nx.DiGraph]
     """Directed lane topology with F/L/R direction_type edges; None until the graph is built."""
 
-    kSearchRadius: float = 3.0
-    """Search radius in meters for nearby lanes filtered by heading."""
-    kMaxHeadingDiff: float = 1.0
-    """Exclusive upper bound in radians on the absolute lane heading difference."""
     FLAGS_min_length_for_lane_change: float = 1.0
     """Minimum source lane length in meters required to add lane-change edges."""
 
@@ -176,8 +199,6 @@ class MapService:
         self.signal_table: Dict[str, Message] = dict()
         self.stop_sign_table: Dict[str, Message] = dict()
         self.overlap_table: Dict[str, Message] = dict()
-        # Retained for junction membership (Road.junction_id); no road queries.
-        self.road_table: Dict[str, Message] = dict()
 
         # Lane, junction, crosswalk, signal, and stop-sign indexes by kind; None
         # until build_spatial_indexes().
@@ -294,7 +315,6 @@ class MapService:
             (map.signal, self.signal_table),
             (map.stop_sign, self.stop_sign_table),
             (map.overlap, self.overlap_table),
-            (map.road, self.road_table),
         ]
         for objects, table_name in obj_table_map:
             for obj in objects:
@@ -382,23 +402,85 @@ class MapService:
                distance: float) -> List[str]:
         """
         All IDs of ``table`` in map order, or those of the ``kind`` index near ``point``.
-        
-        :param str kind: 
-        :param Dict[str, Message] table:
-        :param Optional[Point] point: 
-        :param float distance: 
+
+        Shared by ``get_lanes``, ``get_junctions``, ``get_crosswalks``,
+        ``get_signals``, and ``get_stop_signs``.
+
+        :param str kind: Index to search: ``"lane"``, ``"junction"``,
+            ``"crosswalk"``, ``"signal"``, or ``"stop sign"``.
+        :param Dict[str, Message] table: Objects of that kind by ID, listed
+            when ``distance`` is 0.
+        :param Optional[Point] point: Query position in map coordinates; ignored
+            when ``distance`` is 0.
+        :param float distance: Search radius in metres; 0 lists every ID.
+        :returns: IDs in map order, or within ``distance`` nearest first,
+            equally near ones by ID.
+        :rtype: List[str]
+        :raises ValueError: If ``distance`` is negative or not finite, or ``point``
+            has non-finite coordinates.
+        :raises TypeError: If ``distance`` is positive and ``point`` is not a Point.
+        :raises RuntimeError: If ``distance`` is positive and the map was loaded
+            with ``load_only=True``, which builds no spatial indexes.
         """
-        if not isfinite(distance) or distance < 0:
-            raise ValueError("distance must be finite and nonnegative")
+        _validate_distance(distance)
         if distance == 0.0:
             return list(table)
         _validate_point(point)
         return self._index(kind).within(point, distance)
 
+    def get_lane_markings(self, geometry: BaseGeometry, distance: float = 0.0) -> List[LaneMarking]:
+        """
+        Get the lane marking pieces near a geometry, such as a vehicle footprint.
+
+        Every lane boundary is split where its marking changes. A footprint
+        overlapping a marking whose ``prohibits_crossing`` is true crosses a
+        line the vehicle may not cross. Unlike ``get_lanes``, ``distance=0``
+        means intersecting, not everything.
+
+        :param BaseGeometry geometry: Query geometry in map coordinates.
+        :param float distance: Search radius in metres; 0 finds markings that
+            intersect or touch ``geometry``.
+        :returns: Markings nearest first; equally near ones by lane, side, and s.
+        :rtype: List[LaneMarking]
+        :raises ValueError: If ``distance`` is negative or not finite, or
+            ``geometry`` is empty or has non-finite coordinates.
+        :raises TypeError: If ``geometry`` is not a Shapely geometry.
+        :raises RuntimeError: If the map was loaded with ``load_only=True``,
+            which builds no spatial indexes.
+        """
+        _validate_distance(distance)
+        _validate_geometry(geometry)
+        return self._index("lane marking").within(geometry, distance)
+
     def get_lane_by_id(self, lane_id: str) -> Message:
+        """
+        Get a lane's protobuf message.
+
+        The message is shared with every service using the same cached map;
+        treat it as read-only.
+
+        :param str lane_id: Lane ID.
+        :returns: The ``apollo.hdmap.Lane`` message.
+        :rtype: Message
+        :raises KeyError: If the map has no such lane.
+        """
         return self.lane_table[lane_id]
 
     def get_lane_central_curve_by_id(self, lane_id: str) -> LineString:
+        """
+        Get a lane's complete centerline as a Shapely line.
+
+        Every line segment of ``central_curve`` is joined in order, omitting
+        repeated endpoints. Its length is the geometric arc length used by ``s``
+        in ``get_position`` and ``get_lane_coord_and_heading``, which may differ
+        from ``Lane.length``. Each line is built once per loaded map.
+
+        :param str lane_id: Lane ID.
+        :returns: The centerline in map coordinates.
+        :rtype: LineString
+        :raises KeyError: If the map has no such lane.
+        :raises ValueError: If the centerline has fewer than two distinct points.
+        """
         # Built once per loaded map. Shapely geometries are immutable, so
         # handles sharing a cached snapshot may also share these lines.
         line = self._centerlines.get(lane_id)
@@ -407,68 +489,92 @@ class MapService:
             self._centerlines[lane_id] = line
         return line
 
-    def get_lane_boundary_types_by_id(self, lane_id: str) -> Tuple[int, int]:
-        lane_obj = self.get_lane_by_id(lane_id)
-        return (
-            lane_obj.left_boundary.boundary_type[0].types[0],
-            lane_obj.right_boundary.boundary_type[0].types[0],
-        )
+    def get_junction_by_id(self, junction_id: str) -> Message:
+        """
+        Get a junction's protobuf message.
 
-    def get_lane_boundaries_by_id(self, lane_id: str) -> Tuple[LineString, LineString]:
-        lane_obj = self.get_lane_by_id(lane_id)
+        The message is shared with every service using the same cached map;
+        treat it as read-only.
 
-        return (
-            curve_to_line(lane_obj.left_boundary.curve),
-            curve_to_line(lane_obj.right_boundary.curve),
-        )
-
-    def get_junction_by_id(self, junction_id: str):
+        :param str junction_id: Junction ID.
+        :returns: The ``apollo.hdmap.Junction`` message.
+        :rtype: Message
+        :raises KeyError: If the map has no such junction.
+        """
         return self.junction_table[junction_id]
 
-    def get_crosswalk_by_id(self, crosswalk_id: str):
+    def get_crosswalk_by_id(self, crosswalk_id: str) -> Message:
+        """
+        Get a crosswalk's protobuf message.
+
+        The message is shared with every service using the same cached map;
+        treat it as read-only.
+
+        :param str crosswalk_id: Crosswalk ID.
+        :returns: The ``apollo.hdmap.Crosswalk`` message.
+        :rtype: Message
+        :raises KeyError: If the map has no such crosswalk.
+        """
         return self.crosswalk_table[crosswalk_id]
 
-    def get_signal_by_id(self, signal_id: str):
+    def get_signal_by_id(self, signal_id: str) -> Message:
+        """
+        Get a signal's protobuf message.
+
+        The message is shared with every service using the same cached map;
+        treat it as read-only.
+
+        :param str signal_id: Signal ID.
+        :returns: The ``apollo.hdmap.Signal`` message.
+        :rtype: Message
+        :raises KeyError: If the map has no such signal.
+        """
         return self.signal_table[signal_id]
 
-    def get_stop_sign_by_id(self, stop_sign_id: str):
+    def get_stop_sign_by_id(self, stop_sign_id: str) -> Message:
+        """
+        Get a stop sign's protobuf message.
+
+        The message is shared with every service using the same cached map;
+        treat it as read-only.
+
+        :param str stop_sign_id: Stop sign ID.
+        :returns: The ``apollo.hdmap.StopSign`` message.
+        :rtype: Message
+        :raises KeyError: If the map has no such stop sign.
+        """
         return self.stop_sign_table[stop_sign_id]
 
-    def get_overlap_by_id(self, overlap_id: str):
+    def get_overlap_by_id(self, overlap_id: str) -> Message:
+        """
+        Get a overlap's protobuf message.
+
+        The message is shared with every service using the same cached map;
+        treat it as read-only.
+
+        :param str overlap_id: Overlap ID.
+        :returns: The ``apollo.hdmap.Overlap`` message.
+        :rtype: Message
+        :raises KeyError: If the map has no such overlap.
+        """
         return self.overlap_table[overlap_id]
 
-    def get_path_from(
-        self, lane_id: str, forward_only=True, limit=15
-    ) -> List[List[str]]:
-        graph = self._routing_graph()
-        if lane_id not in self.lane_table:
-            raise KeyError(lane_id)
-        result: List[List[str]] = []
-        if limit <= 0:
-            return result
-        for _, target in graph.edges(lane_id):
-            edge_data = graph.get_edge_data(lane_id, target)
-            if forward_only and edge_data['direction_type'] in ['L', 'R']:
-                continue
-            result.append([lane_id, target])
-            for path in self.get_path_from(target, forward_only, limit - 1):
-                result.append([lane_id] + path)
-        return result
+    def build_routing_graph(self) -> None:
+        """
+        Build ``routing_graph``, the lanes' explicit topology, after Apollo's
+        ``modules/routing/topo_creator/graph_creator.cc``.
 
-    @property
-    def junction_lanes(self) -> List[str]:
-        """Lane IDs in ``relations.lanes_at_junction``, in table order."""
-        outside = self.get_lanes_not_in_junction()
-        return [lane for lane in self.lane_table if lane not in outside]
+        Every lane is a node. A forward (``F``) edge joins A to B when A lists
+        B as a successor or B lists A as a predecessor. A lane at least
+        ``FLAGS_min_length_for_lane_change`` long gets a left (``L``) or right
+        (``R``) edge to each forward neighbour on that side whose boundary
+        ``is_allowed_to_cross``. IDs missing from the lane table are skipped,
+        as in ``GraphCreator::AddEdge``. Edges carry only ``direction_type``.
 
-    @property
-    def non_junction_lanes(self) -> List[str]:
-        """Lane IDs outside all junction memberships, in table order."""
-        outside = self.get_lanes_not_in_junction()
-        return [lane for lane in self.lane_table if lane in outside]
-
-    def build_routing_graph(self):
-        # modules/routing/topo_creator/graph_creator.cc
+        Unlike Apollo's graph, this one keeps every lane type and every U-turn,
+        and also follows predecessor links; ``RouteSpace`` filters lanes and
+        adds costs for each agent's rules.
+        """
         self.routing_graph = nx.DiGraph()
         self.routing_graph.add_nodes_from(self.lane_table)
 
@@ -497,14 +603,16 @@ class MapService:
         """
         Build the STRtree indexes for position queries, as Apollo's HDMapImpl
         does: complete lane centerlines, junction and crosswalk polygons, and
-        signal and stop-sign stop lines.
+        signal and stop-sign stop lines; and lane boundaries split into marking
+        pieces, for ``get_lane_markings``.
 
         GEOS measures the exact distance to every candidate's whole geometry,
         and coincident lanes keep separate entries. Objects other than lanes may
         lack their geometry; they are left out, so position queries never
         return them.
 
-        :raises ValueError: If a lane centerline, polygon, or stop line is malformed.
+        :raises ValueError: If a lane centerline or boundary curve, polygon, or
+            stop line is malformed.
         """
         self._indexes = {
             "lane": SpatialIndex.build("lane", self.lane_table,
@@ -518,6 +626,32 @@ class MapService:
             "stop sign": SpatialIndex.build("stop sign", self.stop_sign_table,
                                             lambda stop_sign: curves_to_lines(stop_sign.stop_line)),
         }
+        markings = self._lane_markings()
+        self._indexes["lane marking"] = SpatialIndex(markings, STRtree([m.geometry for m in markings]))
+
+    def _lane_markings(self) -> List[LaneMarking]:
+        """
+        Split every lane boundary into marking pieces, in lane table order.
+
+        :returns: The list of LaneMarking
+        :rtype: List[LaneMarking]
+        :raises ValueError: Naming the lane whose boundary curve is malformed.
+        """
+        names = DescriptorBundle(self.descriptor_path).message(
+            "apollo.hdmap.LaneBoundaryType").DESCRIPTOR.enum_types_by_name["Type"].values_by_number
+        markings = []
+        for lane_id, lane in self.lane_table.items():
+            for side, boundary in (("left", lane.left_boundary), ("right", lane.right_boundary)):
+                try:
+                    pieces = split_boundary(boundary)
+                except ValueError as error:
+                    raise ValueError(f"invalid {side} boundary of lane {lane_id!r}: {error}") from error
+                markings.extend(
+                    LaneMarking(lane_id, side, start, end,
+                                tuple(names[t].name if t in names else str(t) for t in piece.types),
+                                boundary.virtual, line)
+                    for start, end, piece, line in pieces)
+        return markings
 
     @property
     def lane_index(self) -> Optional[STRtree]:
@@ -529,13 +663,22 @@ class MapService:
         """
         return None if self._indexes is None else self._indexes["lane"].tree
 
-    def get_lane_coord_and_heading(
-        self, lane_id: str, s: float
-    ) -> Tuple[Point, float]:
-        """Return the centerline point and heading at geometric arc length s.
+    def get_lane_coord_and_heading(self, lane_id: str,
+                                   s: float) -> Tuple[Point, float]:
+        """
+        Return the centerline point and heading at geometric arc length s.
 
         s uses the same centreline distance as get_position(), not Lane.length.
         Headings interpolate between segment midpoints; see CenterlineProfile.
+
+        :param str lane_id: Lane ID.
+        :param float s: Metres along the lane's complete centerline, within
+            ``[0, centerline length]``.
+        :returns: The point on the centerline in map coordinates, and the lane
+            heading there in radians within ``[-pi, pi)``.
+        :rtype: Tuple[Point, float]
+        :raises KeyError: If the map has no such lane.
+        :raises ValueError: If ``s`` is outside the centerline or not finite.
         """
         profile = self._centerline_profile(lane_id)
         length = profile.line.length
@@ -545,12 +688,6 @@ class MapService:
 
         ip = profile.line.interpolate(s)
         return Point(ip.x, ip.y), profile.heading_at(s)
-
-    def get_pose_with_regard_to_lane(self, point: Point) -> float:
-        """Heading of the nearest lane where the point projects onto it."""
-        _validate_point(point)
-        profile = self._centerline_profile(self.get_nearest_lane(point))
-        return profile.heading_at(profile.line.project(point))
 
     def _centerline_profile(self, lane_id: str) -> CenterlineProfile:
         # Derived from immutable lane geometry, so handles sharing a cached
@@ -568,36 +705,10 @@ class MapService:
             raise ValueError("Map has no lanes")
         return lane_id
 
-    def get_nearest_lanes_with_heading(
-        self, point: Point, heading: float
-    ) -> List[str]:
-        """Lanes within kSearchRadius whose heading at the point's projection
-        differs by less than kMaxHeadingDiff, nearest and best aligned first."""
-        _validate_point(point)
-        if not isfinite(heading):
-            raise ValueError("heading must be finite")
-        candidates = []
-        for lane_id in self._index("lane").within(point, self.kSearchRadius):
-            profile = self._centerline_profile(lane_id)
-            # Resolve the closest projection before filtering. A farther segment
-            # of this lane must not qualify it. Ties use the first point along
-            # the full centerline, as in get_position() and the pose query.
-            s = profile.line.project(point)
-            unsigned_diff = abs(normalize_angle(heading - profile.heading_at(s)))
-            if unsigned_diff < self.kMaxHeadingDiff:
-                candidates.append((profile.line.distance(point), unsigned_diff, lane_id))
-        candidates.sort()
-        return [lane_id for _, _, lane_id in candidates]
-
     def _index(self, kind: str) -> SpatialIndex:
         if self._indexes is None:
             raise RuntimeError("Spatial indexes are unavailable; load with load_only=False")
         return self._indexes[kind]
-
-    def _routing_graph(self) -> nx.DiGraph:
-        if self.routing_graph is None:
-            raise RuntimeError("Routing graph is unavailable; load with load_only=False")
-        return self.routing_graph
 
     def get_position(self, point: Point) -> PositionEstimate:
         """Project a point onto the nearest lane's complete centerline."""
@@ -655,26 +766,3 @@ class MapService:
 
     def is_conflict_lanes(self, lane_ids1: List[str], lane_ids2: List[str]) -> bool:
         return self.relations.is_conflict_lanes(lane_ids1, lane_ids2)
-
-    def get_lanes_not_in_junction(self) -> set[str]:
-        junction_lanes = {
-            lane for lanes in self.relations.lanes_at_junction.values() for lane in lanes
-        }
-        return set(self.lane_table) - junction_lanes
-
-    def get_geometric_paths_from(self, lane_id: str, limit: int = 4) -> List[List[str]]:
-        """Infer endpoint-connected paths ending outside junctions.
-
-        This heuristic is separate from the explicit-topology routing graph.
-        ``limit`` is the maximum number of edges, as in ``get_path_from``.
-        """
-        return self.relations.get_geometric_paths_from(lane_id, limit)
-
-    def get_predecessors_for_lane(self, lane_id: str) -> List[str]:
-        return [x.id for x in self.lane_table[lane_id].predecessor_id]
-
-    def get_successors_for_lane(self, lane_id: str) -> List[str]:
-        return [x.id for x in self.lane_table[lane_id].successor_id]
-
-    def get_length_of_lane(self, lane_id: str) -> float:
-        return self.lane_table[lane_id].length

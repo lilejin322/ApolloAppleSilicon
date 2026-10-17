@@ -5,12 +5,15 @@ Common geometry conversion and spatial indexing for map queries and relationship
 from bisect import bisect_right
 from itertools import accumulate
 from math import atan2, hypot, pi
-from typing import Callable, Iterable, List, Mapping, NamedTuple, Optional
+from typing import Callable, Generic, Iterable, List, Mapping, NamedTuple, Optional, Tuple, TypeVar
 
 from google.protobuf.message import Message
 from shapely import STRtree
 from shapely.geometry import LineString, MultiLineString, Point, Polygon
 from shapely.geometry.base import BaseGeometry
+from shapely.ops import substring
+
+T = TypeVar("T")
 
 
 def curve_to_line(curve: Message) -> LineString:
@@ -56,25 +59,53 @@ def curves_to_lines(curves: Iterable[Message]) -> Optional[MultiLineString]:
     return MultiLineString(lines) if lines else None
 
 
-class SpatialIndex(NamedTuple):
+def split_boundary(boundary: Message) -> List[Tuple[float, float, Message, LineString]]:
     """
-    An STRtree over map object geometries and the ID of each, in tree order.
+    Split a lane boundary's curve where its marking changes.
+
+    Each ``LaneBoundaryType`` piece runs from its ``s`` to the next piece's
+    ``s``, or to the end of the curve; ``s`` is clamped to the curve's
+    geometric length. A stretch before the first piece has no marking.
+
+    :param Message boundary: An ``apollo.hdmap.LaneBoundary`` message.
+    :returns: (start s, end s, LaneBoundaryType piece, line) for each piece of
+        positive length; none if the boundary has no curve or no pieces.
+    :rtype: List[Tuple[float, float, Message, LineString]]
+    :raises ValueError: If the curve has fewer than two distinct points.
+    """
+    if not boundary.curve.segment or not boundary.boundary_type:
+        return []
+    line = curve_to_line(boundary.curve)
+    pieces = sorted(boundary.boundary_type, key=lambda piece: piece.s)
+    starts = [min(max(piece.s, 0.0), line.length) for piece in pieces]
+    ends = starts[1:] + [line.length]
+    # Most boundaries have one piece covering the whole curve; substring is slow.
+    return [(start, end, piece, line if (start, end) == (0.0, line.length) else substring(line, start, end))
+            for start, end, piece in zip(starts, ends, pieces) if end > start]
+
+
+class SpatialIndex(NamedTuple, Generic[T]):
+    """
+    An STRtree over map geometries and the item each belongs to, in tree order.
+
+    Items are object IDs, or records such as ``LaneMarking``; they must be
+    orderable, since equally near ones are returned in item order.
     """
 
-    ids: List[str]
+    items: List[T]
     tree: STRtree
 
     @classmethod
     def build(cls, kind: str, objects: Mapping[str, Message],
-              geometry: Callable[[Message], Optional[BaseGeometry]]) -> "SpatialIndex":
+              geometry: Callable[[Message], Optional[BaseGeometry]]) -> "SpatialIndex[str]":
         """
         Index the geometry of every object, in mapping order.
 
         :param str kind: Object kind, for error messages.
         :param Mapping[str, Message] objects: Objects by ID.
         :param geometry: Returns an object's geometry, or None to leave it out.
-        :returns: The index of the objects that have a geometry.
-        :rtype: SpatialIndex
+        :returns: The index of the IDs of the objects that have a geometry.
+        :rtype: SpatialIndex[str]
         :raises ValueError: Naming the first object whose geometry is malformed.
         """
         ids, geometries = [], []
@@ -88,32 +119,33 @@ class SpatialIndex(NamedTuple):
                 geometries.append(shape)
         return cls(ids, STRtree(geometries))
 
-    def within(self, point: Point, distance: float) -> List[str]:
+    def within(self, geometry: BaseGeometry, distance: float) -> List[T]:
         """
-        Return the IDs whose geometry lies within ``distance`` of ``point``.
+        Return the items whose geometry lies within ``distance`` of ``geometry``.
 
-        :param Point point: Query position in map coordinates.
-        :param float distance: Search radius in metres; a polygon containing
-            ``point`` is at distance 0.
-        :returns: IDs nearest first, equally near ones by ID.
-        :rtype: List[str]
+        :param BaseGeometry geometry: Query geometry in map coordinates, such as
+            a point or a vehicle footprint.
+        :param float distance: Search radius in metres; 0 means intersecting,
+            and a polygon containing the query geometry is at distance 0.
+        :returns: Items nearest first, equally near ones in item order.
+        :rtype: List[T]
         """
         geometries = self.tree.geometries
-        found = sorted((geometries[index].distance(point), self.ids[index])
-                       for index in self.tree.query(point, predicate="dwithin", distance=distance))
-        return [object_id for _, object_id in found]
+        found = sorted((geometries[index].distance(geometry), self.items[index])
+                       for index in self.tree.query(geometry, predicate="dwithin", distance=distance))
+        return [item for _, item in found]
 
-    def nearest(self, point: Point) -> Optional[str]:
+    def nearest(self, point: Point) -> Optional[T]:
         """
-        Return the ID whose geometry is nearest to ``point``.
+        Return the item whose geometry is nearest to ``point``.
 
         :param Point point: Query position in map coordinates.
-        :returns: The nearest ID, the earliest in index order among equally near
-            ones (such as coincident lanes), or None for an empty index.
-        :rtype: Optional[str]
+        :returns: The nearest item, the earliest in index order among equally
+            near ones (such as coincident lanes), or None for an empty index.
+        :rtype: Optional[T]
         """
         indices = self.tree.query_nearest(point)
-        return self.ids[min(indices)] if len(indices) else None
+        return self.items[min(indices)] if len(indices) else None
 
 
 def normalize_angle(angle: float) -> float:
