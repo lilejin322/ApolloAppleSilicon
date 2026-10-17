@@ -1,12 +1,17 @@
-"""Derived map relationships; all source objects belong to MapService."""
+"""
+Derived map relationships; all source objects belong to MapService.
+
+Author: Lejin Li, Kyushu University & National Institute of Informatics, Japan
+Contact: li.lejin.147@s.kyushu-u.ac.jp
+"""
 
 from collections import defaultdict
 from functools import cached_property
-from math import atan2, cos, degrees, isfinite, sin
+from math import atan2, cos, degrees, hypot, isfinite, sin
 from typing import TYPE_CHECKING, Iterator, Mapping
-
 import networkx as nx
 from google.protobuf.message import Message
+from shapely.geometry import LineString, Point
 from shapely.ops import substring
 
 from .geometry import curve_to_line, normalize_angle
@@ -267,17 +272,58 @@ class MapRelations:
         - crossing approaches: NE;
         - opposing approaches: EQ, as left turns yield to oncoming traffic, unless
           movements cross where neither turns left (a skewed junction): NE.
+
+        NE evidence takes precedence across junctions. EQ candidates merge
+        groups only if no NE pair would end up inside a group; same-lane and
+        same-approach candidates take priority over opposing approaches.
+        Rejected EQ candidates become NE so configuration generation can
+        separate their phases. Edges retain all original junction evidence.
         """
         graph = nx.Graph()
-        graph.add_nodes_from(self._service.signal_table)
-        for junction_id, signals in self.signals_at_junction.items():
+        graph.add_nodes_from(sorted(self._service.signal_table))
+        evidence = defaultdict(list)
+        for junction_id, signals in sorted(self.signals_at_junction.items()):
             paths = {signal: self.movement_paths(signal, junction_id) for signal in signals}
             for index, left in enumerate(signals):
                 for right in signals[index + 1:]:
                     relation = self._relation(left, right, paths)
                     if relation is not None:
-                        graph.add_edge(left, right, relation=relation)
+                        evidence[left, right].append((junction_id, left, right, relation))
+        for (left, right), records in sorted(evidence.items()):
+            graph.add_edge(left, right,
+                           relation="NE" if any(record[3] == "NE" for record in records) else "EQ",
+                           junctions=tuple(record[0] for record in records),
+                           evidence=tuple(records))
+        self._resolve_signal_groups(graph)
         return graph
+
+    def _resolve_signal_groups(self, graph: nx.Graph) -> None:
+        """Resolve inferred EQ preferences into deterministic groups respecting every NE edge."""
+        def priority(pair: tuple[str, str]) -> tuple[int, float, str, str]:
+            left, right = pair
+            if self.lanes_controlled_by_signal[left] == self.lanes_controlled_by_signal[right]:
+                return 0, 0.0, left, right
+            between = abs(degrees(normalize_angle(self._approach(left) - self._approach(right))))
+            # Quantize ranking noise so global rotation preserves tie-breaking.
+            return (1 if between < SAME_APPROACH else 2,
+                    round(min(between, 180 - between), 9), left, right)
+
+        groups = {signal: {signal} for signal in graph}
+        candidates = sorted(((a, b) for a, b, r in graph.edges(data="relation") if r == "EQ"),
+                            key=priority)
+        for left, right in candidates:
+            first, second = groups[left], groups[right]
+            if first is second:
+                continue
+            if any(graph.has_edge(a, b) and graph[a][b]["relation"] == "NE"
+                   for a in first for b in second):
+                continue
+            merged = first | second
+            for signal in merged:
+                groups[signal] = merged
+        for left, right, data in graph.edges(data=True):
+            if data["relation"] == "EQ" and groups[left] is not groups[right]:
+                data["relation"] = "NE"
 
     def _relation(self, left: str, right: str, paths: Mapping[str, list[tuple[str, ...]]]) -> str | None:
         left_lanes = self.lanes_controlled_by_signal[left]
@@ -286,33 +332,72 @@ class MapRelations:
             return "EQ"
         if not left_lanes or not right_lanes:
             return None
-        between = abs(degrees(normalize_angle(self._approach(left) - self._approach(right))))
+        left_direction, right_direction = self._approach(left), self._approach(right)
+        if left_direction is None or right_direction is None:
+            return None
+        between = abs(degrees(normalize_angle(left_direction - right_direction)))
         if between < SAME_APPROACH:
             return "EQ"
         if between <= OPPOSING_APPROACH:
             return "NE"
-        unyielding = any(not self._turns_left(p) and not self._turns_left(q)
-                         and self.is_conflict_lanes(list(p), list(q))
+        unyielding = any(not self._turns_left(left, p) and not self._turns_left(right, q)
+                         and self._movements_conflict(left, p, right, q)
                          for p in paths[left] for q in paths[right])
         return "NE" if unyielding else "EQ"
 
-    def _direction(self, lane_id: str, *, at_end: bool) -> float:
-        """Direction in radians of a lane's first or last centerline segment."""
-        coords = self._service.get_lane_central_curve_by_id(lane_id).coords
-        (x1, y1), (x2, y2) = (coords[-2], coords[-1]) if at_end else (coords[0], coords[1])
+    def _direction(self, lane_id: str, *, at_end: bool = False, s: float = 0.0) -> float:
+        """Segment direction at geometric s, using the outgoing segment at a vertex."""
+        coords = list(self._service.get_lane_central_curve_by_id(lane_id).coords)
+        if not at_end:
+            travelled = 0.0
+            for (x1, y1), (x2, y2) in zip(coords, coords[1:]):
+                travelled += hypot(x2 - x1, y2 - y1)
+                if s < travelled:
+                    return atan2(y2 - y1, x2 - x1)
+        (x1, y1), (x2, y2) = coords[-2], coords[-1]
         return atan2(y2 - y1, x2 - x1)
 
-    def _approach(self, signal_id: str) -> float:
-        """Mean entry direction in radians of the lanes a signal controls."""
-        directions = [self._direction(lane_id, at_end=False)
-                      for lane_id in self.lanes_controlled_by_signal[signal_id]]
-        return atan2(sum(map(sin, directions)), sum(map(cos, directions)))
+    @cached_property
+    def _signal_entries(self) -> dict[tuple[str, str], float]:
+        """Earliest finite signal overlap position on each controlled lane."""
+        entries = {}
+        for signal_id, records in self.signal_lane_overlaps.items():
+            for record in records:
+                start = record.start_s
+                if start is None or not isfinite(start):
+                    continue
+                length = self._service.get_lane_central_curve_by_id(record.lane_id).length
+                if 0 <= start <= length:
+                    key = signal_id, record.lane_id
+                    entries[key] = min(entries.get(key, start), start)
+        return entries
 
-    def _turns_left(self, path: tuple[str, ...]) -> bool:
-        """Whether a movement turns left or makes a U-turn, judged over its whole path."""
+    def _approach(self, signal_id: str) -> float | None:
+        """Mean direction at signal overlaps, or None if the direction is unknown."""
+        lanes = self.lanes_controlled_by_signal[signal_id]
+        if not lanes or any((signal_id, lane) not in self._signal_entries for lane in lanes):
+            return None
+        directions = [self._direction(lane, s=self._signal_entries[signal_id, lane]) for lane in lanes]
+        x, y = sum(map(cos, directions)), sum(map(sin, directions))
+        return None if hypot(x, y) < 1e-9 * len(lanes) else atan2(y, x)
+
+    def _turns_left(self, signal_id: str, path: tuple[str, ...]) -> bool:
+        """Whether a movement turns left or makes a U-turn after its signal overlap."""
         turn = degrees(normalize_angle(self._direction(path[-1], at_end=True)
-                                       - self._direction(path[0], at_end=False)))
+                                       - self._direction(path[0], s=self._signal_entries[signal_id, path[0]])))
         return turn > LEFT_TURN or turn < -OPPOSING_APPROACH
+
+    def _movement_curves(self, signal_id: str, path: tuple[str, ...]) -> Iterator[tuple[str, LineString | Point]]:
+        """Lane geometries after the signal, excluding the uncontrolled upstream prefix."""
+        for index, lane_id in enumerate(path):
+            line = self._service.get_lane_central_curve_by_id(lane_id)
+            if index == 0:
+                line = substring(line, self._signal_entries[signal_id, lane_id], line.length)
+            yield lane_id, line
+
+    def _movements_conflict(self, left: str, p: tuple[str, ...], right: str, q: tuple[str, ...]) -> bool:
+        left_curves, right_curves = list(self._movement_curves(left, p)), list(self._movement_curves(right, q))
+        return any(a != b and x.intersects(y) for a, x in left_curves for b, y in right_curves)
 
     def get_signals_wrt(self, signal_id: str) -> list[tuple[str, str]]:
         if signal_id not in self._service.signal_table:
