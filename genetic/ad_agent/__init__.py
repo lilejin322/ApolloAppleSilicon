@@ -3,7 +3,8 @@ Route-aware crossover and mutation of ``ADAgent`` chromosomes.
 
 ``cx_ad_agent`` and ``mut_ad_agent`` recombine and mutate routes through the
 agent's ``RouteSpace``; every child they return is valid and within the
-configured bounds.
+configured route-length and start-time bounds. Individual operators only
+propose candidates and require validation by their caller.
 """
 
 from .common import ADOperatorConfig

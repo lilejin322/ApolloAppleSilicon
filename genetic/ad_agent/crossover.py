@@ -1,7 +1,7 @@
 """
 Route-aware crossover of ADAgent chromosomes.
 
-Unlike META-V2V, which only exchanges start positions or times between
+Unlike DoppelTest / ScenoRITA which only exchanges start positions or times between
 agents with identical routes, these operators recombine the routes
 themselves. Each operator returns one child of ``first`` and ``second``, or
 None when it does not apply; ``cx_ad_agent`` picks operators by weight and
@@ -11,6 +11,7 @@ Pure lane-route recombination is shared with NPCs through ``route_operators``.
 
 from dataclasses import replace
 from random import Random
+from typing import Tuple
 
 from ...scenario import ADAgent, RouteSpace
 from .. import route_operators
@@ -20,11 +21,18 @@ from .common import ADOperatorConfig, acceptable, on_route
 
 def cx_shared_lane(first: ADAgent, second: ADAgent, space: RouteSpace, rng: Random) -> ADAgent | None:
     """
-    Join ``first``'s route up to a lane both routes use with ``second``'s route from it.
+    Join the first parent's prefix to the second parent's suffix at a shared lane.
 
-    The child starts like ``first`` (start s and start time) and ends like ``second``.
+    Keep ``first.start_t``, ``first.route.start_s``, and ``second.route.end_s``.
+    Prefer a join near a target length drawn between the parents' lengths.
+    The caller must check the resulting agent against operator bounds.
 
-    :returns: The child, or None if the routes share no lane that joins without repeats.
+    :param ADAgent first: Leading parent supplying the route prefix and initial start time.
+    :param ADAgent second: Other parent supplying the route suffix or replacement start time.
+    :param RouteSpace space: Ego route space providing lane connectivity, geometry, and validity rules.
+    :param Random rng: Random source used to sample proposals; reuse a seeded instance for reproducibility.
+    :returns: A candidate, or None if no shared-lane join avoids repeated lanes.
+    :rtype: ADAgent | None
     """
     return on_route(first, route_operators.cx_shared_lane(first.route, second.route, space, rng))
 
@@ -32,14 +40,21 @@ def cx_shared_lane(first: ADAgent, second: ADAgent, space: RouteSpace, rng: Rand
 def cx_bridge(first: ADAgent, second: ADAgent, space: RouteSpace, rng: Random,
               config: ADOperatorConfig = ADOperatorConfig()) -> ADAgent | None:
     """
-    Join ``first``'s head to ``second``'s tail through a lane path between them.
+    Join the first parent's prefix to the second parent's suffix through a lane path.
 
-    A lane of ``first`` and a lane of ``second`` reachable from it within
-    ``config.max_length`` are chosen; one of the cheapest lane paths between
-    them becomes the bridge. Routes need not meet.
+    Keep the first parent's start position and time and the second parent's
+    end position. ``space`` supplies legal lane paths; ``config`` controls
+    the search budget and optional parent-length restriction. Prefer a bridge
+    near a target length drawn from the parents' length range with slack.
+    The caller must validate the complete candidate and its bounds.
 
-    :returns: The child, or None if no lane pair is reachable or the bridge
-        would repeat a lane.
+    :param ADAgent first: Leading parent supplying the route prefix and initial start time.
+    :param ADAgent second: Other parent supplying the route suffix or replacement start time.
+    :param RouteSpace space: Ego route space providing lane connectivity, geometry, and validity rules.
+    :param Random rng: Random source used to sample proposals; reuse a seeded instance for reproducibility.
+    :param ADOperatorConfig config: Bridge search limits and optional restriction to the parents' length range.
+    :returns: A candidate, or None if no bridge satisfies the search constraints.
+    :rtype: ADAgent | None
     """
     return on_route(first, route_operators.cx_bridge(first.route, second.route, space, rng, config))
 
@@ -48,7 +63,10 @@ def cx_start_time(first: ADAgent, second: ADAgent) -> ADAgent | None:
     """
     Give ``first`` the start time of ``second``.
 
+    :param ADAgent first: Parent whose route is preserved.
+    :param ADAgent second: Parent donating its start time, in scenario seconds.
     :returns: The child, or None if the start times are equal.
+    :rtype: ADAgent | None
     """
     if first.start_t == second.start_t:
         return None
@@ -56,18 +74,35 @@ def cx_start_time(first: ADAgent, second: ADAgent) -> ADAgent | None:
 
 
 def cx_ad_agent(first: ADAgent, second: ADAgent, space: RouteSpace, rng: Random,
-                config: ADOperatorConfig = ADOperatorConfig()) -> tuple[ADAgent, ADAgent]:
+                config: ADOperatorConfig = ADOperatorConfig()) -> Tuple[ADAgent, ADAgent]:
     """
-    Return two children: one led by ``first``, one led by ``second``.
+    Return two accepted children, led by ``first`` and ``second`` respectively.
 
-    Each child comes from an operator drawn by ``config.crossover_weights``;
-    inapplicable or failing operators are skipped. A child must be valid,
-    within the length bounds, and differ from both parents; when no operator
-    succeeds, the leading parent is returned unchanged.
+    Draw positive-weight operators without replacement using ``rng``, with
+    up to ``config.attempts`` tries each. Accept only candidates different
+    from both parents whose routes are valid and whose driven lengths and
+    start times satisfy ``config``. If all proposals fail, return the leading
+    parent unchanged only if it satisfies those same bounds.
 
-    :rtype: tuple[ADAgent, ADAgent]
+    :param ADAgent first: Leading parent supplying the route prefix and initial start time.
+    :param ADAgent second: Other parent supplying the route suffix or replacement start time.
+    :param RouteSpace space: Route space defining legal ego routes.
+    :param Random rng: Random source shared by operator selection and proposals.
+    :param ADOperatorConfig config: Operator weights, retry limits, and bounds.
+    :raises ValueError: If no proposal is accepted and the leading parent is invalid.
+    :returns: Children in the same leading-parent order as the inputs.
+    :rtype: Tuple[ADAgent, ADAgent]
     """
     def child_of(lead: ADAgent, other: ADAgent) -> ADAgent:
+        """
+        Return an accepted child of ``lead``, falling back to ``lead`` only if acceptable.
+
+        :param ADAgent lead: Parent supplying the base agent and the unchanged fallback.
+        :param ADAgent other: Parent supplying the route suffix or replacement start time.
+        :returns: An accepted child, or ``lead`` unchanged if it remains acceptable.
+        :raises ValueError: If no candidate is accepted and ``lead`` is unacceptable.
+        :rtype: ADAgent
+        """
         operators = {
             "shared_lane": lambda: cx_shared_lane(lead, other, space, rng),
             "bridge": lambda: cx_bridge(lead, other, space, rng, config),
