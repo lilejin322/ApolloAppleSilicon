@@ -22,6 +22,38 @@ class ADOperatorConfig(OperatorConfig):
     must belong to ``CROSSOVERS`` or ``MUTATIONS``; omitted or zero-weight
     operators are disabled. Positive weights control selection order, with
     up to ``attempts`` tries per selected operator.
+
+    :param float min_length: Minimum accepted driven route length in metres; defaults to 50.
+    :param float max_length: Maximum accepted driven route length and lane-path search
+        distance in metres; defaults to 500. Must be finite and at least ``min_length``.
+    :param float max_start_t: Latest accepted start time in scenario seconds; defaults to 10.
+    :param int attempts: Maximum tries per selected operator; defaults to 5, minimum 1.
+    :param Mapping[str, float] crossover_weights: Relative selection weights for
+        ``shared_lane``, ``bridge``, and ``start_time``; defaults to 3, 2, and 1.
+        Omitted or zero-weight operators are disabled.
+    :param Mapping[str, float] mutation_weights: Relative selection weights for
+        ``reroute``, ``extend_or_truncate``, ``lane_change``, ``s``, and ``start_t``;
+        defaults to 3, 2, 2, 2, and 1. Omitted or zero-weight operators are disabled.
+    :param float sigma_s: Gaussian endpoint-step standard deviation in metres;
+        defaults to 10. Steps are clamped to the endpoint lane.
+    :param float sigma_t: Gaussian start-time-step standard deviation in seconds;
+        defaults to 1. Steps are clamped to ``[0, max_start_t]``.
+    :param int bridge_candidates: Number of cheapest lane paths considered per bridge
+        search; defaults to 5, minimum 1. Rerouting requests one extra path to
+        allow for excluding the current stretch.
+    :param float max_detour: Maximum relative extra length of a rerouted stretch
+        over the shortest of the original stretch and its alternatives;
+        defaults to 0.3. Nonnegative; ``inf`` disables this restriction.
+    :param float lane_change_odds: Acceptance factor in ``[0, 1]`` for additional
+        lane changes; defaults to 0.25. A proposal adding ``k`` lane changes is
+        retained with probability ``lane_change_odds ** k``.
+    :param bool bridge_within_parents: Restrict bridged route lengths to the parents'
+        length range widened by ``route_operators.BRIDGE_BOUND_SLACK`` times
+        the longer parent's length; defaults to False.
+    :raises ValueError: If inherited validation rejects length bounds, nonfinite
+        or negative time/step values, retry/search counts below 1, negative
+        detour limits, lane-change odds outside ``[0, 1]``, unknown operator
+        names, or nonfinite or negative weights.
     """
 
     CROSSOVERS: ClassVar[Tuple[str, ...]] = ("shared_lane", "bridge", "start_time")

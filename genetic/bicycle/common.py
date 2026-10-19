@@ -11,7 +11,7 @@ share one route space.
 
 from dataclasses import dataclass, field, replace
 from random import Random
-from typing import ClassVar, Mapping, Sequence
+from typing import ClassVar, Mapping, Sequence, Tuple, List
 
 from ...scenario import RIDER_SPECS, BicycleAgent, InvalidRoute, LaneRoute, RiderType, RouteSpace
 from ...scenario.bicycle import PivotKey, starts_on_bike_lane
@@ -30,9 +30,51 @@ class BicycleOperatorConfig(ReplayOperatorConfig):
     """
     Rates, weights, bounds, and step sizes for BicycleAgent crossover and mutation.
 
-    ``min_length`` and ``max_length`` bound the replay path, as in
-    ``BicycleAgent.random``. The other inherited fields are as in ``ReplayOperatorConfig``.
+    Length bounds apply to the bicycle's replay path. Parameters below include
+    all fields inherited from ``ReplayOperatorConfig`` and ``OperatorConfig``;
+    bicycle-specific defaults are noted where those fields are overridden.
 
+    :param float min_length: Minimum accepted replay-path length in metres; defaults to 30.
+    :param float max_length: Maximum accepted replay-path length and lane-path search
+        distance in metres; defaults to 300.
+    :param float max_start_t: Latest accepted start time, in seconds.
+    :param int attempts: Tries per operator before the next operator is drawn.
+    :param Mapping[str, float] crossover_weights: Relative operator-selection weights
+        within each selected gene. Defaults: ``shared_lane`` 3, ``bridge`` 2, and
+        ``turn_dwell``, ``rider_type``, ``speed_profile``, ``drive_style``, ``start_time`` 1.
+        Missing or zero-weight operators are disabled.
+    :param Mapping[str, float] mutation_weights: Relative operator-selection weights
+        within each selected gene. Defaults: ``reroute`` 3; ``extend_or_truncate``,
+        ``s``, ``speed`` 2; ``turn_dwell``, ``rider_type``, ``speed_point``,
+        ``drive_style``, ``start_t`` 1; ``stop`` 0. Missing or zero-weight operators
+        are disabled.
+    :param float sigma_s: Standard deviation of route position steps, in metres.
+    :param float sigma_t: Standard deviation of start time steps, in seconds.
+    :param int bridge_candidates: Cheapest lane paths considered when bridging or rerouting.
+    :param float max_detour: A rerouted stretch is at most this share longer than the
+        shortest of it and its alternatives (``inf`` disables). Real routes are
+        near-shortest; unbounded alternatives made routes loop and grow over generations.
+    :param float lane_change_odds: Odds ``p / (1 - p)`` of a lane change where one is
+        possible, as in generation (``lane_change_probability`` 0.2 -> 0.25). Lane-change
+        mutation accepts a child with ``k`` more lane changes with probability
+        ``lane_change_odds ** k``, so lane changes do not pile up over generations.
+    :param bool bridge_within_parents: Restrict bridged route lengths to the parents'
+        length range widened by ``route_operators.BRIDGE_BOUND_SLACK`` times the
+        longer parent's length; defaults to True.
+    :param Mapping[str, float] crossover_rates: Per-gene crossover probabilities
+        for ``route``, ``turn_dwell``, ``rider_type``, ``speed_profile``, and ``start_t``;
+        each defaults to 0.5. Missing genes are disabled.
+    :param Mapping[str, float] mutation_rates: Per-gene mutation probabilities
+        for the same genes as ``crossover_rates``; each defaults to 0.3.
+        Missing genes are disabled.
+    :param float sigma_speed: Standard deviation of target speed steps, in m/s.
+    :param float min_speed: Lowest nonzero target speed drawn or stepped to,
+        in m/s; defaults to 1.
+    :param float max_dwell: Longest stop drawn or stepped to, in seconds.
+    :param float min_arrival_t: Earliest route-end time in scenario seconds; when positive,
+        the agent must also start before it. Zero disables the horizon check.
+    :param float route_swap_rate: Chance that a route crossover whose operators
+        all failed takes the other parent's whole route instead.
     :param Mapping[str, float] rider_type_weights: Rider composition that rider-type
         mutation resamples from (``realism.RIDER_MIX`` by default).
     :param float sigma_turn_dwell: Standard deviation of turn wait steps, in seconds.
@@ -43,23 +85,31 @@ class BicycleOperatorConfig(ReplayOperatorConfig):
         can otherwise move the start between the two, and whichever move succeeds
         more often would shift the population's share of bike-lane starts away
         from ``BicycleAgent.random``'s ``bike_lane_start_share``.
+    :raises ValueError: If inherited bounds, weights, gene names, or probabilities
+        are invalid, or speed, dwell, or arrival-time parameters are nonfinite
+        or negative. Turn-dwell parameters must also be finite and nonnegative.
     """
 
-    GENES: ClassVar[tuple[str, ...]] = GENES
-    CROSSOVERS: ClassVar[tuple[str, ...]] = (
+    GENES: ClassVar[Tuple[str, ...]] = GENES
+    """Bicycle gene names, in the order each variation call processes them."""
+    CROSSOVERS: ClassVar[Tuple[str, ...]] = (
         "shared_lane", "bridge", "turn_dwell", "rider_type", "speed_profile", "drive_style", "start_time")
-    MUTATIONS: ClassVar[tuple[str, ...]] = (
+    """Supported crossover names used as keys in ``crossover_weights``."""
+    MUTATIONS: ClassVar[Tuple[str, ...]] = (
         "reroute", "extend_or_truncate", "s", "turn_dwell", "rider_type", "speed", "speed_point", "stop",
         "drive_style", "start_t")
+    """Supported mutation names used as keys in ``mutation_weights``."""
     CROSSOVER_GENES: ClassVar[Mapping[str, str]] = {
         "shared_lane": "route", "bridge": "route", "turn_dwell": "turn_dwell", "rider_type": "rider_type",
         "speed_profile": "speed_profile", "drive_style": "speed_profile", "start_time": "start_t",
     }
+    """Map each crossover operator to the bicycle gene it changes."""
     MUTATION_GENES: ClassVar[Mapping[str, str]] = {
         "reroute": "route", "extend_or_truncate": "route", "s": "route", "turn_dwell": "turn_dwell",
         "rider_type": "rider_type", "speed": "speed_profile", "speed_point": "speed_profile",
         "stop": "speed_profile", "drive_style": "speed_profile", "start_t": "start_t",
     }
+    """Map each mutation operator to the bicycle gene it changes."""
 
     min_length: float = 30.0
     max_length: float = 300.0
@@ -81,12 +131,26 @@ class BicycleOperatorConfig(ReplayOperatorConfig):
     bridge_within_parents: bool = True
 
     def __post_init__(self) -> None:
+        """
+        Validate inherited settings and require finite, nonnegative turn-dwell parameters.
+        """
         super().__post_init__()
         require_nonnegative(sigma_turn_dwell=self.sigma_turn_dwell, max_turn_dwell=self.max_turn_dwell)
 
 
 def acceptable(space: RouteSpace, agent: BicycleAgent, config: BicycleOperatorConfig) -> bool:
-    """Whether the agent is valid in the space, with its replay path and start time in bounds."""
+    """
+    Check trajectory validity, replay-path length, start time, and the optional arrival horizon.
+
+    :param RouteSpace space: Bicycle route space used to construct and validate the trajectory.
+    :param BicycleAgent agent: Candidate whose trajectory and timing are checked.
+    :param BicycleOperatorConfig config: Inclusive replay-path length bounds in metres
+        and maximum start time in seconds. A positive ``min_arrival_t`` also requires
+        the agent to start before that time and arrive at or after it; zero disables this check.
+    :returns: True if all checks pass; False if trajectory construction raises
+        ``InvalidRoute`` or any length or timing bound is violated.
+    :rtype: bool
+    """
     if agent.start_t > config.max_start_t:
         return False
     try:
@@ -99,7 +163,18 @@ def acceptable(space: RouteSpace, agent: BicycleAgent, config: BicycleOperatorCo
 
 def keeps_start(space: RouteSpace, candidate: BicycleAgent, parent: BicycleAgent,
                 config: BicycleOperatorConfig) -> bool:
-    """Whether ``candidate`` starts on the same kind of lane as ``parent`` (``keep_start_kind``)."""
+    """
+    Whether ``candidate`` starts on the same kind of lane as ``parent`` (``keep_start_kind``).
+
+    :param RouteSpace space: Route space used to classify each route's start lane.
+    :param BicycleAgent candidate: Proposed child whose start-lane kind is checked.
+    :param BicycleAgent parent: Leading parent supplying the reference start-lane kind.
+    :param BicycleOperatorConfig config: Controls whether start-lane kind must be
+        preserved through ``keep_start_kind``.
+    :returns: True if the check is disabled or both agents start on the same kind
+        of lane (bike lane or road); otherwise False.
+    :rtype: bool
+    """
     return (not config.keep_start_kind
             or starts_on_bike_lane(space, candidate.route) == starts_on_bike_lane(space, parent.route))
 
@@ -107,7 +182,28 @@ def keeps_start(space: RouteSpace, candidate: BicycleAgent, parent: BicycleAgent
 def on_route(agent: BicycleAgent, route: LaneRoute | None, space: RouteSpace, rng: Random,
              config: BicycleOperatorConfig, *, keep: Mapping[PivotKey, float] | None = None,
              ) -> BicycleAgent | None:
-    """``agent`` on a proposed ``route`` with repaired turn waits, or None."""
+    """
+    ``agent`` on a proposed ``route`` with repaired turn waits, or None.
+
+    Speed-profile positions are rebased onto the proposed route. The rider type
+    and start time are preserved; operator length and timing bounds are not checked.
+
+    :param BicycleAgent agent: Source agent supplying the rider type, speed profile,
+        start time, and default turn waits.
+    :param LaneRoute | None route: Proposed lane route, or None if no route was produced.
+    :param RouteSpace space: Bicycle route space used to locate pivots, rebase the
+        speed profile, and validate the resulting agent.
+    :param Random rng: Random source for new turn waits, drawn uniformly from
+        ``[0, config.max_turn_dwell]``.
+    :param BicycleOperatorConfig config: Supplies ``max_turn_dwell``, the upper bound
+        in seconds for newly sampled turn waits.
+    :param Mapping[PivotKey, float] | None keep: Turn waits in seconds to preserve,
+        keyed by connector lane ID and pivot index. None uses the source agent's
+        waits; an empty mapping resamples every wait on the proposed route.
+    :returns: An agent with the proposed route, repaired turn waits, and rebased
+        speed profile; None if ``route`` is None or ``with_route`` raises ``InvalidRoute``.
+    :rtype: BicycleAgent | None
+    """
     if route is None:
         return None
     try:
@@ -122,6 +218,15 @@ def retyped(agent: BicycleAgent, rider_type: RiderType) -> BicycleAgent:
     quantile of the new type's speed prior (``realism.mapped_speed``), within
     the type's maximum. Only clamping, and bicycles retyped to e-bikes kept
     bicycle pace while e-bikes retyped to bicycles all rode at the bicycle maximum.
+
+    :param BicycleAgent agent: Source agent whose positive target speeds are mapped;
+        stop points, route, turn waits, and start time are preserved.
+    :param RiderType rider_type: Target rider type supplying the speed prior and
+        maximum speed used to map and clamp positive target speeds.
+    :returns: A copy with the target rider type and mapped speed profile, or the
+        original agent if its rider type already matches. Route and trajectory
+        validity for the new rider type are not checked here.
+    :rtype: BicycleAgent
     """
     if rider_type is agent.rider_type:
         return agent
@@ -133,7 +238,7 @@ def retyped(agent: BicycleAgent, rider_type: RiderType) -> BicycleAgent:
 
 def rebalance_rider_types(population: Sequence[BicycleAgent], space: RouteSpace, rng: Random,
                           config: BicycleOperatorConfig = BicycleOperatorConfig(), *,
-                          redraw: bool = True) -> list[BicycleAgent]:
+                          redraw: bool = True) -> List[BicycleAgent]:
     """
     Restore a population's rider mix to ``config.rider_type_weights``, as
     ``npc_agent.rebalance_vehicle_types`` does for vehicles. Call it once per
@@ -147,7 +252,22 @@ def rebalance_rider_types(population: Sequence[BicycleAgent], space: RouteSpace,
     replaced by a fresh random agent of the short type that starts on the same
     kind of lane (bike lane or road), so the bike-lane start share is kept.
 
-    :returns: A new list; agents that changed are new objects.
+    :param Sequence[BicycleAgent] population: Agents to rebalance without changing
+        the input sequence or its size.
+    :param RouteSpace space: Bicycle route space used to validate retyped agents
+        and generate replacement routes.
+    :param Random rng: Random source for donor ordering and replacement generation.
+    :param BicycleOperatorConfig config: Supplies the target rider-type weights,
+        replacement-generation settings, and acceptance bounds. Positive weights
+        are normalized into integer target counts, allocating leftover slots by
+        largest fractional remainder; keys must name members of ``RiderType``.
+    :param bool redraw: Allow fresh-agent generation when no donor can be retyped
+        acceptably, preserving the donor's start-lane kind; False only permits retyping.
+    :returns: A new list of the same size; changed agents are new objects and
+        unchanged agents are reused. Empty populations or weights with no positive
+        entries return a shallow copy. Types that cannot be filled are skipped,
+        so the resulting mix may still differ from the target.
+    :rtype: List[BicycleAgent]
     """
     offered = {name: weight for name, weight in config.rider_type_weights.items() if weight > 0}
     population = list(population)
@@ -189,7 +309,23 @@ def rebalance_rider_types(population: Sequence[BicycleAgent], space: RouteSpace,
 
 def _fresh(space: RouteSpace, rider_type: RiderType, rng: Random, config: BicycleOperatorConfig,
            on_bike_lane: bool, attempts: int = 20) -> BicycleAgent | None:
-    """A random acceptable agent of ``rider_type`` starting on a bike lane or the road, or None."""
+    """
+    A random acceptable agent of ``rider_type`` starting on a bike lane or the road, or None.
+
+    :param RouteSpace space: Bicycle route space used to generate and validate agents.
+    :param RiderType rider_type: Required rider type for the new agent.
+    :param Random rng: Random source used by ``BicycleAgent.random``.
+    :param BicycleOperatorConfig config: Supplies generation length bounds, maximum
+        start time, and minimum speed, plus the bounds checked by ``acceptable``.
+    :param bool on_bike_lane: Require a bike-lane start when True, or a road start
+        when False; the generated route's start kind is checked explicitly.
+    :param int attempts: Maximum calls to ``BicycleAgent.random``; defaults to 20.
+        Nonpositive values make no attempts and return None.
+    :returns: The first acceptable agent with the required start-lane kind, or None
+        if attempts are exhausted or generation raises ``RuntimeError``. A generation
+        ``RuntimeError`` stops the search immediately.
+    :rtype: BicycleAgent | None
+    """
     for _ in range(attempts):
         try:
             agent = BicycleAgent.random(space, rng, rider_type=rider_type, max_start_t=config.max_start_t,

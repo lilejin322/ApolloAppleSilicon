@@ -49,7 +49,8 @@ class OperatorConfig:
         mutation accepts a child with ``k`` more lane changes with probability
         ``lane_change_odds ** k``, so lane changes do not pile up over generations.
     :param bool bridge_within_parents: Bridge crossover keeps only children whose
-        length lies in the parents' range widened by ``BRIDGE_LENGTH_SLACK``. Where
+        length lies in the parents' range widened by ``BRIDGE_BOUND_SLACK`` times
+        the longer parent's length. Where
         parents rarely meet, the only bridges are long detours, and bridged children
         grew routes by a step (shalun bicycles on curb lanes: +27 m per child, median
         150 -> 190 m in five generations). Off by default: vehicle routes stay stable
@@ -127,11 +128,34 @@ class ReplayOperatorConfig(OperatorConfig):
     """
     Gene rates and speed-profile steps for agents that replay a trajectory.
 
-    Subclasses name their genes in ``GENES``, in the order ``vary`` changes
-    them, and map each operator to the gene it changes in
-    ``CROSSOVER_GENES`` and ``MUTATION_GENES``. The inherited fields are as
-    in ``OperatorConfig``.
+    Subclasses declare genes in ``GENES`` and map operators to them through
+    ``CROSSOVER_GENES`` and ``MUTATION_GENES``. ``vary`` first selects each gene
+    by its rate, then selects its operators by weight. The parameters below
+    include all fields inherited from ``OperatorConfig``.
 
+    :param float min_length: Shortest accepted length of a child route, in metres.
+    :param float max_length: Longest accepted length of a child route, in metres.
+    :param float max_start_t: Latest accepted start time, in seconds.
+    :param int attempts: Tries per operator before the next operator is drawn.
+    :param Mapping[str, float] crossover_weights: Relative chance of each crossover.
+    :param Mapping[str, float] mutation_weights: Relative chance of each mutation.
+    :param float sigma_s: Standard deviation of route position steps, in metres.
+    :param float sigma_t: Standard deviation of start time steps, in seconds.
+    :param int bridge_candidates: Cheapest lane paths considered when bridging or rerouting.
+    :param float max_detour: A rerouted stretch is at most this share longer than the
+        shortest of it and its alternatives (``inf`` disables). Real routes are
+        near-shortest; unbounded alternatives made routes loop and grow over generations.
+    :param float lane_change_odds: Odds ``p / (1 - p)`` of a lane change where one is
+        possible, as in generation (``lane_change_probability`` 0.2 -> 0.25). Lane-change
+        mutation accepts a child with ``k`` more lane changes with probability
+        ``lane_change_odds ** k``, so lane changes do not pile up over generations.
+    :param bool bridge_within_parents: Bridge crossover keeps only children whose
+        length lies in the parents' range widened by ``BRIDGE_BOUND_SLACK`` times
+        the longer parent's length. Where
+        parents rarely meet, the only bridges are long detours, and bridged children
+        grew routes by a step (shalun bicycles on curb lanes: +27 m per child, median
+        150 -> 190 m in five generations). Off by default: vehicle routes stay stable
+        without it.
     :param Mapping[str, float] crossover_rates: Chance, per gene in ``GENES``,
         that a child takes it from the other parent; missing genes never cross.
     :param Mapping[str, float] mutation_rates: Chance, per gene, that it mutates.
@@ -142,6 +166,9 @@ class ReplayOperatorConfig(OperatorConfig):
         the agent must also start before it. Zero disables the horizon check.
     :param float route_swap_rate: Chance that a route crossover whose operators
         all failed takes the other parent's whole route instead.
+    :raises ValueError: If inherited bounds, weights, gene names, or probabilities
+        are invalid, or speed, dwell, or arrival-time parameters are nonfinite
+        or negative.
     """
 
     GENES: ClassVar[tuple[str, ...]] = ()
