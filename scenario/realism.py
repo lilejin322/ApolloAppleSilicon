@@ -5,8 +5,8 @@ the genetic operators so that variation keeps them (no drift).
 Cruise speeds. A vehicle's target speed is drawn relative to the lane speed
 limit where it applies (``reference_speed``): most drivers cruise at
 0.7-1.0 of the limit, around a type-dependent mean (trucks and buses lower),
-and a minority (``SLOW_SHARE``) is slower. Riders' targets are absolute
-(bike-lane limits rarely bind). ``draw_speed`` samples this prior and
+and a minority (``SLOW_SHARE``) is slower. Riders' and walkers' targets are
+absolute (bike-lane limits rarely bind; walkers have none). ``draw_speed`` samples this prior and
 ``speed_step`` is a Metropolis step with the same prior as its stationary
 distribution, so mutation does not push speeds towards their bounds.
 
@@ -15,7 +15,11 @@ acceleration and braking within type ranges (``COMFORT``):
 replay no longer always accelerates at the type's hard limit. Its prior is
 uniform; operators copy it or take reflected Gaussian steps, which keep a
 uniform distribution uniform. ``JERK_TARGET`` sets how gradually the replay
-ramps acceleration in and out.
+ramps acceleration in and out. A walker's ``walk_style`` plays the same part.
+
+Mixes. ``VEHICLE_MIX``, ``RIDER_MIX`` and ``WALKER_MIX`` give the default
+composition by type; ``EXCURSION_MIX`` and ``EXCURSION_COUNT_MIX`` how
+pedestrians leave the sidewalk.
 
 These are plausible literature-range defaults, not calibrated to measured data.
 """
@@ -40,6 +44,25 @@ RIDER_CRUISE = {"BICYCLE": (4.5, 0.8, (2.5, 7.0)), "E_BIKE": (6.0, 1.0, (3.5, 9.
 """Riders' target speeds in m/s: mean, sigma and range of the usual component."""
 RIDER_SLOW_RANGE = {"BICYCLE": (1.5, 2.5), "E_BIKE": (2.0, 3.5)}
 
+WALKER_CRUISE = {
+    "ADULT": (1.45, 0.25, (0.9, 2.2)),
+    "ELDERLY": (1.2, 0.25, (0.6, 1.8)),
+    "CHILD": (1.45, 0.3, (0.8, 2.3)),
+    "RUNNER": (3.0, 0.5, (2.0, 4.5)),
+}
+"""Walkers' target speeds in m/s: mean, sigma and range of the usual component.
+Crosswalk observations: 15th-percentile 1.25 m/s under 65 and 0.97 m/s over 65,
+means about 1.5 and 1.25 m/s (Knoblauch, Pietrucha and Nitzburg, 1996, TRR 1538);
+15th-percentile 1.15 and 0.92 m/s at 3,000 crossings, of which 19% ran or walked
+and ran (TCRP Report 112 / NCHRP Report 562, 2006). School children walk at least
+as fast as the guideline speeds (Chang et al., 2018, TRR 2672)."""
+WALKER_SLOW_RANGE = {"ADULT": (0.6, 0.9), "ELDERLY": (0.4, 0.6), "CHILD": (0.6, 0.8), "RUNNER": (1.8, 2.0)}
+"""The slow component: walkers with children, luggage or a phone, walking aids, joggers easing off."""
+
+ABSOLUTE_CRUISE = {**RIDER_CRUISE, **WALKER_CRUISE}
+"""Types whose target speeds are absolute rather than shares of the lane limit."""
+_ABSOLUTE_SLOW_RANGE = {**RIDER_SLOW_RANGE, **WALKER_SLOW_RANGE}
+
 COMFORT = {
     # (acceleration, braking) ranges in m/s^2, from the gentlest (drive_style 0)
     # to the briskest (1) ordinary driver. Cornering keeps the type's lateral
@@ -50,6 +73,13 @@ COMFORT = {
     "BUS": ((0.6, 1.2), (1.0, 2.0)),
     "BICYCLE": ((0.5, 1.0), (0.8, 1.5)),
     "E_BIKE": ((0.7, 1.4), (1.0, 2.0)),
+    # Walkers: video-tracked crossing pedestrians accelerated 0.68 m/s^2 on average,
+    # 1.44 m/s^2 at most ("Microscopic Pedestrian Flow Characteristics",
+    # arXiv:1610.00029); runners start harder.
+    "ADULT": ((0.5, 1.4), (0.5, 1.5)),
+    "ELDERLY": ((0.3, 0.8), (0.3, 1.0)),
+    "CHILD": ((0.6, 1.8), (0.6, 1.8)),
+    "RUNNER": ((1.0, 2.5), (1.0, 2.5)),
 }
 JERK_TARGET = 2.5
 """m/s^3: the replay rounds acceleration changes over a distance that keeps
@@ -63,21 +93,22 @@ def _normal_cdf(x: float) -> float:
 
 
 def _usual(kind: str):
-    if kind in RIDER_CRUISE:
-        return RIDER_CRUISE[kind]
+    if kind in ABSOLUTE_CRUISE:
+        return ABSOLUTE_CRUISE[kind]
     return CRUISE_FACTOR[kind], CRUISE_SIGMA, CRUISE_RANGE
 
 
 def _slow(kind: str):
-    return RIDER_SLOW_RANGE[kind] if kind in RIDER_SLOW_RANGE else SLOW_RANGE
+    return _ABSOLUTE_SLOW_RANGE[kind] if kind in _ABSOLUTE_SLOW_RANGE else SLOW_RANGE
 
 
 def reference_speed(kind: str, limit: float | None, max_speed: float) -> float:
     """
     What target speeds of ``kind`` are relative to: the lane limit (or
-    ``DEFAULT_SPEED_LIMIT``) capped by the type's ``max_speed`` for vehicles, 1 for riders.
+    ``DEFAULT_SPEED_LIMIT``) capped by the type's ``max_speed`` for vehicles,
+    1 for riders and walkers (``ABSOLUTE_CRUISE``).
     """
-    if kind in RIDER_CRUISE:
+    if kind in ABSOLUTE_CRUISE:
         return 1.0
     return min(limit if limit else DEFAULT_SPEED_LIMIT, max_speed)
 
@@ -162,9 +193,62 @@ Portland's 2023 citywide counts (PBOT, 2023 Portland Bicycle Counts, Table 6).
 https://www.portland.gov/transportation/walking-biking-transit-safety/documents/2023-portland-bicycle-count-report/download"""
 
 
+WALKER_MIX = {"ADULT": 0.72, "ELDERLY": 0.12, "CHILD": 0.06, "RUNNER": 0.10}
+"""Default walker composition; a plausible default, not calibrated. Runners stand
+for the crossers TCRP Report 112 saw running (part of its 19% not walking)."""
+
+EXCURSION_MIX = {"CROSSWALK": 0.75, "NEAR_CROSSWALK": 0.08, "MID_BLOCK": 0.08, "DIAGONAL": 0.03,
+                 "ROADSIDE": 0.06}
+"""Default share of each way of leaving the sidewalk; plausible, not calibrated.
+89% of crossings observed at 20 US sites were in marked intersection crosswalks
+(FHWA-HRT-13-098, Human Factors Assessment of Pedestrian Roadway Crossing Behavior);
+at 47 Utah signalized crosswalks 2-3% crossed mid-block and 6-8% mostly outside the
+markings (UDOT, arXiv:2408.08890)."""
+
+EXCURSION_COUNT_MIX = {0: 0.15, 1: 0.65, 2: 0.20}
+"""Default share of walks by how often they leave the sidewalk; plausible, not calibrated."""
+
+
 def draw_type(rng: Random, weights) -> str:
     """A type name drawn with probability proportional to ``weights`` (name -> weight)."""
     names = sorted(name for name, weight in weights.items() if weight > 0)
     if not names:
         raise ValueError("type weights must have a positive entry")
     return rng.choices(names, weights=[weights[name] for name in names])[0]
+
+
+def _prior_cdf(kind: str, value: float) -> float:
+    """CDF of ``kind``'s absolute target-speed prior (``draw_speed`` with reference 1, unrestricted)."""
+    mean, sigma, (a, b) = _usual(kind)
+    c, d = _slow(kind)
+    slow = min(max((value - c) / (d - c), 0.0), 1.0) if d > c else float(value >= c)
+    za, zb = _normal_cdf((a - mean) / sigma), _normal_cdf((b - mean) / sigma)
+    usual = min(max((_normal_cdf((value - mean) / sigma) - za) / (zb - za), 0.0), 1.0)
+    return SLOW_SHARE * slow + (1 - SLOW_SHARE) * usual
+
+
+def mapped_speed(kind: str, other: str, value: float) -> float:
+    """
+    The speed of type ``other`` at the same quantile of its prior as ``value``
+    has under ``kind``'s (absolute priors, ``ABSOLUTE_CRUISE``): a brisk adult
+    becomes a brisk runner, not a runner at walking pace. Values beyond the
+    prior's support scale with its nearest end (a crossing sped up past the range).
+    """
+    low = min(_slow(kind)[0], _usual(kind)[2][0])
+    high = max(_slow(kind)[1], _usual(kind)[2][1])
+    new_low = min(_slow(other)[0], _usual(other)[2][0])
+    new_high = max(_slow(other)[1], _usual(other)[2][1])
+    if value >= high:
+        return new_high * value / high
+    if value <= low:
+        return new_low * value / low
+    quantile = _prior_cdf(kind, value)
+    lo, hi = new_low, new_high
+    for _ in range(60):
+        middle = (lo + hi) / 2
+        if _prior_cdf(other, middle) < quantile:
+            lo = middle
+        else:
+            hi = middle
+    return (lo + hi) / 2
+

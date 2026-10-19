@@ -72,7 +72,7 @@ def cx_turn_dwell(first: BicycleAgent, second: BicycleAgent, space: RouteSpace) 
 
 def cx_rider_type(first: BicycleAgent, second: BicycleAgent) -> BicycleAgent | None:
     """
-    Give ``first`` the rider type of ``second``, with speeds clamped to that type's maximum.
+    Give ``first`` the rider type of ``second``, with speeds moved to that type's prior (``retyped``).
 
     :returns: The child, or None if the types are equal.
     """
@@ -100,7 +100,7 @@ def cx_bicycle(first: BicycleAgent, second: BicycleAgent, space: RouteSpace, rng
             "bridge": lambda child: cx_bridge(child, other, space, rng, config),
             "turn_dwell": lambda child: cx_turn_dwell(child, other, space),
             "rider_type": lambda child: cx_rider_type(child, other),
-            "speed_profile": lambda child: cx_speed_profile(child, other, rng, space, min_speed=config.min_speed),
+            "speed_profile": lambda child: cx_speed_profile(child, retyped(other, child.rider_type), rng, space, min_speed=config.min_speed),
             "drive_style": lambda child: cx_drive_style(child, other),
             "start_time": lambda child: cx_start_time(child, other),
         }

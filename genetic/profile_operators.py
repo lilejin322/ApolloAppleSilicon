@@ -18,7 +18,7 @@ from ..scenario.realism import draw_speed, speed_step, style_step
 from .common import ReplayOperatorConfig, gauss_step
 
 Replayed = TypeVar("Replayed")
-"""An NPCVehicleAgent or BicycleAgent."""
+"""An NPCVehicleAgent, BicycleAgent or PedestrianAgent."""
 
 __all__ = [
     "clamp_speeds", "cx_drive_style", "cx_speed_profile", "mut_drive_style", "cx_start_time", "mut_speed", "mut_speed_point", "mut_start_t", "mut_stop",
@@ -32,9 +32,12 @@ def clamp_speeds(profile: Sequence[SpeedPoint], max_speed: float) -> tuple[Speed
 
 
 def kind_of(agent: Replayed) -> str:
-    """The agent's vehicle or rider type name, which picks its realism priors."""
-    vehicle_type = getattr(agent, "vehicle_type", None)
-    return (vehicle_type if vehicle_type is not None else agent.rider_type).name
+    """The agent's vehicle, rider or walker type name, which picks its realism priors."""
+    for attribute in ("vehicle_type", "rider_type", "walker_type"):
+        kind = getattr(agent, attribute, None)
+        if kind is not None:
+            return kind.name
+    raise TypeError(f"{type(agent).__name__} has no vehicle, rider or walker type")
 
 
 def with_profile(agent: Replayed, profile: Sequence[SpeedPoint]) -> Replayed | None:

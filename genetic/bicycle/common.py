@@ -15,10 +15,9 @@ from typing import ClassVar, Mapping, Sequence
 
 from ...scenario import RIDER_SPECS, BicycleAgent, InvalidRoute, LaneRoute, RiderType, RouteSpace
 from ...scenario.bicycle import PivotKey, starts_on_bike_lane
-from ...scenario.realism import RIDER_MIX
+from ...scenario.realism import RIDER_MIX, mapped_speed
 from ...utils import require_nonnegative
 from ..common import ReplayOperatorConfig
-from ..profile_operators import clamp_speeds
 
 GENES = ("route", "turn_dwell", "rider_type", "speed_profile", "start_t")
 """Bicycle genes, in the order each call varies them: the route first, since
@@ -118,8 +117,17 @@ def on_route(agent: BicycleAgent, route: LaneRoute | None, space: RouteSpace, rn
 
 
 def retyped(agent: BicycleAgent, rider_type: RiderType) -> BicycleAgent:
-    """``agent`` as another rider type, its speeds clamped to that type's maximum."""
-    profile = clamp_speeds(agent.speed_profile, RIDER_SPECS[rider_type].max_speed)
+    """
+    ``agent`` as another rider type: each target speed moves to the same
+    quantile of the new type's speed prior (``realism.mapped_speed``), within
+    the type's maximum. Only clamping, and bicycles retyped to e-bikes kept
+    bicycle pace while e-bikes retyped to bicycles all rode at the bicycle maximum.
+    """
+    if rider_type is agent.rider_type:
+        return agent
+    old, new, top = agent.rider_type.name, rider_type.name, RIDER_SPECS[rider_type].max_speed
+    profile = tuple(replace(point, speed=min(mapped_speed(old, new, point.speed), top)) if point.speed > 0 else point
+                    for point in agent.speed_profile)
     return replace(agent, rider_type=rider_type, speed_profile=profile)
 
 

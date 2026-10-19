@@ -70,7 +70,7 @@ def mut_rider_type(agent: BicycleAgent, rng: Random,
                    drawn: RiderType | None = None) -> BicycleAgent | None:
     """
     Resample the rider type from ``config.rider_type_weights``, with speeds
-    clamped to its maximum; keeps a population's rider mix at those weights.
+    moved to its prior (``retyped``); keeps a population's rider mix at those weights.
     A mutation event draws once (``drawn``); a draw of the current type is a
     no-op, since redrawing until it changes would flip types 50/50.
 

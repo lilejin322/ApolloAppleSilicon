@@ -1,5 +1,5 @@
 """
-Replayed motion shared by NPC vehicles and bicycles.
+Replayed motion shared by NPC vehicles, bicycles and pedestrians.
 
 A replayed agent follows a path Apollo never sees. It waits at the start
 until ``start_t``, follows its speed profile within its motion limits and
@@ -20,7 +20,7 @@ import numpy as np
 from shapely.geometry import LineString, Point
 
 from .routing import InvalidRoute, LaneRoute, RouteSpace, Transition
-from .realism import JERK_TARGET, draw_speed, reference_speed
+from .realism import ABSOLUTE_CRUISE, JERK_TARGET, draw_speed, reference_speed
 from ..map.geometry import CenterlineProfile, normalize_angle, smooth_polyline
 from ..utils import require_nonnegative
 
@@ -493,11 +493,12 @@ class ReplayTrajectory:
     Between grid points the agent accelerates uniformly, so speeds and
     times are exact for the computed profile. Headings follow the path piece
     by piece between pivots; at a pivot the agent turns at a bounded angular
-    speed, then waits for its dwell before departing.
+    speed (``yaw_rate``, rad/s; ``PIVOT_YAW_RATE`` by default), then waits for
+    its dwell before departing.
     """
 
     def __init__(self, path: LineString, start_t: float, s: list[float], v: list[float],
-                 dwell: list[float], pivots: Sequence[float] = ()) -> None:
+                 dwell: list[float], pivots: Sequence[float] = (), yaw_rate: float = PIVOT_YAW_RATE) -> None:
         self.path = path
         self.start_t = start_t
         pieces = _pieces(path, pivots)
@@ -511,7 +512,13 @@ class ReplayTrajectory:
             outgoing = self._profiles[piece].heading_at(0)
             angle = normalize_angle(outgoing - incoming)
             # Smoothstep's peak slope is 1.5, so this bounds angular velocity.
-            self._turns[self._starts[piece]] = (incoming, angle, 1.5 * abs(angle) / PIVOT_YAW_RATE)
+            # Key the turn by the grid point at the pivot: the caller's pivot metres and
+            # the piece starts measured here can differ in the last bits, and an unmatched
+            # key would skip the turn (the heading would flip in one step, with no time to turn).
+            start = self._starts[piece]
+            near = min(s, key=lambda value: abs(value - start), default=start)
+            key = near if abs(near - start) <= 1e-6 else start
+            self._turns[key] = (incoming, angle, 1.5 * abs(angle) / yaw_rate)
         clock = 0.0
         for index in range(len(s)):
             if index:
@@ -603,7 +610,7 @@ def check_activity_window(duration: float, min_moving_fraction: float) -> None:
 
 def speed_grid(length: float, profile: Sequence[SpeedPoint], positions: Sequence[float], limits: MotionLimits, *,
                curvature_spans: Sequence[Span] = (), speed_limits: Sequence[Span] = (),
-               forced_stops: Mapping[float, float] = MappingProxyType({}),
+               forced_stops: Mapping[float, float] = MappingProxyType({}), smoothing: float = _SPEED_SMOOTHING,
                ) -> tuple[list[float], list[float], list[float]]:
     """
     Return grid positions, feasible speeds, and dwell times along a path.
@@ -621,6 +628,9 @@ def speed_grid(length: float, profile: Sequence[SpeedPoint], positions: Sequence
     :param speed_limits: As in ``ReplayLayout.limits``.
     :param forced_stops: Seconds to wait by path metres, such as at pivots; a
         profile stop at the same position adds its dwell.
+    :param smoothing: Shortest metres over which caps are enveloped and the
+        accelerate / cruise / brake profile is rounded; vehicles 4 m. Walkers
+        use less, or a walk-off from rest would take 4-6 s to reach pace.
     :rtype: tuple[list[float], list[float], list[float]]
     """
     positions = [float(position) for position in positions]
@@ -671,7 +681,7 @@ def speed_grid(length: float, profile: Sequence[SpeedPoint], positions: Sequence
     # through a long curve whose centerline curvature wobbles, the speed holds
     # at the lowest nearby cap instead of oscillating (jerk spikes).
     peak = float(np.sqrt(np.max(caps))) if len(caps) else 0.0
-    smooth_caps = _envelope(np.asarray(grid), caps, max(_SPEED_SMOOTHING, CAP_HOLD_TIME * peak))
+    smooth_caps = _envelope(np.asarray(grid), caps, max(smoothing, CAP_HOLD_TIME * peak))
     squared = _passes(grid, np.where(zero, 0.0, smooth_caps), limits.max_acceleration, braking)
     # Round the corners of the accelerate / cruise / brake profile so the
     # acceleration ramps over a few metres instead of jumping.
@@ -679,7 +689,7 @@ def speed_grid(length: float, profile: Sequence[SpeedPoint], positions: Sequence
     # speed: an acceleration change spread over 2 * reach metres at speed v
     # takes 2 * reach / v seconds.
     top = float(np.sqrt(np.max(smooth_caps))) if len(smooth_caps) else 0.0
-    reach = max(_SPEED_SMOOTHING, limits.max_acceleration * top / (2 * JERK_TARGET))
+    reach = max(smoothing, limits.max_acceleration * top / (2 * JERK_TARGET))
     rounded = _rounded(np.asarray(grid), squared, zero, reach)
     rounded = _passes(grid, np.where(zero, 0.0, np.minimum(rounded, smooth_caps)),
                       limits.max_acceleration, braking)
@@ -754,7 +764,11 @@ def _rounded(s: np.ndarray, squared: np.ndarray, zero: Sequence[bool], reach: fl
 
 
 def point_reference(space: RouteSpace, lane_id: str, kind: str, max_speed: float) -> float:
-    """What a target speed on ``lane_id`` is relative to (``realism.reference_speed``)."""
+    """What a target speed on ``lane_id`` is relative to (``realism.reference_speed``).
+    Absolute speeds (riders, walkers) never read the lane, which for a walker is
+    an element of its walk rather than a map lane."""
+    if kind in ABSOLUTE_CRUISE:
+        return reference_speed(kind, None, max_speed)
     return reference_speed(kind, speed_limit(space, (lane_id,)), max_speed)
 
 
