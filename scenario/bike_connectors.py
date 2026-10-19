@@ -8,11 +8,15 @@ without a bike predecessor. Pairs come from the car lanes beside the bike
 lanes, whose topology runs through junctions, and from straight
 continuations ahead. Each connector is a ``VirtualLane`` for the bicycles'
 ``RouteSpace``; the map itself is never changed.
+
+Given ``road_lanes`` (the curb lanes bicycles may ride, with their shifted
+lines), a dead end is also joined to the road lanes its car neighbours lead
+to: where a bike lane stops, a rider carries on along the road.
 """
 
 from enum import Enum
 from math import ceil, cos, dist, hypot, radians, sin
-from typing import Iterable, Iterator
+from typing import Iterable, Iterator, Mapping
 
 import networkx as nx
 from shapely.geometry import LineString
@@ -58,7 +62,8 @@ _CORNER_MARGIN = 1.0
 
 def bike_connectors(service: MapService, *, min_turn_radius: float,
                     kinds: Iterable[ConnectorKind] = DEFAULT_KINDS,
-                    max_length: float = 100.0) -> tuple[VirtualLane, ...]:
+                    max_length: float = 100.0,
+                    road_lanes: Mapping[str, LineString] | None = None) -> tuple[VirtualLane, ...]:
     """
     Return the connectors between the map's bike lanes, sorted by ID.
 
@@ -67,6 +72,8 @@ def bike_connectors(service: MapService, *, min_turn_radius: float,
         dropped; corners at pivots are turned at rest and not measured.
     :param kinds: The kinds of connector to generate.
     :param float max_length: Longest connector in metres.
+    :param road_lanes: Road lanes a dead end may continue onto, by ID, with the
+        line a rider follows on each (its start is the connector's end).
     :raises RuntimeError: If the map was loaded without its routing graph.
     :rtype: tuple[VirtualLane, ...]
     """
@@ -101,11 +108,14 @@ def bike_connectors(service: MapService, *, min_turn_radius: float,
     for start in starts:
         for car in car_neighbours(start):
             beside.setdefault(car, []).append(start)
+    road_lanes = road_lanes or {}
+    road_pairs = set()
     for end in ends:
         frontier = set(car_neighbours(end))
         for _ in range(_TOPOLOGY_STEPS):
             frontier = {target for car in frontier for target in forward(car) if lanes[target].type == city}
             pairs.update((end, start) for car in frontier for start in beside.get(car, ()))
+            road_pairs.update((end, car) for car in frontier if car in road_lanes)
     poses = {lane_id: _end_pose(service.get_lane_central_curve_by_id(lane_id)) for lane_id in ends}
     firsts = {lane_id: _start_pose(service.get_lane_central_curve_by_id(lane_id)) for lane_id in starts}
     for end in ends:
@@ -119,14 +129,17 @@ def bike_connectors(service: MapService, *, min_turn_radius: float,
                     and abs(normalize_angle(start_heading - heading)) < _AHEAD_HEADING):
                 pairs.add((end, start))
 
+    def usable(connector: VirtualLane) -> bool:
+        return (connector.line.length <= max_length and not _too_tight(connector, min_turn_radius)
+                and not any(not mark.virtual and "CURB" in mark.types
+                            for mark in service.get_lane_markings(connector.line)))
+
     connectors = []
     for end, start in sorted(pairs):
         if chain[end] != chain[start]:
-            connectors.extend(connector for connector in _connect(end, poses[end], start, firsts[start], kinds)
-                              if connector.line.length <= max_length
-                              and not _too_tight(connector, min_turn_radius)
-                              and not any(not mark.virtual and "CURB" in mark.types
-                                          for mark in service.get_lane_markings(connector.line)))
+            connectors.extend(filter(usable, _connect(end, poses[end], start, firsts[start], kinds)))
+    for end, road in sorted(road_pairs):
+        connectors.extend(filter(usable, _connect(end, poses[end], road, _start_pose(road_lanes[road]), kinds)))
     return tuple(sorted(connectors, key=lambda connector: connector.lane_id))
 
 

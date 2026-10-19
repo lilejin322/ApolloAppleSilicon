@@ -12,7 +12,7 @@ from random import Random
 from ...scenario import NPCVehicleAgent
 from .. import route_operators
 from ..common import vary
-from ..profile_operators import cx_speed_profile, cx_start_time
+from ..profile_operators import cx_drive_style, cx_speed_profile, cx_start_time
 from .common import NPCOperatorConfig, Spaces, acceptable, on_route, positions, retyped
 
 
@@ -103,18 +103,25 @@ def cx_npc_agent(first: NPCVehicleAgent, second: NPCVehicleAgent, spaces: Spaces
     :rtype: tuple[NPCVehicleAgent, NPCVehicleAgent]
     """
     def child_of(lead: NPCVehicleAgent, other: NPCVehicleAgent) -> NPCVehicleAgent:
+        # Routes recombine only between parents of one vehicle type (unless
+        # ``config.cross_type_routes``): a car takes a van's road freely, but a
+        # van rarely fits a car's, so routes flowed into the roads large vehicles
+        # fit (shalun: car routes fitting a van 14% -> 51% in 30 generations).
+        routes = config.cross_type_routes or lead.vehicle_type is other.vehicle_type
         operators = {
-            "shared_lane": lambda child: cx_shared_lane(child, other, spaces, rng),
-            "bridge": lambda child: cx_bridge(child, other, spaces, rng, config),
+            "shared_lane": lambda child: cx_shared_lane(child, other, spaces, rng) if routes else None,
+            "bridge": lambda child: cx_bridge(child, other, spaces, rng, config) if routes else None,
             "lane_change_s": lambda child: cx_lane_change_s(child, other),
             "vehicle_type": lambda child: cx_vehicle_type(child, other, spaces),
-            "speed_profile": lambda child: cx_speed_profile(child, other, rng),
+            "speed_profile": lambda child: cx_speed_profile(child, other, rng, spaces[child.vehicle_type],
+                                                                spaces[other.vehicle_type], min_speed=config.min_speed),
+            "drive_style": lambda child: cx_drive_style(child, other),
             "start_time": lambda child: cx_start_time(child, other),
         }
         return vary(lead, config.GENES, operators, config.CROSSOVER_GENES, config.crossover_weights,
                     config.crossover_rates, rng, config.attempts,
                     lambda candidate: acceptable(spaces, candidate, config),
-                    fallbacks={"route": (config.route_swap_rate,
+                    fallbacks={"route": (config.route_swap_rate if routes else 0.0,
                                          lambda child: cx_route_swap(child, other, spaces, rng))})
 
     return child_of(first, second), child_of(second, first)

@@ -8,9 +8,9 @@ the virtual connectors of ``bike_connectors``.
 """
 
 from .ad_agents import ADAgent
-from .bicycle import RIDER_SPECS, BicycleAgent, RiderSpec, RiderType
+from .bicycle import RIDER_SPECS, BicycleAgent, RiderSpec, RiderType, random_rider_type
 from .bike_connectors import ConnectorKind
-from .npc_agents import VEHICLE_SPECS, NPCVehicleAgent, VehicleSpec, VehicleType
+from .npc_agents import VEHICLE_SPECS, NPCVehicleAgent, VehicleSpec, VehicleType, random_vehicle_type
 from .replay import AgentState, ReplayTrajectory, SpeedPoint
 from .routing import (
     InvalidRoute, LaneRoute, PathSection, RouteLeg, RoutePose, RoutePoses, RouteRules, RouteSpace,
@@ -21,5 +21,6 @@ __all__ = [
     "ADAgent", "AgentState", "BicycleAgent", "ConnectorKind", "RIDER_SPECS", "RiderSpec", "RiderType",
     "NPCVehicleAgent", "ReplayTrajectory", "SpeedPoint", "VEHICLE_SPECS",
     "VehicleSpec", "VehicleType", "InvalidRoute", "LaneRoute", "RouteLeg", "RoutePose", "RoutePoses",
-    "RouteRules", "RouteSpace", "Transition", "PathSection", "VirtualLane",
+    "RouteRules", "RouteSpace", "Transition", "PathSection", "VirtualLane", "random_rider_type",
+    "random_vehicle_type",
 ]

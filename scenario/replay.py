@@ -20,6 +20,7 @@ import numpy as np
 from shapely.geometry import LineString, Point
 
 from .routing import InvalidRoute, LaneRoute, RouteSpace, Transition
+from .realism import JERK_TARGET, draw_speed, reference_speed
 from ..map.geometry import CenterlineProfile, normalize_angle, smooth_polyline
 from ..utils import require_nonnegative
 
@@ -28,6 +29,8 @@ _GRID_STEP = 0.5
 """Metres between speed-profile grid points along the path."""
 _SPEED_SMOOTHING = 4.0
 """Metres on either side over which speed caps and the speed profile are averaged."""
+CAP_HOLD_TIME = 1.0
+"""Seconds of travel at the top speed over which speed caps are smoothed (minimum then mean)."""
 _FINE_STEP = 0.1
 """Metres between samples when averaging a speed profile."""
 _POINT_GAP = 1e-6
@@ -206,11 +209,13 @@ def rebased(space: RouteSpace, old_route: LaneRoute, old_lane_change_s: tuple[fl
             ) -> tuple[SpeedPoint, ...]:
     """
     Speed points of one route moved onto another route of the same space. A
-    point whose lane is on the new route keeps its lane and ``s``, clamped to
-    the lane's driven stretch there. A point whose lane is not moves to the
-    same share of the driven distance it had on the old route (the start of
-    the new route if the old route is invalid). Points are then put in
-    driving order (``ordered_points``).
+    point whose lane is on the new route, within the lane's driven stretch
+    there, keeps its lane and ``s``. Any other point moves to the same share of
+    the driven distance it had on the old route (the start of the new route if
+    the old route is invalid). Points are then put in driving order
+    (``ordered_points``). Clamping points outside the stretch onto its ends
+    merged them when a route was truncated, and point counts fell over
+    generations (-0.05 points per extend/truncate mutation).
 
     :raises InvalidRoute: If ``route`` or ``lane_change_s`` is invalid.
     """
@@ -221,10 +226,9 @@ def rebased(space: RouteSpace, old_route: LaneRoute, old_lane_change_s: tuple[fl
         old = None
     placed = []
     for point in profile:
-        if point.lane_id in new.index:
-            low, high = new.window(point.lane_id)
-            s = min(max(point.s, low), high)
-            placed.append((new.distance(point.lane_id, s), 0, replace(point, s=s)))
+        low, high = new.window(point.lane_id) if point.lane_id in new.index else (0.0, -1.0)
+        if low <= point.s <= high:
+            placed.append((new.distance(point.lane_id, point.s), 0, point))
         else:
             share = old.distance(point.lane_id, point.s) / old.total if old is not None and old.total > 0 else 0.0
             lane_id, s = new.at(share * new.total)
@@ -555,13 +559,6 @@ class ReplayTrajectory:
         return total
 
 
-def check_activity_window(duration: float, min_moving_fraction: float) -> None:
-    """Validate a finite scenario horizon and the required fraction spent moving."""
-    if not isfinite(duration) or duration <= 0:
-        raise ValueError("scenario_duration must be finite and positive")
-    if not isfinite(min_moving_fraction) or not 0 <= min_moving_fraction <= 1:
-        raise ValueError("min_moving_fraction must be within [0, 1]")
-
     def state_at(self, t: float) -> AgentState:
         """
         Return the agent's pose and speed at scenario time ``t``.
@@ -594,6 +591,14 @@ def check_activity_window(duration: float, min_moving_fraction: float) -> None:
             u = min(max((elapsed - self._arrive[stop_index]) / duration, 0.0), 1.0) if duration else 1.0
             heading = normalize_angle(incoming + angle * u * u * (3 - 2 * u))
         return AgentState(point.x, point.y, heading, speed)
+
+
+def check_activity_window(duration: float, min_moving_fraction: float) -> None:
+    """Validate a finite scenario horizon and the required fraction spent moving."""
+    if not isfinite(duration) or duration <= 0:
+        raise ValueError("scenario_duration must be finite and positive")
+    if not isfinite(min_moving_fraction) or not 0 <= min_moving_fraction <= 1:
+        raise ValueError("min_moving_fraction must be within [0, 1]")
 
 
 def speed_grid(length: float, profile: Sequence[SpeedPoint], positions: Sequence[float], limits: MotionLimits, *,
@@ -662,11 +667,20 @@ def speed_grid(length: float, profile: Sequence[SpeedPoint], positions: Sequence
     # A smooth lower envelope of the caps: speeds no longer chatter
     # between many nearby curvature limits, and every value stays at or
     # below the raw cap at its own position.
-    smooth_caps = _envelope(np.asarray(grid), caps, _SPEED_SMOOTHING)
+    # The window covers about ``CAP_HOLD_TIME`` of travel at the top speed:
+    # through a long curve whose centerline curvature wobbles, the speed holds
+    # at the lowest nearby cap instead of oscillating (jerk spikes).
+    peak = float(np.sqrt(np.max(caps))) if len(caps) else 0.0
+    smooth_caps = _envelope(np.asarray(grid), caps, max(_SPEED_SMOOTHING, CAP_HOLD_TIME * peak))
     squared = _passes(grid, np.where(zero, 0.0, smooth_caps), limits.max_acceleration, braking)
     # Round the corners of the accelerate / cruise / brake profile so the
     # acceleration ramps over a few metres instead of jumping.
-    rounded = _rounded(np.asarray(grid), squared, zero, _SPEED_SMOOTHING)
+    # The rounding reach keeps jerk near ``JERK_TARGET`` at the profile's top
+    # speed: an acceleration change spread over 2 * reach metres at speed v
+    # takes 2 * reach / v seconds.
+    top = float(np.sqrt(np.max(smooth_caps))) if len(smooth_caps) else 0.0
+    reach = max(_SPEED_SMOOTHING, limits.max_acceleration * top / (2 * JERK_TARGET))
+    rounded = _rounded(np.asarray(grid), squared, zero, reach)
     rounded = _passes(grid, np.where(zero, 0.0, np.minimum(rounded, smooth_caps)),
                       limits.max_acceleration, braking)
     speeds = [0.0 if pinned else sqrt(max(value, 0.0)) for pinned, value in zip(zero, rounded)]
@@ -737,6 +751,20 @@ def _rounded(s: np.ndarray, squared: np.ndarray, zero: Sequence[bool], reach: fl
         if np.all(inner > 0):
             result[first + 1:last] = inner
     return result
+
+
+def point_reference(space: RouteSpace, lane_id: str, kind: str, max_speed: float) -> float:
+    """What a target speed on ``lane_id`` is relative to (``realism.reference_speed``)."""
+    return reference_speed(kind, speed_limit(space, (lane_id,)), max_speed)
+
+
+def drawn_speeds(space: RouteSpace, profile: Sequence[SpeedPoint], rng: Random, kind: str, max_speed: float,
+                 min_speed: float) -> tuple[SpeedPoint, ...]:
+    """The profile with every moving target redrawn from the cruise prior of its lane (``realism``)."""
+    low = min(min_speed, max_speed)
+    return tuple(point if point.speed == 0 else replace(
+        point, speed=draw_speed(rng, kind, point_reference(space, point.lane_id, kind, max_speed), low, max_speed))
+        for point in profile)
 
 
 def random_draws(rng: Random, max_speed: float, stop_probability: float, max_dwell: float,

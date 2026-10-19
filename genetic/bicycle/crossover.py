@@ -12,8 +12,8 @@ from random import Random
 from ...scenario import BicycleAgent, RouteSpace
 from .. import route_operators
 from ..common import vary
-from ..profile_operators import cx_speed_profile, cx_start_time
-from .common import BicycleOperatorConfig, acceptable, on_route, retyped
+from ..profile_operators import cx_drive_style, cx_speed_profile, cx_start_time
+from .common import BicycleOperatorConfig, acceptable, keeps_start, on_route, retyped
 
 
 def cx_shared_lane(first: BicycleAgent, second: BicycleAgent, space: RouteSpace, rng: Random,
@@ -100,12 +100,14 @@ def cx_bicycle(first: BicycleAgent, second: BicycleAgent, space: RouteSpace, rng
             "bridge": lambda child: cx_bridge(child, other, space, rng, config),
             "turn_dwell": lambda child: cx_turn_dwell(child, other, space),
             "rider_type": lambda child: cx_rider_type(child, other),
-            "speed_profile": lambda child: cx_speed_profile(child, other, rng),
+            "speed_profile": lambda child: cx_speed_profile(child, other, rng, space, min_speed=config.min_speed),
+            "drive_style": lambda child: cx_drive_style(child, other),
             "start_time": lambda child: cx_start_time(child, other),
         }
         return vary(lead, config.GENES, operators, config.CROSSOVER_GENES, config.crossover_weights,
                     config.crossover_rates, rng, config.attempts,
-                    lambda candidate: acceptable(space, candidate, config),
+                    lambda candidate: acceptable(space, candidate, config)
+                    and keeps_start(space, candidate, lead, config),
                     fallbacks={"route": (config.route_swap_rate,
                                          lambda child: cx_route_swap(child, other, space, rng, config))})
 

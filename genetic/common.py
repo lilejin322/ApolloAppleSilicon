@@ -41,6 +41,19 @@ class OperatorConfig:
     :param float sigma_s: Standard deviation of route position steps, in metres.
     :param float sigma_t: Standard deviation of start time steps, in seconds.
     :param int bridge_candidates: Cheapest lane paths considered when bridging or rerouting.
+    :param float max_detour: A rerouted stretch is at most this share longer than the
+        shortest of it and its alternatives (``inf`` disables). Real routes are
+        near-shortest; unbounded alternatives made routes loop and grow over generations.
+    :param float lane_change_odds: Odds ``p / (1 - p)`` of a lane change where one is
+        possible, as in generation (``lane_change_probability`` 0.2 -> 0.25). Lane-change
+        mutation accepts a child with ``k`` more lane changes with probability
+        ``lane_change_odds ** k``, so lane changes do not pile up over generations.
+    :param bool bridge_within_parents: Bridge crossover keeps only children whose
+        length lies in the parents' range widened by ``BRIDGE_LENGTH_SLACK``. Where
+        parents rarely meet, the only bridges are long detours, and bridged children
+        grew routes by a step (shalun bicycles on curb lanes: +27 m per child, median
+        150 -> 190 m in five generations). Off by default: vehicle routes stay stable
+        without it.
     """
 
     CROSSOVERS: ClassVar[tuple[str, ...]] = ()
@@ -57,11 +70,18 @@ class OperatorConfig:
     sigma_s: float = 10.0
     sigma_t: float = 1.0
     bridge_candidates: int = 5
+    max_detour: float = 0.3
+    lane_change_odds: float = 0.25
+    bridge_within_parents: bool = False
 
     def __post_init__(self) -> None:
         if not (isfinite(self.max_length) and 0 <= self.min_length <= self.max_length):
             raise ValueError("min_length must be nonnegative and at most a finite max_length")
         require_nonnegative(max_start_t=self.max_start_t, sigma_s=self.sigma_s, sigma_t=self.sigma_t)
+        if not 0 <= self.lane_change_odds <= 1:
+            raise ValueError("lane_change_odds must be within [0, 1]")
+        if not self.max_detour >= 0:
+            raise ValueError("max_detour must be nonnegative")
         if self.attempts < 1:
             raise ValueError("attempts must be at least 1")
         if self.bridge_candidates < 1:

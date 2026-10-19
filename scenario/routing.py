@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from enum import Enum
 from math import ceil, cos, dist, isfinite, sin
 from random import Random
+from types import MappingProxyType
 from typing import Callable, Iterable, Iterator, Mapping, NamedTuple
 
 import networkx as nx
@@ -53,6 +54,10 @@ ENDPOINT_JUNCTION_MARGIN = 5.0
 """Default ``RouteRules.endpoint_junction_margin`` of ego and NPC rules, in metres."""
 JUNCTION_SHARE = 0.5
 """A lane whose centerline lies more than this share inside junction polygons is a junction lane."""
+WALKS_PER_TARGET = 10
+"""Random walks ``random_route`` tries per drawn target length before drawing another."""
+SHORT_WALK_SHARE = 0.8
+"""Share of its target length below which ``random_route`` retries a walk (dead ends)."""
 _ENDPOINT_STEP = 0.5
 """Metres between the positions checked when finding where on a lane a route may start or end."""
 _ENDPOINT_OVERSHOOT = 100.0
@@ -79,6 +84,36 @@ def _join_curvature(service: MapService, source: str, target: str) -> float:
         points = [point[:2] for point in tail.coords] + [point[:2] for point in head.coords]
         cache[key] = max_replay_curvature(points)
     return cache[key]
+
+
+def offset_line(line: LineString, offset: float) -> LineString:
+    """
+    ``line`` shifted ``offset`` metres to its right (left if negative), in the
+    same direction: each vertex moves along the normal of its neighbours'
+    chord, so vertices and their order are kept (shapely's ``offset_curve``
+    may merge or reorder them on tight bends).
+    """
+    coords = np.asarray(line.coords, dtype=float)[:, :2]
+    if len(coords) < 2 or not offset:
+        return line
+    tangents = np.empty_like(coords)
+    tangents[1:-1] = coords[2:] - coords[:-2]
+    tangents[0], tangents[-1] = coords[1] - coords[0], coords[-1] - coords[-2]
+    tangents /= np.maximum(np.hypot(tangents[:, 0], tangents[:, 1]), 1e-12)[:, None]
+    right = np.column_stack([tangents[:, 1], -tangents[:, 0]])
+    shifted = coords + offset * right
+    keep = np.r_[True, np.hypot(*np.diff(shifted, axis=0).T) > 1e-9]
+    return LineString(shifted[keep])
+
+
+def junction_lanes(service: MapService) -> frozenset[str]:
+    """
+    The map's junction lanes (``RouteSpace.is_junction_lane``), without building a space.
+
+    :rtype: frozenset[str]
+    """
+    lane_fields = DescriptorBundle(service.descriptor_path).message("apollo.hdmap.Lane").DESCRIPTOR.fields_by_name
+    return frozenset(_junction_info(service, lane_fields["turn"].enum_type.values_by_name["NO_TURN"].number)["lanes"])
 
 
 def _junction_info(service: MapService, no_turn: int) -> dict:
@@ -400,16 +435,31 @@ class RouteSpace:
     :param RouteRules rules: Allowed lanes, lane-change distance, and pose ambiguity margin.
     :param Iterable[VirtualLane] virtual_lanes: Lanes the map lacks; only for rules
         with ``unambiguous=False``, since Apollo cannot route through them.
+    :param Iterable[str] extra_lanes: Map lanes allowed besides those of
+        ``rules.lane_types``, such as the curb lanes bicycles may ride
+        (``bicycle.curb_lanes``). Not pruned for tight turns.
+    :param Mapping[str, float] lane_offsets: Metres to shift an allowed map lane's
+        centerline to its right (``centerline``): a bicycle rides near the curb
+        of a driving lane. Lengths, positions, endpoints and replay paths all use
+        the shifted line.
     :raises ValueError: If a virtual lane reuses an ID or joins an unknown lane,
-        or if virtual lanes are given with ``unambiguous`` rules.
+        or if virtual lanes are given with ``unambiguous`` rules, or if an extra
+        lane or an offset names an unknown lane.
     """
 
     def __init__(self, service: MapService, rules: RouteRules = RouteRules(),
-                 virtual_lanes: Iterable[VirtualLane] = ()) -> None:
+                 virtual_lanes: Iterable[VirtualLane] = (), *, extra_lanes: Iterable[str] = (),
+                 lane_offsets: Mapping[str, float] = MappingProxyType({})) -> None:
         if service.routing_graph is None or service.lane_index is None:
             raise RuntimeError("RouteSpace needs a map loaded with load_only=False")
         self.service = service
         self.rules = rules
+        extra = frozenset(extra_lanes)
+        unknown = sorted((extra | set(lane_offsets)) - set(service.lane_table))
+        if unknown:
+            raise ValueError(f"unknown extra or offset lanes {unknown[:5]}")
+        self._offsets = {lane_id: float(offset) for lane_id, offset in lane_offsets.items() if offset}
+        self._offset_lines: dict[str, LineString] = {}
         self._virtual: dict[str, VirtualLane] = {}
         for lane in virtual_lanes:
             if lane.lane_id in service.lane_table or lane.lane_id in self._virtual:
@@ -443,8 +493,8 @@ class RouteSpace:
         if prune:
             limit = 1 / rules.min_turn_radius
             allowed = {lane_id for lane_id in allowed if _lane_curvature(service, lane_id) <= limit}
-        self._lengths = {lane_id: service.get_lane_central_curve_by_id(lane_id).length
-                         for lane_id in allowed}
+        allowed |= extra
+        self._lengths = {lane_id: self.centerline(lane_id).length for lane_id in allowed}
         # A concrete copy with precomputed costs: path searches avoid view
         # filters and per-edge geometry calls.
         self.graph = _ordered_subgraph(service.routing_graph, allowed)
@@ -721,7 +771,7 @@ class RouteSpace:
             return ((0.0, length),)
         margin = self.rules.endpoint_junction_margin
         info = _junction_info(self.service, self._no_turn)
-        key = (lane_id, margin)
+        key = (lane_id, margin, self._offsets.get(lane_id, 0.0))
         if key not in info["ranges"]:
             info["ranges"][key] = self._endpoint_ranges(lane_id, length, margin, info)
         return info["ranges"][key]
@@ -733,7 +783,7 @@ class RouteSpace:
         s = np.linspace(0.0, length, max(2, ceil(length / _ENDPOINT_STEP) + 1))
         ok = np.ones(len(s), dtype=bool)
         if info["union"] is not None:
-            line = self.service.get_lane_central_curve_by_id(lane_id)
+            line = self.centerline(lane_id)
             points = shapely.line_interpolate_point(line, s)
             ok &= shapely.distance(info["union"], points) >= margin
         lane = self.service.get_lane_by_id(lane_id)
@@ -751,6 +801,14 @@ class RouteSpace:
                     ranges.append((float(s[first]), float(s[last])))
                 first = None
         return tuple(ranges)
+
+    def start_lanes(self) -> list[str]:
+        """
+        Sorted allowed map lanes a route may start on (with an allowed endpoint).
+
+        :rtype: list[str]
+        """
+        return list(self._start_lanes())
 
     def _start_lanes(self) -> list[str]:
         """Sorted allowed lanes a route may start on."""
@@ -941,12 +999,30 @@ class RouteSpace:
 
     def centerline(self, lane_id: str) -> LineString:
         """
-        Return the centerline of a map or virtual lane.
+        Return the centerline of a map or virtual lane, shifted right by its
+        ``lane_offsets`` entry if it has one.
 
         :rtype: LineString
         """
         lane = self._virtual.get(lane_id)
-        return self.service.get_lane_central_curve_by_id(lane_id) if lane is None else lane.line
+        if lane is not None:
+            return lane.line
+        offset = self._offsets.get(lane_id)
+        if not offset:
+            return self.service.get_lane_central_curve_by_id(lane_id)
+        line = self._offset_lines.get(lane_id)
+        if line is None:
+            line = self._offset_lines[lane_id] = offset_line(self.service.get_lane_central_curve_by_id(lane_id),
+                                                             offset)
+        return line
+
+    def lane_offset(self, lane_id: str) -> float:
+        """
+        Metres the lane's centerline is shifted to its right (``lane_offsets``); 0 by default.
+
+        :rtype: float
+        """
+        return self._offsets.get(lane_id, 0.0)
 
     def virtual_lane(self, lane_id: str) -> VirtualLane | None:
         """
@@ -1034,27 +1110,48 @@ class RouteSpace:
     def random_route(
         self, rng: Random, *, min_length: float = 50.0, max_length: float = 500.0,
         lane_change_probability: float = 0.2, max_attempts: int = 100,
+        start_lanes: Iterable[str] | None = None,
     ) -> LaneRoute:
         """
         Draw a valid route by a random walk of a random target length.
 
-        Walks start on map lanes, never on a virtual lane.
+        Walks start on map lanes, never on a virtual lane. The target length is
+        uniform in the bounds and kept for ``WALKS_PER_TARGET`` walks, so that
+        lengths stay close to uniform where long walks often fail. The driven distance
+        (``length``) is within ``[min_length, max_length]``: walking on to an
+        allowed endpoint can overshoot the target, and such walks are redrawn.
 
         :param Random rng: Source of randomness; equal seeds give equal routes.
         :param float min_length: Minimum driven distance in metres.
         :param float max_length: Maximum driven distance in metres.
         :param float lane_change_probability: Chance of a lane change where one is possible.
         :param int max_attempts: Walks to try before giving up.
+        :param start_lanes: If given, walks start only on these lanes (among
+            those a route may start on), e.g. a bicycle's bike lanes.
         :raises RuntimeError: If no valid route was found.
         :rtype: LaneRoute
         """
         lanes = self._start_lanes()
+        if start_lanes is not None:
+            wanted = set(start_lanes)
+            lanes = [lane for lane in lanes if lane in wanted]
         if lanes:
-            for _ in range(max_attempts):
-                route = self._walk(rng, rng.choice(lanes), rng.uniform(min_length, max_length),
-                                   lane_change_probability)
-                if route is not None and self.is_valid(route) and self.length(route) >= min_length:
-                    return route
+            target = 0.0
+            for attempt in range(max_attempts):
+                # Each target length gets several walks: long walks fail more
+                # often (dead ends, endpoint rules), and redrawing the target
+                # after every failure skewed lengths short of uniform. Genetic
+                # operators then drifted them back towards the middle of the
+                # bounds (borregas_ave NPCs: median 269 -> 335 m in 15 generations).
+                if attempt % WALKS_PER_TARGET == 0:
+                    target = rng.uniform(min_length, max_length)
+                route = self._walk(rng, rng.choice(lanes), target, lane_change_probability)
+                if route is not None and self.is_valid(route) and min_length <= self.length(route) <= max_length:
+                    # A walk that ran into a dead end well short of its target
+                    # is kept only on the target's last walk.
+                    if (self.length(route) >= SHORT_WALK_SHARE * target
+                            or attempt % WALKS_PER_TARGET == WALKS_PER_TARGET - 1):
+                        return route
         raise RuntimeError(f"no valid route found in {max_attempts} attempts")
 
     def alternative_routes(

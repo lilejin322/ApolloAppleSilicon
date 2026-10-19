@@ -2,7 +2,11 @@
 Bicycle chromosomes and the trajectories they replay.
 
 A ``BicycleAgent`` rides bike lanes and the virtual connectors that join them
-across junctions (``bike_connectors``). Its route, the waits of its two-stage
+across junctions (``bike_connectors``), and the road where there is no bike
+lane: the curb-side driving lane (``curb_lanes``), near its right edge
+(``CURB_CLEARANCE``). On maps with bike lanes most routes start on one
+(``BIKE_LANE_START_SHARE``) and may carry on along the road where it ends;
+on maps without, every route rides the road. Its route, the waits of its two-stage
 left turns, its rider type, its speed profile and its start time are genes.
 Like an NPC vehicle it ignores signals and the ego: it waits at its start
 pose until ``start_t``, follows its speed profile within the rider's limits,
@@ -19,15 +23,26 @@ from typing import Iterable, Mapping
 from .bike_connectors import DEFAULT_KINDS, ConnectorKind, bike_connectors
 from .replay import (
     ReplayLayout, ReplayTrajectory, RouteFrame, Span, SpeedPoint, anchored, check_profile, check_turning_radius,
-    curvature_spans, placed_stops, random_draws, rebased, refit_end, replay_layout, replay_path, speed_grid,
+    curvature_spans, drawn_speeds, placed_stops, random_draws, rebased, refit_end, replay_layout, replay_path, speed_grid,
 )
 from .traffic_constraints import check_footprint, check_stops
-from .routing import ENDPOINT_JUNCTION_MARGIN, InvalidRoute, LaneRoute, RouteRules, RouteSpace
+from .realism import RIDER_MIX, comfort_limits, draw_type
+from .routing import ENDPOINT_JUNCTION_MARGIN, InvalidRoute, LaneRoute, RouteRules, RouteSpace, junction_lanes
 from ..map import MapService
+from ..message.descriptor import DescriptorBundle
 from ..utils import require_nonnegative
 
 _LENGTH_FITS = 4
 """Times ``random`` refits a route's end to bring its replayed length within bounds."""
+
+CURB_CLEARANCE = 0.8
+"""Metres from a driving lane's right edge to a cyclist's centreline: riders keep
+about half a metre between their right side and the curb or parked cars
+(e.g. AASHTO Guide for the Development of Bicycle Facilities, 2012, §4.2)."""
+
+BIKE_LANE_START_SHARE = 0.8
+"""Default chance that a random bicycle starts on a bike lane, where the map has
+both bike lanes and curb lanes to start on."""
 
 PivotKey = tuple[str, int]
 """A pivot by its connector's lane ID and its index among that connector's pivots."""
@@ -36,6 +51,16 @@ PivotKey = tuple[str, int]
 class RiderType(Enum):
     BICYCLE = "BICYCLE"
     E_BIKE = "E_BIKE"
+
+
+def random_rider_type(rng: Random, weights: Mapping[str, float] = RIDER_MIX) -> "RiderType":
+    """
+    A rider type drawn from a composition (type name -> weight); by default
+    about one e-bike in six (``realism.RIDER_MIX``).
+
+    :rtype: RiderType
+    """
+    return RiderType[draw_type(rng, weights)]
 
 
 @dataclass(frozen=True)
@@ -76,6 +101,92 @@ RIDER_SPECS = MappingProxyType({
 """Dimensions and replay limits per rider type; not calibrated rider dynamics."""
 
 
+def _lane_type_numbers(service: MapService) -> dict[str, int]:
+    values = DescriptorBundle(service.descriptor_path).message(
+        "apollo.hdmap.Lane").DESCRIPTOR.fields_by_name["type"].enum_type.values_by_name
+    return {name: value.number for name, value in values.items()}
+
+
+def curb_lanes(service: MapService) -> frozenset[str]:
+    """
+    The driving lanes a bicycle may ride where there is no bike lane: the
+    curb-side lane of each road, i.e. a CITY_DRIVING lane outside junctions
+    with no driving lane and no bike lane on its right (a rider beside a bike
+    lane uses the bike lane), and the junction lanes that join two of them
+    (no U-turns).
+
+    :param MapService service: A map with its routing graph built.
+    :rtype: frozenset[str]
+    """
+    numbers = _lane_type_numbers(service)
+    city, biking = numbers["CITY_DRIVING"], numbers["BIKING"]
+    lanes, graph = service.lane_table, service.routing_graph
+    junction = junction_lanes(service)
+    u_turn = DescriptorBundle(service.descriptor_path).message("apollo.hdmap.Lane").DESCRIPTOR.fields_by_name[
+        "turn"].enum_type.values_by_name["U_TURN"].number
+    # A bike lane beside a car lane may be declared on either lane.
+    beside_bike = {other.id for lane in lanes.values() if lane.type == biking
+                   for other in lane.left_neighbor_forward_lane_id}
+    curb = {lane_id for lane_id, lane in lanes.items()
+            if lane.type == city and lane_id not in junction and lane_id not in beside_bike
+            and not any(other.id in lanes and lanes[other.id].type in (city, biking)
+                        for other in lane.right_neighbor_forward_lane_id)}
+
+    def forward(lane_id: str, reverse: bool = False) -> set[str]:
+        edges = graph.in_edges(lane_id, data=True) if reverse else graph.out_edges(lane_id, data=True)
+        return {(source if reverse else target) for source, target, data in edges if data["direction_type"] == "F"}
+
+    joins = {lane_id for lane_id, lane in lanes.items()
+             if lane.type == city and lane_id in junction and lane.turn != u_turn and lane_id in graph
+             and forward(lane_id, reverse=True) & curb and forward(lane_id) & curb}
+    return frozenset(curb | joins)
+
+
+def curb_offsets(service: MapService, lanes: Iterable[str]) -> dict[str, float]:
+    """
+    How far right of each curb lane's centreline a cyclist rides: the lane's
+    right half-width less ``CURB_CLEARANCE``, never negative. A junction lane
+    takes the mean of the curb lanes it joins, so the line stays continuous.
+
+    :rtype: dict[str, float]
+    """
+    lanes = set(lanes)
+    junction = junction_lanes(service)
+    table, graph = service.lane_table, service.routing_graph
+
+    def own(lane_id: str) -> float:
+        samples = table[lane_id].right_sample
+        half = sum(sample.width for sample in samples) / len(samples) if samples else 0.0
+        return max(half - CURB_CLEARANCE, 0.0)
+
+    offsets = {lane_id: own(lane_id) for lane_id in lanes if lane_id not in junction}
+    for lane_id in lanes & junction:
+        ends = [other for other in (*graph.predecessors(lane_id), *graph.successors(lane_id)) if other in offsets]
+        offsets[lane_id] = sum(offsets[other] for other in ends) / len(ends) if ends else own(lane_id)
+    return offsets
+
+
+def is_bike_lane(space: RouteSpace, lane_id: str) -> bool:
+    """
+    Whether a lane of the bicycles' space is a map bike lane (not a curb lane or connector).
+
+    :rtype: bool
+    """
+    lane = space.service.lane_table.get(lane_id)
+    return lane is not None and space.virtual_lane(lane_id) is None \
+        and lane.type == _lane_type_numbers(space.service)["BIKING"]
+
+
+def starts_on_bike_lane(space: RouteSpace, route: LaneRoute) -> bool:
+    """
+    Whether the route starts on a bike lane rather than on the road. Genetic
+    operators keep this from parent to child (``genetic.bicycle``).
+
+    :rtype: bool
+    """
+    return is_bike_lane(space, route.lanes[0])
+
+
 def pivot_keys(space: RouteSpace, route: LaneRoute) -> tuple[PivotKey, ...]:
     """
     Return the route's pivots in riding order.
@@ -103,6 +214,8 @@ class BicycleAgent:
         not be zero. The first point's speed also applies before it.
     :param float start_t: Seconds after scenario start to move off.
     :param RiderType rider_type: Dimensions and limits from ``RIDER_SPECS``.
+    :param float drive_style: In [0, 1], from gentle to brisk: the comfortable
+        acceleration and braking the replay uses (``realism.COMFORT``).
     """
 
     route: LaneRoute
@@ -110,12 +223,20 @@ class BicycleAgent:
     speed_profile: tuple[SpeedPoint, ...]
     start_t: float
     rider_type: RiderType
+    drive_style: float = 0.5
 
     def __post_init__(self) -> None:
         check_profile(self.route, self.speed_profile, self.spec.max_speed, self.rider_type.name)
         for dwell in self.turn_dwell:
             require_nonnegative(turn_dwell=dwell)
         require_nonnegative(start_t=self.start_t)
+        if not 0 <= self.drive_style <= 1:
+            raise ValueError(f"drive_style must be within [0, 1], got {self.drive_style}")
+
+    @property
+    def limits(self) -> RiderSpec:
+        """The spec with this rider's comfortable acceleration and braking (``drive_style``)."""
+        return comfort_limits(self.spec, self.rider_type.name, self.drive_style)
 
     @property
     def spec(self) -> RiderSpec:
@@ -150,21 +271,31 @@ class BicycleAgent:
 
     @staticmethod
     def space(service: MapService, *, kinds: Iterable[ConnectorKind] = DEFAULT_KINDS,
-              max_connector_length: float = 100.0) -> RouteSpace:
+              max_connector_length: float = 100.0, roads: bool = True) -> RouteSpace:
         """
-        Build the route space every rider type shares: bike lanes and their connectors.
+        Build the route space every rider type shares: bike lanes and their
+        connectors and, if ``roads``, the curb lanes (``curb_lanes``) ridden
+        ``curb_offsets`` right of their centrelines, with connectors from bike
+        lanes' dead ends onto them.
 
         Connectors are built for the largest turning radius in ``RIDER_SPECS``,
-        so every rider type can ride all of them.
+        so every rider type can ride all of them. Curb lanes are checked per
+        agent (``validate``: turning radius, footprint).
 
         :param MapService service: A map with its lane index and routing graph built.
         :param kinds: The connector kinds to generate.
         :param float max_connector_length: Longest connector in metres.
+        :param bool roads: Whether bicycles may ride curb lanes.
         :rtype: RouteSpace
         """
         radius = max(spec.min_turn_radius for spec in RIDER_SPECS.values())
-        connectors = bike_connectors(service, min_turn_radius=radius, kinds=kinds, max_length=max_connector_length)
-        return RouteSpace(service, BicycleAgent.rules(), connectors)
+        curb = curb_lanes(service) if roads else frozenset()
+        offsets = curb_offsets(service, curb)
+        road_space = RouteSpace(service, BicycleAgent.rules(), extra_lanes=curb, lane_offsets=offsets) if curb else None
+        road_lines = {lane_id: road_space.centerline(lane_id) for lane_id in curb} if curb else None
+        connectors = bike_connectors(service, min_turn_radius=radius, kinds=kinds, max_length=max_connector_length,
+                                     road_lanes=road_lines)
+        return RouteSpace(service, BicycleAgent.rules(), connectors, extra_lanes=curb, lane_offsets=offsets)
 
     def turn_waits(self, space: RouteSpace) -> dict[PivotKey, float]:
         """
@@ -230,7 +361,7 @@ class BicycleAgent:
         :rtype: ReplayTrajectory
         """
         layout, curvature, positions = self._validated_layout(space)
-        s, v, dwell = speed_grid(layout.path.length, self.speed_profile, positions, self.spec,
+        s, v, dwell = speed_grid(layout.path.length, self.speed_profile, positions, self.limits,
                                  curvature_spans=curvature, speed_limits=layout.limits,
                                  forced_stops=dict(zip(layout.pivots, self.turn_dwell)))
         return ReplayTrajectory(layout.path, self.start_t, s, v, dwell, layout.pivots)
@@ -263,7 +394,8 @@ class BicycleAgent:
     def random(cls, space: RouteSpace, rng: Random, *, rider_type: RiderType, max_start_t: float = 10.0,
                min_length: float = 30.0, max_length: float = 300.0, stop_probability: float = 0.0,
                max_dwell: float = 5.0, max_turn_dwell: float = 30.0, min_speed: float = 1.0,
-               max_attempts: int = 200, min_arrival_t: float = 0.0) -> "BicycleAgent":
+               max_attempts: int = 200, min_arrival_t: float = 0.0,
+               bike_lane_start_share: float = BIKE_LANE_START_SHARE) -> "BicycleAgent":
         """
         Draw a random valid bicycle of the given rider type.
 
@@ -281,25 +413,56 @@ class BicycleAgent:
         :param float min_arrival_t: Earliest allowed route-end time in scenario seconds;
             set to the scenario duration to prevent early terminal parking. Zero disables it.
         :param int max_attempts: Candidate limit, including rejected path geometry.
-        :raises RuntimeError: If the map has no bike lanes or no valid agent was found.
+        :param float bike_lane_start_share: Chance, drawn once per call, that the
+            route starts on a bike lane rather than a curb lane, where the space
+            has both to start on; otherwise it starts where it can.
+        :raises RuntimeError: If the space has no lanes or no valid agent was found.
         :rtype: BicycleAgent
         """
         require_nonnegative(min_arrival_t=min_arrival_t)
+        if not 0 <= bike_lane_start_share <= 1:
+            raise ValueError(f"bike_lane_start_share must be within [0, 1], got {bike_lane_start_share}")
         if not len(space.graph):
-            raise RuntimeError("the map has no bike lanes")
+            raise RuntimeError("the map has no lanes a bicycle may ride")
+        starts = space.start_lanes()
+        bike = [lane_id for lane_id in starts if is_bike_lane(space, lane_id)]
+        road = [lane_id for lane_id in starts if not is_bike_lane(space, lane_id)]
+        pools: list[list[str] | None] = [None]
+        if bike and road:
+            # One draw per call: redrawing per attempt would favour whichever
+            # kind of start yields valid agents more often. The other kind is
+            # tried only if the drawn one yields no agent at all.
+            pools = [bike, road] if rng.random() < bike_lane_start_share else [road, bike]
+        last_problem = "no candidates drawn"
+        for start_lanes in pools:
+            try:
+                return cls._random_from(space, rng, rider_type, start_lanes, max_start_t, min_length, max_length,
+                                        stop_probability, max_dwell, max_turn_dwell, min_speed, max_attempts,
+                                        min_arrival_t)
+            except RuntimeError as problem:
+                last_problem = str(problem)
+        raise RuntimeError(last_problem)
+
+    @classmethod
+    def _random_from(cls, space: RouteSpace, rng: Random, rider_type: RiderType, start_lanes: list[str] | None,
+                     max_start_t: float, min_length: float, max_length: float, stop_probability: float,
+                     max_dwell: float, max_turn_dwell: float, min_speed: float, max_attempts: int,
+                     min_arrival_t: float) -> "BicycleAgent":
+        """``random`` with walks starting on ``start_lanes`` (any start lane if None)."""
         spec = RIDER_SPECS[rider_type]
         last_problem = "no candidates drawn"
         for _ in range(max_attempts):
             try:
                 route = space.random_route(rng, min_length=min_length, max_length=max_length,
-                                           lane_change_probability=0.0)
+                                           lane_change_probability=0.0, start_lanes=start_lanes)
             except RuntimeError as problem:
                 last_problem = str(problem)
                 continue
             waits = tuple(rng.uniform(0, max_turn_dwell) for _ in pivot_keys(space, route))
             draws = random_draws(rng, spec.max_speed, stop_probability, max_dwell, min_speed)
-            agent = cls(route, waits, anchored(RouteFrame(space, route, ()), draws), rng.uniform(0, max_start_t),
-                        rider_type)
+            profile = drawn_speeds(space, anchored(RouteFrame(space, route, ()), draws), rng, rider_type.name,
+                                   spec.max_speed, min_speed)
+            agent = cls(route, waits, profile, rng.uniform(0, max_start_t), rider_type, rng.random())
             try:
                 # Fit the last leg to the length bounds, as for NPC vehicles,
                 # then validate the complete path.
@@ -364,6 +527,7 @@ class BicycleAgent:
                               for point in self.speed_profile],
             "start_t": self.start_t,
             "rider_type": self.rider_type.name,
+            "drive_style": self.drive_style,
         }
 
     @classmethod
@@ -379,4 +543,5 @@ class BicycleAgent:
             tuple(SpeedPoint(**point) for point in data["speed_profile"]),
             data["start_t"],
             RiderType[data["rider_type"]],
+            data.get("drive_style", 0.5),
         )

@@ -28,9 +28,11 @@ def mut_reroute(agent: ADAgent, space: RouteSpace, rng: Random,
 
 
 def mut_extend_or_truncate(agent: ADAgent, space: RouteSpace, rng: Random,
-                           config: ADOperatorConfig = ADOperatorConfig()) -> ADAgent | None:
+                           config: ADOperatorConfig = ADOperatorConfig(),
+                           direction: str | None = None) -> ADAgent | None:
     """
-    Extend or truncate the route at its start or end.
+    Extend or truncate the route at its start or end (``direction`` as in
+    ``route_operators.mut_extend_or_truncate``: the mutation event's draw).
 
     Extensions add one to three lanes after the end, or one or two before
     the start, along any legal step; truncations drop lanes from either end.
@@ -38,22 +40,21 @@ def mut_extend_or_truncate(agent: ADAgent, space: RouteSpace, rng: Random,
 
     :returns: The mutant, or None if no change applies.
     """
-    return on_route(agent, route_operators.mut_extend_or_truncate(agent.route, space, rng, config))
+    return on_route(agent, route_operators.mut_extend_or_truncate(agent.route, space, rng, config, direction=direction))
 
 
 def mut_lane_change(agent: ADAgent, space: RouteSpace, rng: Random,
-                    config: ADOperatorConfig = ADOperatorConfig()) -> ADAgent | None:
+                    config: ADOperatorConfig = ADOperatorConfig(),
+                    acceptance: float | None = None) -> ADAgent | None:
     """
     Insert a lane change into the route, or remove one.
 
-    An insertion moves to a neighbouring lane and rejoins the route later
-    through a lane path, or ends on the neighbouring lane. A removal replaces
-    a stretch containing a lane change with a path that has fewer, or ends
-    the route before the lane change.
+    See ``route_operators.mut_lane_change``; ``acceptance`` is the mutation
+    event's uniform draw for lane-change additions.
 
     :returns: The mutant, or None if the route can neither gain nor lose a lane change.
     """
-    return on_route(agent, route_operators.mut_lane_change(agent.route, space, rng, config))
+    return on_route(agent, route_operators.mut_lane_change(agent.route, space, rng, config, acceptance=acceptance))
 
 
 def mut_s(agent: ADAgent, space: RouteSpace, rng: Random,
@@ -86,10 +87,12 @@ def mut_ad_agent(agent: ADAgent, space: RouteSpace, rng: Random,
 
     :rtype: ADAgent
     """
+    acceptance = rng.random()  # lane-change acceptance draw for this mutation event, kept over retries
+    direction = rng.choice(("extend", "truncate"))  # extend/truncate direction for this event, kept over retries
     operators = {
         "reroute": lambda: mut_reroute(agent, space, rng, config),
-        "extend_or_truncate": lambda: mut_extend_or_truncate(agent, space, rng, config),
-        "lane_change": lambda: mut_lane_change(agent, space, rng, config),
+        "extend_or_truncate": lambda: mut_extend_or_truncate(agent, space, rng, config, direction),
+        "lane_change": lambda: mut_lane_change(agent, space, rng, config, acceptance),
         "s": lambda: mut_s(agent, space, rng, config),
         "start_t": lambda: mut_start_t(agent, rng, config),
     }

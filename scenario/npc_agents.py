@@ -22,9 +22,10 @@ from shapely.geometry import LineString
 from .replay import (
     STOP_CLEARANCE, ReplayTrajectory, RouteFrame, SpeedPoint, anchored, check_profile, check_turning_radius,
     curvature_spans, ordered_points, placed_stops, random_draws, rebased, refit_end, replay_layout, replay_path,
-    speed_grid, speed_limit,
+    speed_grid, speed_limit, drawn_speeds,
 )
 from .traffic_constraints import check_footprint, check_stops
+from .realism import VEHICLE_MIX, comfort_limits, draw_type
 from .routing import ENDPOINT_JUNCTION_MARGIN, InvalidRoute, LaneRoute, RouteRules, RouteSpace
 from ..utils import require_nonnegative
 
@@ -41,6 +42,16 @@ class VehicleType(Enum):
     VAN = "VAN"
     TRUCK = "TRUCK"
     BUS = "BUS"
+
+
+def random_vehicle_type(rng: Random, weights: Mapping[str, float] = VEHICLE_MIX) -> "VehicleType":
+    """
+    A vehicle type drawn from a traffic composition (type name -> weight);
+    by default urban US vehicle-miles (``realism.VEHICLE_MIX``).
+
+    :rtype: VehicleType
+    """
+    return VehicleType[draw_type(rng, weights)]
 
 
 @dataclass(frozen=True)
@@ -102,6 +113,8 @@ class NPCVehicleAgent:
         not be zero. The first point's speed also applies before it.
     :param float start_t: Seconds after scenario start to move off.
     :param VehicleType vehicle_type: Dimensions and limits from ``VEHICLE_SPECS``.
+    :param float drive_style: In [0, 1], from gentle to brisk: the comfortable
+        acceleration and braking the replay uses (``realism.COMFORT``).
     """
 
     route: LaneRoute
@@ -109,6 +122,7 @@ class NPCVehicleAgent:
     speed_profile: tuple[SpeedPoint, ...]
     start_t: float
     vehicle_type: VehicleType
+    drive_style: float = 0.5
 
     def __post_init__(self) -> None:
         if len(self.lane_change_s) != self.route.lane_changes:
@@ -116,6 +130,8 @@ class NPCVehicleAgent:
                              f"({self.route.lane_changes}), got {len(self.lane_change_s)}")
         check_profile(self.route, self.speed_profile, self.spec.max_speed, self.vehicle_type.name)
         require_nonnegative(start_t=self.start_t)
+        if not 0 <= self.drive_style <= 1:
+            raise ValueError(f"drive_style must be within [0, 1], got {self.drive_style}")
 
     @property
     def spec(self) -> VehicleSpec:
@@ -125,6 +141,11 @@ class NPCVehicleAgent:
         :rtype: VehicleSpec
         """
         return VEHICLE_SPECS[self.vehicle_type]
+
+    @property
+    def limits(self) -> VehicleSpec:
+        """The spec with this agent's comfortable acceleration and braking (``drive_style``)."""
+        return comfort_limits(self.spec, self.vehicle_type.name, self.drive_style)
 
     @staticmethod
     def rules(vehicle_type: VehicleType) -> RouteRules:
@@ -218,7 +239,7 @@ class NPCVehicleAgent:
         :rtype: ReplayTrajectory
         """
         path, curvature, limits, positions = self._validated_layout(space)
-        s, v, dwell = speed_grid(path.length, self.speed_profile, positions, self.spec,
+        s, v, dwell = speed_grid(path.length, self.speed_profile, positions, self.limits,
                                  curvature_spans=curvature, speed_limits=limits)
         return ReplayTrajectory(path, self.start_t, s, v, dwell)
 
@@ -303,7 +324,8 @@ class NPCVehicleAgent:
                 continue
             draws = random_draws(rng, spec.max_speed, stop_probability, max_dwell, min_speed)
             frame = RouteFrame(space, route, positions)
-            agent = cls(route, positions, anchored(frame, draws), rng.uniform(0, max_start_t), vehicle_type)
+            profile = drawn_speeds(space, anchored(frame, draws), rng, vehicle_type.name, spec.max_speed, min_speed)
+            agent = cls(route, positions, profile, rng.uniform(0, max_start_t), vehicle_type, rng.random())
             try:
                 # Explicit lane changes and joins change the geometric length.
                 # Fit the final leg to the original length target when possible,
@@ -408,6 +430,7 @@ class NPCVehicleAgent:
                               for point in self.speed_profile],
             "start_t": self.start_t,
             "vehicle_type": self.vehicle_type.name,
+            "drive_style": self.drive_style,
         }
 
     @classmethod
@@ -435,11 +458,11 @@ class NPCVehicleAgent:
                 raise ValueError("a version 1 NPC dict (speed points by fraction) needs its RouteSpace to load")
             draws = [(point["fraction"], point["speed"], point.get("dwell", 0.0)) for point in data["speed_profile"]]
             return cls(route, lane_change_s, _from_fractions(space, route, lane_change_s, draws, vehicle_type),
-                       data["start_t"], vehicle_type)
+                       data["start_t"], vehicle_type, data.get("drive_style", 0.5))
         if version != SPEED_PROFILE_VERSION:
             raise ValueError(f"unknown NPC dict version {version!r}")
         return cls(route, lane_change_s, tuple(SpeedPoint(**point) for point in data["speed_profile"]),
-                   data["start_t"], vehicle_type)
+                   data["start_t"], vehicle_type, data.get("drive_style", 0.5))
 
 
 def _from_fractions(space: RouteSpace, route: LaneRoute, lane_change_s: tuple[float, ...],
