@@ -1,0 +1,22 @@
+"""
+Genetic operators for scenario chromosomes, one subpackage per agent type.
+
+``route_operators`` and ``common`` are shared by every agent type, and
+``profile_operators`` by every replayed one; ``ad_agent`` holds the
+``ADAgent`` operators, ``npc_agent`` the ``NPCVehicleAgent`` ones and
+``bicycle`` the ``BicycleAgent`` ones. Operators of different agent types
+share names, so they are imported from their subpackage; only the entry
+points are exported here. Scenario-level operators will wrap these.
+"""
+
+from . import ad_agent, bicycle, npc_agent, profile_operators, route_operators
+from .ad_agent import ADOperatorConfig, cx_ad_agent, mut_ad_agent
+from .bicycle import BicycleOperatorConfig, cx_bicycle, mut_bicycle
+from .common import OperatorConfig, ReplayOperatorConfig
+from .npc_agent import NPCOperatorConfig, cx_npc_agent, mut_npc_agent
+
+__all__ = [
+    "ADOperatorConfig", "BicycleOperatorConfig", "NPCOperatorConfig", "OperatorConfig", "ReplayOperatorConfig",
+    "ad_agent", "bicycle", "cx_ad_agent", "cx_bicycle", "cx_npc_agent", "mut_ad_agent", "mut_bicycle",
+    "mut_npc_agent", "npc_agent", "profile_operators", "route_operators",
+]

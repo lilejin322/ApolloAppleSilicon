@@ -9,7 +9,7 @@ uses ``scenario.routing`` to build its routing request, which
 from dataclasses import dataclass
 from random import Random
 
-from .routing import LaneRoute, RoutePoses, RouteRules, RouteSpace
+from .routing import ENDPOINT_JUNCTION_MARGIN, LaneRoute, RoutePoses, RouteRules, RouteSpace
 from ..utils import require_nonnegative
 
 
@@ -35,13 +35,15 @@ class ADAgent:
     @staticmethod
     def rules(*, min_turn_radius: float) -> RouteRules:
         """
-        Route rules for an ego vehicle: city lanes, no U-turn tighter than it can drive.
+        Route rules for an ego vehicle: city lanes, no U-turn tighter than it
+        can drive, starts and ends away from junctions (``ENDPOINT_JUNCTION_MARGIN``).
 
         :param float min_turn_radius: The vehicle's minimum turning radius in metres,
             e.g. ``utils.get_vehicle_params(...).min_turn_radius``.
         :rtype: RouteRules
         """
-        return RouteRules(lane_types=frozenset({"CITY_DRIVING"}), min_turn_radius=min_turn_radius)
+        return RouteRules(lane_types=frozenset({"CITY_DRIVING"}), min_turn_radius=min_turn_radius,
+                          endpoint_junction_margin=ENDPOINT_JUNCTION_MARGIN)
 
     @property
     def routing_str(self) -> str:
