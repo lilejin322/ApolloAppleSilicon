@@ -32,7 +32,6 @@ class _Snapshot(NamedTuple):
     """
     One map file's shared data: its tables, and the indexed view once built.
     """
-
     tables: "MapService"
     """Shared decoded tables and lazy relations, without spatial indexes or a routing graph."""
     indexed: Optional["MapService"] = None
