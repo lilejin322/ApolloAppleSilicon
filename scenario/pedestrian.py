@@ -94,10 +94,10 @@ def random_walker_type(rng: Random, weights: Mapping[str, float] = WALKER_MIX) -
     A walker type drawn from a composition (type name -> weight); by default
     ``realism.WALKER_MIX``.
 
-    :rtype: WalkerType
     :param Random rng: Random number generator used for sampling and selection.
     :param Mapping[str, float] weights: Relative nonnegative sampling weights keyed by type name.
     :returns: The sampled walker category.
+    :rtype: WalkerType
     """
     return WalkerType[draw_type(rng, weights)]
 
@@ -161,7 +161,8 @@ class WalkLayout(NamedTuple):
 
     :param LineString path: Replay path in map metres.
     :param Tuple[float, ...] pivots: Path distances where the agent stops and turns in place, in metres.
-    :param Callable[[float], float] moved: Moved.
+    :param Callable[[float], float] moved: Maps raw walked distance to distance
+        along the smoothed replay path.
     """
 
     path: LineString
@@ -169,7 +170,7 @@ class WalkLayout(NamedTuple):
     pivots: Tuple[float, ...]
     """Path distances where the agent stops and turns in place, in metres."""
     moved: Callable[[float], float]
-    """Moved."""
+    """Map raw walked metres to metres along the smoothed replay path."""
 
 
 def walk_layout(network: WalkNetwork, frame: WalkFrame, profile: Sequence[SpeedPoint]) -> WalkLayout:
@@ -183,12 +184,14 @@ def walk_layout(network: WalkNetwork, frame: WalkFrame, profile: Sequence[SpeedP
     there, turns in place to face the road, then waits. A vertex is inserted
     at each pivot.
 
-    :raises InvalidRoute: If the walk has no length.
     :param WalkNetwork network: Walk network supplying sidewalk and excursion geometry.
-    :param WalkFrame frame: Route or walk frame used to map element positions to travelled distance.
-    :param Sequence[SpeedPoint] profile: Ordered target-speed points; positions are lane or walk-element metres.
-    :returns: The path a walker replays: its walk's raw elements joined, split at the pivots and each piece smoothed (``WALK_SMOOTHING``).
+    :param WalkFrame frame: Walk frame used to map element positions to travelled distance.
+    :param Sequence[SpeedPoint] profile: Ordered target-speed points; positions are
+        walk-element metres.
+    :returns: The smoothed replay-path layout, including pivots and the mapping
+        from raw walked distance to smoothed path distance.
     :rtype: WalkLayout
+    :raises InvalidRoute: If the walk has no length.
     """
     points: List[Tuple[float, float]] = []
     raw: List[float] = []
@@ -226,8 +229,8 @@ def walk_layout(network: WalkNetwork, frame: WalkFrame, profile: Sequence[SpeedP
         """
         Map a raw walked distance onto the simplified replay path.
 
-        :param float value: Value to evaluate or transform in the units specified by this operation.
-        :returns: The computed distance, duration, or scalar value described above.
+        :param float value: Distance along the raw walk, in metres.
+        :returns: Corresponding distance along the smoothed replay path, in metres.
         :rtype: float
         """
         piece = min(max(int(np.searchsorted(raw_starts, value, side="right")) - 1, 0), len(pieces) - 1)
@@ -254,8 +257,8 @@ def _turn(points: Sequence[Tuple[float, float]], raw: np.ndarray, distance: floa
         """
         Interpolate a point at a distance along the raw polyline.
 
-        :param float value: Value to evaluate or transform in the units specified by this operation.
-        :returns: The lane or element ID and its local position, in metres.
+        :param float value: Distance along the raw polyline, in metres.
+        :returns: The interpolated map coordinate at that distance.
         :rtype: Tuple[float, float]
         """
         return float(np.interp(value, raw, xs)), float(np.interp(value, raw, ys))
@@ -300,10 +303,12 @@ def _entry_wait(network: WalkNetwork, frame: WalkFrame, index: int, profile: Seq
     ``GUTTER_REACH`` past the curb. None if it does not wait there.
 
     :param WalkNetwork network: Walk network supplying sidewalk and excursion geometry.
-    :param WalkFrame frame: Route or walk frame used to map element positions to travelled distance.
-    :param int index: Index of the element, transition, or point being processed.
-    :param Sequence[SpeedPoint] profile: Ordered target-speed points; positions are lane or walk-element metres.
-    :returns: The entry wait values described above.
+    :param WalkFrame frame: Walk frame used to map element positions to travelled distance.
+    :param int index: Index of the excursion element being processed.
+    :param Sequence[SpeedPoint] profile: Ordered target-speed points; positions are
+        walk-element metres.
+    :returns: Walked distance of the first qualifying entry wait, or ``None`` if
+        the walker does not wait there.
     :rtype: float | None
     """
     element = frame.elements[index]
@@ -366,8 +371,8 @@ class PedestrianAgent:
         """
         The walker type's dimensions and limits.
 
-        :rtype: WalkerSpec
         :returns: The immutable dimensions and hard motion limits of the agent type.
+        :rtype: WalkerSpec
         """
         return WALKER_SPECS[self.walker_type]
 
@@ -386,8 +391,8 @@ class PedestrianAgent:
         """
         Always empty: lets code shared with lane routes measure walks.
 
-        :rtype: Tuple[float, ...]
         :returns: An empty tuple; this agent does not perform lane changes.
+        :rtype: Tuple[float, ...]
         """
         return ()
 
@@ -395,10 +400,10 @@ class PedestrianAgent:
         """
         Check the walk, the speed points and the path's turning radius.
 
-        :raises InvalidRoute: With the first problem found.
         :param WalkNetwork network: Walk network supplying sidewalk and excursion geometry.
         :returns: ``None`` if all applicable validation checks pass.
         :rtype: None
+        :raises InvalidRoute: With the first problem found.
         """
         self._validated_layout(network)
 
@@ -429,13 +434,14 @@ class PedestrianAgent:
         """
         Walked distance from the start to ``s`` on an element, clamped to it.
 
+        :param WalkNetwork network: Walk network supplying sidewalk and excursion geometry.
+        :param str lane_id: Walk-element ID on the route.
+        :param float s: Position along that element, in metres.
+        :returns: Travelled distance from the walk start, in metres, clamped to
+            the element window.
+        :rtype: float
         :raises InvalidRoute: If the walk is invalid.
         :raises KeyError: If the element is not on the walk.
-        :param WalkNetwork network: Walk network supplying sidewalk and excursion geometry.
-        :param str lane_id: Map, virtual-lane, or walk-element ID, as applicable.
-        :param float s: Position along the lane, element, or path, in metres.
-        :returns: Travelled distance from the route start, in metres, clamped to the element window.
-        :rtype: float
         """
         return network.frame(self.route).distance(lane_id, s)
 
@@ -443,11 +449,11 @@ class PedestrianAgent:
         """
         The (element, s) at a walked distance (``route_distance``).
 
-        :raises InvalidRoute: If the walk is invalid.
         :param WalkNetwork network: Walk network supplying sidewalk and excursion geometry.
         :param float distance: Travelled distance, in metres.
-        :returns: The lane or element ID and position in metres at the requested travelled distance.
+        :returns: The walk-element ID and local position at the requested walked distance.
         :rtype: Tuple[str, float]
+        :raises InvalidRoute: If the walk is invalid.
         """
         return network.frame(self.route).at(distance)
 
@@ -455,10 +461,10 @@ class PedestrianAgent:
         """
         Compute the motion this agent replays.
 
-        :raises InvalidRoute: If the agent is invalid on this network.
-        :rtype: ReplayTrajectory
         :param WalkNetwork network: Walk network supplying sidewalk and excursion geometry.
         :returns: The trajectory describing the agent motion over scenario time.
+        :rtype: ReplayTrajectory
+        :raises InvalidRoute: If the agent is invalid on this network.
         """
         layout, spans, positions = self._validated_layout(network)
         s, v, dwell = speed_grid(layout.path.length, self.speed_profile, positions, self.limits,
@@ -474,11 +480,11 @@ class PedestrianAgent:
         within the element; others move to the same share of the walked
         distance, as for lane routes (``replay.rebased``).
 
-        :raises InvalidRoute: If the agent is invalid on the new walk.
-        :rtype: PedestrianAgent
-        :param WalkRoute route: Route to inspect, validate, or convert.
+        :param WalkRoute route: Walk to inspect, validate, or convert.
         :param WalkNetwork network: Walk network supplying sidewalk and excursion geometry.
-        :returns: An agent on the proposed route with its profile and dependent route genes adjusted.
+        :returns: An agent on the proposed walk with its speed profile adjusted.
+        :rtype: PedestrianAgent
+        :raises InvalidRoute: If the agent is invalid on the new walk.
         """
         candidate = replace(self, route=route, speed_profile=rebased_walk(network, self.route, self.speed_profile,
                                                                           route))
@@ -506,21 +512,25 @@ class PedestrianAgent:
 
         :param WalkNetwork network: The map's walk network.
         :param Random rng: Source of randomness; equal seeds give equal agents.
-        :param float min_length: Shortest replay path in metres.
-        :param float max_length: Longest replay path in metres.
-        :param float min_arrival_t: Earliest allowed end-of-walk time in scenario seconds; zero disables it.
-        :raises RuntimeError: If the map has no sidewalks or no valid agent was found.
-        :rtype: PedestrianAgent
         :param WalkerType walker_type: Walker category selecting motion limits and speed priors.
         :param float max_start_t: Maximum sampled start time, in scenario seconds.
+        :param float min_length: Shortest replay path in metres.
+        :param float max_length: Longest replay path in metres.
         :param Mapping[int, float] count_weights: Relative sampling weights keyed by excursion count.
         :param Mapping[str, float] kind_weights: Relative sampling weights keyed by excursion kind name.
         :param float max_link: Maximum sidewalk distance between connected excursions, in metres.
         :param float max_approach: Maximum sidewalk distance from an endpoint to the adjacent excursion, in metres.
         :param float turn_back_probability: Probability that the final excursion contains a turning point.
         :param float min_speed: Minimum moving target speed, in m/s.
-        :param int max_attempts: Maximum number of generation attempts before failure.
+        :param int max_attempts: Maximum generation attempts for each fixed
+            excursion-kind sequence before dropping the last excursion and retrying.
+        :param float min_arrival_t: Earliest allowed end-of-walk time in scenario
+            seconds; zero disables it.
         :returns: A randomly generated valid agent satisfying the requested constraints.
+        :rtype: PedestrianAgent
+        :raises ValueError: If input fields or bounds violate the validation
+            conditions of this operation.
+        :raises RuntimeError: If the map has no sidewalks or no valid agent was found.
         """
         require_nonnegative(min_arrival_t=min_arrival_t)
         if not network.sidewalks:
@@ -552,10 +562,10 @@ class PedestrianAgent:
         :param WalkNetwork network: Walk network supplying sidewalk and excursion geometry.
         :param Random rng: Random number generator used for sampling and selection.
         :param WalkerType walker_type: Walker category selecting motion limits and speed priors.
-        :param List[ExcursionKind] kinds: Allowed connector kinds or ordered excursion kinds for this operation.
+        :param List[ExcursionKind] kinds: Excursion kinds to include, in walk order.
         :param float max_start_t: Maximum sampled start time, in scenario seconds.
-        :param float min_length: Minimum accepted replay path or route length, in metres.
-        :param float max_length: Maximum accepted replay path, route, or connector length, in metres.
+        :param float min_length: Minimum accepted replay-path length, in metres.
+        :param float max_length: Maximum accepted replay-path length, in metres.
         :param float max_link: Maximum sidewalk distance between connected excursions, in metres.
         :param float max_approach: Maximum sidewalk distance from an endpoint to the adjacent excursion, in metres.
         :param float turn_back_probability: Probability that the final excursion contains a turning point.
@@ -594,8 +604,8 @@ class PedestrianAgent:
         """
         Return a JSON-compatible representation.
 
-        :rtype: Dict
         :returns: A new JSON-compatible mapping of the object fields.
+        :rtype: Dict
         """
         return {
             "route": self.route.to_dict(),
@@ -611,10 +621,11 @@ class PedestrianAgent:
         """
         Build an agent from ``to_dict`` output.
 
-        :rtype: PedestrianAgent
         :param Dict data: Serialized mapping previously produced by ``to_dict``.
         :returns: The reconstructed object.
-        :raises KeyError: If a required serialized field or map identifier is absent.
+        :rtype: PedestrianAgent
+        :raises KeyError: If a required serialized field is absent or ``walker_type``
+            names an unknown walker type.
         """
         return cls(WalkRoute.from_dict(data["route"]), tuple(SpeedPoint(**point) for point in data["speed_profile"]),
                    data["start_t"], WalkerType[data["walker_type"]], data.get("walk_style", 0.5))
@@ -629,13 +640,14 @@ def rebased_walk(network: WalkNetwork, old_route: WalkRoute, profile: Sequence[S
     of the new walk if the old walk is invalid). Points are then put in
     walking order (``replay.ordered_points``).
 
-    :raises InvalidRoute: If ``route`` is invalid.
     :param WalkNetwork network: Walk network supplying sidewalk and excursion geometry.
-    :param WalkRoute old_route: Original route on which the input speed points are defined.
-    :param Sequence[SpeedPoint] profile: Ordered target-speed points; positions are lane or walk-element metres.
-    :param WalkRoute route: Route to inspect, validate, or convert.
+    :param WalkRoute old_route: Original walk on which the input speed points are defined.
+    :param Sequence[SpeedPoint] profile: Ordered target-speed points; positions are
+        walk-element metres.
+    :param WalkRoute route: Walk to inspect, validate, or convert.
     :returns: The input profile mapped onto the proposed walk.
     :rtype: Tuple[SpeedPoint, ...]
+    :raises InvalidRoute: If ``route`` is invalid.
     """
     new = network.frame(route)
     try:
@@ -666,15 +678,16 @@ def random_walk_profile(network: WalkNetwork, route: WalkRoute, rng: Random, kin
     followed by the crossing speed ``RESUME_GAP`` later. At most
     ``MAX_SPEED_POINTS`` points; groups that do not fit are left out.
 
-    :raises InvalidRoute: If the walk is invalid.
     :param WalkNetwork network: Walk network supplying sidewalk and excursion geometry.
-    :param WalkRoute route: Route to inspect, validate, or convert.
+    :param WalkRoute route: Walk to inspect, validate, or convert.
     :param Random rng: Random number generator used for sampling and selection.
-    :param str kind: Traffic type name or excursion category selecting the applicable rules or prior.
+    :param str kind: Walker type name selecting the speed prior.
     :param float max_speed: Maximum allowed target speed, in m/s.
     :param float min_speed: Minimum moving target speed, in m/s.
-    :returns: A random speed profile for a walk: a cruise speed from the walker's prior from the start and, per excursion in priority order, a curb wait (some of them just off the curb), a wait on a median or island it crosses, a faster crossing, and a hesitation mid-road, each with its chance; every stop is followed by the crossing speed ``RESUME_GAP`` later. At most ``MAX_SPEED_POINTS`` points; groups that do not fit are left out.
+    :returns: A random speed profile with a cruise speed and optional excursion
+        waits, faster crossings, and hesitations, limited to ``MAX_SPEED_POINTS``.
     :rtype: Tuple[SpeedPoint, ...]
+    :raises InvalidRoute: If the walk is invalid.
     """
     frame = network.frame(route)
     low = min(min_speed, max_speed)
@@ -694,9 +707,9 @@ def random_walk_profile(network: WalkNetwork, route: WalkRoute, rng: Random, kin
             """
             Create a stop and its moving resume point on the current excursion.
 
-            :param float s: Position along the lane, element, or path, in metres.
-            :param float dwell: Stop dwell samples, in seconds.
-            :returns: The stop values described above.
+            :param float s: Position along the current excursion, in metres.
+            :param float dwell: Stop dwell duration, in seconds.
+            :returns: The zero-speed stop point followed by its moving resume point.
             :rtype: List[SpeedPoint]
             """
             return [SpeedPoint(name, s, 0.0, dwell), SpeedPoint(name, s + RESUME_GAP, crossing)]
