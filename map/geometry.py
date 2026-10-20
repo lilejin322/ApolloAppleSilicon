@@ -7,7 +7,9 @@ Contact: li.lejin.147@s.kyushu-u.ac.jp
 
 from bisect import bisect_right
 from itertools import accumulate
-from math import atan2, hypot, pi
+from math import atan2, ceil, hypot, pi
+
+import numpy as np
 from google.protobuf.message import Message
 from shapely import STRtree
 from shapely.geometry import LineString, MultiLineString, Point, Polygon
@@ -248,3 +250,127 @@ class CenterlineProfile:
         before: float = self.headings[index - 1]
         turn: float = normalize_angle(self.headings[index] - before)
         return normalize_angle(before + turn * (s - start) / (end - start))
+
+
+REPLAY_TOLERANCE = 0.05
+"""Metres a replayed path may deviate from lane geometry when vertex noise is dropped."""
+
+
+def turn_curvatures(line: LineString) -> List[Tuple[float, float, float]]:
+    """
+    Return ``(low, high, curvature)`` for every interval between neighbouring
+    segment midpoints of ``line``, under the heading model of
+    ``CenterlineProfile``: the heading turns linearly between midpoints, so
+    each interval has a constant absolute curvature. Intervals without a turn
+    are omitted.
+
+    :param LineString line: A line without zero-length segments.
+    :rtype: list[tuple[float, float, float]]
+    """
+    profile = CenterlineProfile(line)
+    spans = []
+    for index in range(1, len(profile.midpoint_s)):
+        low, high = profile.midpoint_s[index - 1:index + 1]
+        if high <= low:
+            continue
+        turn = abs(normalize_angle(profile.headings[index] - profile.headings[index - 1]))
+        if turn:
+            spans.append((low, high, turn / (high - low)))
+    return spans
+
+
+def replay_line(points: Iterable[Tuple[float, ...]]) -> Optional[LineString]:
+    """
+    The line a vehicle replays through ``points``: vertex noise within
+    ``REPLAY_TOLERANCE`` dropped. None if fewer than two distinct points remain.
+
+    :rtype: LineString | None
+    """
+    coords: List[Tuple[float, float]] = []
+    for point in points:
+        xy = (point[0], point[1])
+        if not coords or coords[-1] != xy:
+            coords.append(xy)
+    if len(coords) < 2:
+        return None
+    return LineString(coords).simplify(REPLAY_TOLERANCE, preserve_topology=False)
+
+
+SMOOTHING_SIGMA = 2.0
+"""Metres: standard deviation of the Gaussian that rounds a replayed path's corners."""
+SMOOTHING_STEP = 0.5
+"""Largest metres between the vertices of a smoothed replay path."""
+
+
+def smooth_polyline(points: Iterable[Tuple[float, ...]], sigma: float = SMOOTHING_SIGMA,
+                    step: float = SMOOTHING_STEP) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Resample a polyline every ``step`` metres or less and smooth it with a
+    Gaussian of ``sigma`` metres along its length, keeping both end points.
+
+    Coarse maps join long straight segments at sharp vertices; a vehicle that
+    follows such a polyline changes direction instantly at every vertex while
+    its heading model turns gradually, so pose and motion disagree. The
+    smoothed line has its curvature spread over a few metres around each
+    vertex, so headings derived from it match the direction of motion.
+    Straight stretches stay straight; the ends are extended along their end
+    segments before filtering, then any residual end offset is faded out over
+    ``3 * sigma``.
+
+    :returns: The smoothed vertices, shape (n, 2), and for each the distance
+        along the input polyline it was resampled at.
+    :rtype: tuple[numpy.ndarray, numpy.ndarray]
+    """
+    raw = np.array([(point[0], point[1]) for point in points], dtype=float)
+    if len(raw) > 1:
+        raw = raw[np.r_[True, np.hypot(*np.diff(raw, axis=0).T) > 0]]
+    if len(raw) < 2:
+        return raw, np.zeros(len(raw))
+    along = np.r_[0.0, np.cumsum(np.hypot(*np.diff(raw, axis=0).T))]
+    length = along[-1]
+    count = max(2, ceil(length / step))
+    s = np.linspace(0.0, length, count + 1)
+    s[-1] = length
+    x, y = np.interp(s, along, raw[:, 0]), np.interp(s, along, raw[:, 1])
+    if sigma <= 0:
+        return np.column_stack([x, y]), s
+    spacing = length / count
+    reach = ceil(3 * sigma / spacing)
+    offsets = np.arange(-reach, reach + 1) * spacing
+    kernel = np.exp(-0.5 * (offsets / sigma) ** 2)
+    kernel /= kernel.sum()
+    first = (raw[1] - raw[0]) / np.hypot(*(raw[1] - raw[0]))
+    last = (raw[-1] - raw[-2]) / np.hypot(*(raw[-1] - raw[-2]))
+    before = np.arange(reach, 0, -1) * spacing
+    after = np.arange(1, reach + 1) * spacing
+    smoothed = []
+    for values, start, end in ((x, first[0], last[0]), (y, first[1], last[1])):
+        padded = np.r_[values[0] - before * start, values, values[-1] + after * end]
+        smoothed.append(np.convolve(padded, kernel, mode="valid"))
+    # Fade any end offset out: c(s) = a * r0(s) + b * r1(s) with c(0), c(L) exact.
+    fade = 3 * sigma
+    r0, r1 = np.clip(1 - s / fade, 0, 1), np.clip(1 - (length - s) / fade, 0, 1)
+    k0, k1 = r1[0], r0[-1]
+    determinant = 1 - k0 * k1
+    for values, result in zip((x, y), smoothed):
+        e0, e1 = result[0] - values[0], result[-1] - values[-1]
+        a = (e0 - k0 * e1) / determinant
+        b = (e1 - k1 * e0) / determinant
+        result -= a * r0 + b * r1
+    return np.column_stack(smoothed), s
+
+
+def max_replay_curvature(points: Iterable[Tuple[float, ...]]) -> float:
+    """
+    The largest curvature a vehicle replaying ``points`` would drive, in 1/m:
+    noise dropped as in ``replay_line``, corners rounded by ``smooth_polyline``.
+
+    :rtype: float
+    """
+    line = replay_line(points)
+    if line is None or line.length == 0:
+        return 0.0
+    vertices, _ = smooth_polyline(line.coords)
+    if len(vertices) < 3:
+        return 0.0
+    return max((curvature for _, _, curvature in turn_curvatures(LineString(vertices))), default=0.0)
