@@ -41,8 +41,7 @@ about half a metre between their right side and the curb or parked cars
 (e.g. AASHTO Guide for the Development of Bicycle Facilities, 2012, §4.2)."""
 
 BIKE_LANE_START_SHARE = 0.8
-"""Default chance that a random bicycle starts on a bike lane, where the map has
-both bike lanes and curb lanes to start on."""
+"""Default chance of trying bike-lane starts first when both bike and curb starts are available."""
 
 PivotKey = Tuple[str, int]
 """A pivot by its connector's lane ID and its index among that connector's pivots."""
@@ -141,7 +140,7 @@ def curb_lanes(service: MapService) -> FrozenSet[str]:
     (no U-turns).
 
     :param MapService service: A map with its routing graph built.
-    :returns: IDs of curb road lanes eligible for bicycle riding.
+    :returns: IDs of curb road lanes and eligible junction lanes joining them.
     :rtype: FrozenSet[str]
     """
     numbers = _lane_type_numbers(service)
@@ -162,9 +161,9 @@ def curb_lanes(service: MapService) -> FrozenSet[str]:
         """
         Find adjacent forward driving lanes, optionally following edges in reverse.
 
-        :param str lane_id: Map, virtual-lane, or walk-element ID, as applicable.
+        :param str lane_id: Map lane ID.
         :param bool reverse: Whether to follow predecessor edges rather than successor edges.
-        :returns: Forward-connected lane IDs in stable order.
+        :returns: Forward-connected lane IDs.
         :rtype: Set[str]
         """
         edges = graph.in_edges(lane_id, data=True) if reverse else graph.out_edges(lane_id, data=True)
@@ -195,8 +194,8 @@ def curb_offsets(service: MapService, lanes: Iterable[str]) -> Dict[str, float]:
         """
         Compute the usable rightward riding offset on one curb lane.
 
-        :param str lane_id: Map, virtual-lane, or walk-element ID, as applicable.
-        :returns: The computed distance, duration, or scalar value described above.
+        :param str lane_id: Map lane ID.
+        :returns: The usable rightward riding offset in metres.
         :rtype: float
         """
         samples = table[lane_id].right_sample
@@ -214,8 +213,8 @@ def is_bike_lane(space: RouteSpace, lane_id: str) -> bool:
     """
     Whether a lane of the bicycles' space is a map bike lane (not a curb lane or connector).
 
-    :param RouteSpace space: Route space supplying lane geometry, topology, and vehicle-specific constraints.
-    :param str lane_id: Map, virtual-lane, or walk-element ID, as applicable.
+    :param RouteSpace space: Route space supplying bicycle routing geometry and topology.
+    :param str lane_id: Map-lane or virtual-connector ID.
     :returns: ``True`` for a real map bike lane; ``False`` for curb lanes and connectors.
     :rtype: bool
     """
@@ -230,7 +229,7 @@ def starts_on_bike_lane(space: RouteSpace, route: LaneRoute) -> bool:
     operators keep this from parent to child (``genetic.bicycle``).
 
 
-    :param RouteSpace space: Route space supplying lane geometry, topology, and vehicle-specific constraints.
+    :param RouteSpace space: Route space supplying bicycle routing geometry and topology.
     :param LaneRoute route: Route to inspect, validate, or convert.
     :returns: ``True`` if the first route lane is a real bike lane.
     :rtype: bool
@@ -242,7 +241,7 @@ def pivot_keys(space: RouteSpace, route: LaneRoute) -> Tuple[PivotKey, ...]:
     """
     Return the route's pivots in riding order.
 
-    :param RouteSpace space: Route space supplying lane geometry, topology, and vehicle-specific constraints.
+    :param RouteSpace space: Route space supplying bicycle routing geometry and topology.
     :param LaneRoute route: Route to inspect, validate, or convert.
     :returns: Pivot identifiers in riding order.
     :rtype: Tuple[PivotKey, ...]
@@ -260,7 +259,7 @@ class BicycleAgent:
     """
     Genetic representation of one bicycle.
 
-    :param LaneRoute route: Bike lanes and connectors, with start and end positions.
+    :param LaneRoute route: Bike lanes, curb lanes, and connectors, with start and end positions.
     :param Tuple[float, ...] turn_dwell: Seconds to wait at each pivot of the
         route, in riding order; ``pivot_keys`` names them.
     :param Tuple[SpeedPoint, ...] speed_profile: One to four target speeds at
@@ -273,7 +272,7 @@ class BicycleAgent:
     """
 
     route: LaneRoute
-    """Bike lanes and connectors, with start and end positions."""
+    """Bike lanes, curb lanes, and connectors, with start and end positions."""
     turn_dwell: Tuple[float, ...]
     """Seconds to wait at each pivot of the route, in riding order; ``pivot_keys`` names them."""
     speed_profile: Tuple[SpeedPoint, ...]
@@ -377,8 +376,8 @@ class BicycleAgent:
         """
         Return the wait at each pivot of the route, by pivot.
 
-        :param RouteSpace space: Route space supplying lane geometry, topology, and vehicle-specific constraints.
-        :returns: The turn waits values described above.
+        :param RouteSpace space: Route space supplying bicycle routing geometry and topology.
+        :returns: Pivot identifiers mapped to their dwell times in seconds.
         :rtype: Dict[PivotKey, float]
         """
         return dict(zip(pivot_keys(space, self.route), self.turn_dwell))
@@ -388,8 +387,9 @@ class BicycleAgent:
         Check the route, the turn waits, the speed points, and the path's turning radius.
 
         :param RouteSpace space: Built with ``BicycleAgent.space``.
-        :raises InvalidRoute: With the first problem found.
         :returns: ``None`` if all applicable validation checks pass.
+        :rtype: None
+        :raises InvalidRoute: With the first problem found.
         """
         self._validated_layout(space)
 
@@ -398,7 +398,7 @@ class BicycleAgent:
         The replay layout, its curvature spans, and the path metres of each
         speed point, once the path is known to be rideable.
 
-        :param RouteSpace space: Route space supplying lane geometry, topology, and vehicle-specific constraints.
+        :param RouteSpace space: Route space supplying bicycle routing geometry and topology.
         :returns: The replay layout, its curvature spans, and the path metres of each speed point, once the path is known to be rideable.
         :rtype: Tuple[ReplayLayout, List[Span], List[float]]
         :raises InvalidRoute: If route geometry, topology, point placement, or map constraints fail the checks performed here.
@@ -423,10 +423,10 @@ class BicycleAgent:
         Driven distance from the route start to ``s`` on a route lane, clamped
         to the lane's driven stretch (as ``RouteSpace.length``).
 
-        :param RouteSpace space: Route space supplying lane geometry, topology, and vehicle-specific constraints.
-        :param str lane_id: Map, virtual-lane, or walk-element ID, as applicable.
-        :param float s: Position along the lane, element, or path, in metres.
-        :returns: Travelled distance from the route start, in metres, clamped to the element window.
+        :param RouteSpace space: Route space supplying bicycle routing geometry and topology.
+        :param str lane_id: ID of a map lane or virtual connector on the route.
+        :param float s: Position along the lane or connector, in metres.
+        :returns: Travelled distance from the route start, in metres, clamped to the route element window.
         :rtype: float
         :raises InvalidRoute: If the route is invalid.
         :raises KeyError: If the lane is not on the route.
@@ -437,9 +437,9 @@ class BicycleAgent:
         """
         The (lane, s) at a driven distance along the route (``route_distance``).
 
-        :param RouteSpace space: Route space supplying lane geometry, topology, and vehicle-specific constraints.
+        :param RouteSpace space: Route space supplying bicycle routing geometry and topology.
         :param float distance: Travelled distance, in metres.
-        :returns: The lane or element ID and position in metres at the requested travelled distance.
+        :returns: The map-lane or virtual-connector ID and position in metres at the requested travelled distance.
         :rtype: Tuple[str, float]
         :raises InvalidRoute: If the route is invalid.
         """
@@ -473,8 +473,7 @@ class BicycleAgent:
         same share of the new route's driven distance.
 
         :param LaneRoute route: Route to inspect, validate, or convert.
-        :param RouteSpace space: Route space supplying lane geometry, topology,
-            and vehicle-specific constraints.
+        :param RouteSpace space: Route space supplying bicycle routing geometry and topology.
         :param Random rng: Random number generator used for sampling and selection.
         :param Mapping[PivotKey, float] | None keep: Waits by pivot; this agent's
             own by default. A crossover child passes both parents'.
@@ -513,13 +512,14 @@ class BicycleAgent:
         :param float max_dwell: Longest stop in seconds.
         :param float max_turn_dwell: Longest wait at a pivot in seconds.
         :param float min_speed: Lowest nonzero target speed in m/s.
-        :param int max_attempts: Candidate limit, including rejected path geometry.
+        :param int max_attempts: Maximum generation attempts for each selected start-lane pool,
+            including candidates rejected for invalid path geometry.
         :param float min_arrival_t: Earliest allowed route-end time in scenario seconds;
             set to the scenario duration to prevent early terminal parking.
             Zero disables it.
-        :param float bike_lane_start_share: Chance, drawn once per call, that the
-            route starts on a bike lane rather than a curb lane, where the space
-            has both to start on; otherwise it starts where it can.
+        :param float bike_lane_start_share: Chance, drawn once per call, of trying
+            bike-lane starts before curb-lane starts when both are available.
+            The other start kind is tried if the preferred one yields no valid agent.
         :returns: A randomly generated valid agent satisfying the requested constraints.
         :rtype: BicycleAgent
         :raises ValueError: If input fields or bounds violate the validation
@@ -556,15 +556,15 @@ class BicycleAgent:
                      max_dwell: float, max_turn_dwell: float, min_speed: float, max_attempts: int,
                      min_arrival_t: float) -> "BicycleAgent":
         """
-        ``random`` with walks starting on ``start_lanes`` (any start lane if None).
+        ``random`` with routes starting on ``start_lanes`` (any start lane if None).
 
-        :param RouteSpace space: Route space supplying lane geometry, topology, and vehicle-specific constraints.
+        :param RouteSpace space: Route space supplying bicycle routing geometry and topology.
         :param Random rng: Random number generator used for sampling and selection.
         :param RiderType rider_type: Rider category selecting motion limits and speed priors.
         :param List[str] | None start_lanes: Optional allowed starting lane IDs; ``None`` uses all eligible starts.
         :param float max_start_t: Maximum sampled start time, in scenario seconds.
         :param float min_length: Minimum accepted replay path or route length, in metres.
-        :param float max_length: Maximum accepted replay path, route, or connector length, in metres.
+        :param float max_length: Maximum accepted replay path or route length, in metres.
         :param float stop_probability: Probability of drawing an ordinary stop at an eligible inner speed point.
         :param float max_dwell: Maximum sampled stop dwell, in seconds.
         :param float max_turn_dwell: Maximum sampled pivot-turn dwell, in seconds.
@@ -618,11 +618,11 @@ class BicycleAgent:
         """
         This agent's speed points on another route of the same space (``rebased``).
 
-        :raises InvalidRoute: If ``route`` is invalid.
-        :param RouteSpace space: Route space supplying lane geometry, topology, and vehicle-specific constraints.
+        :param RouteSpace space: Route space supplying bicycle routing geometry and topology.
         :param LaneRoute route: Route to inspect, validate, or convert.
-        :returns: The rebased values described above.
+        :returns: The speed profile rebased onto ``route``.
         :rtype: Tuple[SpeedPoint, ...]
+        :raises InvalidRoute: If ``route`` is invalid.
         """
         return rebased(space, self.route, (), self.speed_profile, route, ())
 
@@ -632,8 +632,8 @@ class BicycleAgent:
         junction lane, to the nearest riding position off them between its
         neighbours (``placed_stops``). Stops without such a position stay.
 
-        :param RouteSpace space: Route space supplying lane geometry, topology, and vehicle-specific constraints.
-        :returns: The placed stops values described above.
+        :param RouteSpace space: Route space supplying bicycle routing geometry and topology.
+        :returns: A copy of this agent with ordinary stops moved to valid riding positions.
         :rtype: BicycleAgent
         """
         if not any(point.speed == 0 for point in self.speed_profile):
@@ -644,8 +644,8 @@ class BicycleAgent:
             """
             Check whether a lane is a connector or a junction where ordinary stops are forbidden.
 
-            :param str lane_id: Map, virtual-lane, or walk-element ID, as applicable.
-            :returns: ``True`` if the documented condition holds; otherwise ``False``.
+            :param str lane_id: ID of a map lane or virtual connector.
+            :returns: ``True`` if the lane is a virtual connector or junction lane.
             :rtype: bool
             """
             return space.virtual_lane(lane_id) is not None or space.is_junction_lane(lane_id)
@@ -659,8 +659,8 @@ class BicycleAgent:
         """
         Return a JSON-compatible representation.
 
-        :rtype: Dict
         :returns: A new JSON-compatible mapping of the object fields.
+        :rtype: Dict
         """
         return {
             "route": self.route.to_dict(),
@@ -677,10 +677,11 @@ class BicycleAgent:
         """
         Build an agent from ``to_dict`` output.
 
-        :rtype: BicycleAgent
         :param Dict data: Serialized mapping previously produced by ``to_dict``.
         :returns: The reconstructed object.
-        :raises KeyError: If a required serialized field or map identifier is absent.
+        :rtype: BicycleAgent
+        :raises KeyError: If a required serialized field is missing or ``rider_type``
+            is not a known rider type.
         """
         return cls(
             LaneRoute.from_dict(data["route"]),
