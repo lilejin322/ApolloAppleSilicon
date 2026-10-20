@@ -28,8 +28,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from math import atan2, cos, hypot, isfinite, pi, radians, sin
 from random import Random
-from typing import Iterator, NamedTuple, Sequence
-
+from typing import Iterator, NamedTuple, Sequence, Self
 import numpy as np
 import shapely
 from shapely import STRtree
@@ -135,7 +134,6 @@ class ExcursionKind(Enum):
     """
     How a walker leaves the sidewalk.
     """
-
     CROSSWALK = "CROSSWALK"
     NEAR_CROSSWALK = "NEAR_CROSSWALK"
     MID_BLOCK = "MID_BLOCK"
@@ -151,7 +149,6 @@ class CurbPoint:
     :param str sidewalk: A sidewalk ring of the walk network.
     :param float s: Metres along the ring from its start, in ``[0, ring length)``.
     """
-
     sidewalk: str
     """A sidewalk ring of the walk network."""
     s: float
@@ -163,7 +160,7 @@ class CurbPoint:
 
         :returns: ``None`` if validation succeeds.
         :rtype: None
-        :raises ValueError: If input fields or bounds violate the validation conditions of this operation.
+        :raises ValueError: If ``sidewalk`` is empty or ``s`` is not finite and nonnegative.
         """
         if not self.sidewalk:
             raise ValueError("a curb point needs a sidewalk")
@@ -174,20 +171,21 @@ class CurbPoint:
         """
         Serialize the sidewalk ID and position to a JSON-compatible mapping.
 
-        :returns: A new JSON-compatible mapping of the object fields.
+        :returns: JSON-compatible mapping with ``sidewalk`` and ``s``.
         :rtype: Dict
         """
         return {"sidewalk": self.sidewalk, "s": self.s}
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "CurbPoint":
+    def from_dict(cls, data: Dict) -> Self:
         """
         Reconstruct a sidewalk position from its serialized mapping.
 
         :param Dict data: Serialized mapping previously produced by ``to_dict``.
-        :returns: The reconstructed object.
+        :returns: Reconstructed curb point.
         :rtype: CurbPoint
-        :raises KeyError: If a required serialized field or map identifier is absent.
+        :raises KeyError: If ``sidewalk`` or ``s`` is absent.
+        :raises ValueError: If the reconstructed curb point is invalid.
         """
         return cls(data["sidewalk"], data["s"])
 
@@ -205,7 +203,6 @@ class Crossing:
     :param Tuple landings: Where it meets the sidewalks, at the axis ends.
     :param str | None junction: The junction it belongs to, if any.
     """
-
     crossing_id: str
     """Its crosswalk IDs joined by ``+``."""
     crosswalks: Tuple[str, ...]
@@ -226,7 +223,7 @@ class Crossing:
         """
         Unit vector along the axis, from the first landing to the second.
 
-        :returns: The direction values described above.
+        :returns: Unit direction vector from the first landing to the second.
         :rtype: Tuple[float, float]
         """
         (x0, y0), (x1, y1) = self.axis.coords[0], self.axis.coords[-1]
@@ -237,8 +234,8 @@ class Crossing:
         """
         Signed metres of ``point`` left of the axis.
 
-        :param Point point: Map point or speed point used by this operation.
-        :returns: The computed distance, duration, or scalar value described above.
+        :param Point point: Map point whose lateral offset is measured.
+        :returns: Signed lateral offset left of the crossing axis, in metres.
         :rtype: float
         """
         (x0, y0), (ux, uy) = self.axis.coords[0], self.direction
@@ -248,8 +245,8 @@ class Crossing:
         """
         Metres of ``point``'s projection along the axis from the first landing.
 
-        :param Point point: Map point or speed point used by this operation.
-        :returns: The computed distance, duration, or scalar value described above.
+        :param Point point: Map point whose longitudinal projection is measured.
+        :returns: Projection distance along the crossing axis from the first landing, in metres.
         :rtype: float
         """
         (x0, y0), (ux, uy) = self.axis.coords[0], self.direction
@@ -267,7 +264,6 @@ class Excursion:
     :param float | None turn_back: Metres from ``entry`` along the excursion where
         the walker stops, turns round and walks back to ``entry``; None to carry on.
     """
-
     kind: ExcursionKind
     """How the walker leaves the sidewalk; the network checks it."""
     entry: CurbPoint
@@ -283,7 +279,7 @@ class Excursion:
 
         :returns: ``None`` if validation succeeds.
         :rtype: None
-        :raises ValueError: If input fields or bounds violate the validation conditions of this operation.
+        :raises ValueError: If ``turn_back`` is not ``None`` and is not finite and positive.
         """
         if self.turn_back is not None and not (isfinite(self.turn_back) and self.turn_back > 0):
             raise ValueError("turn_back must be finite and positive, or None")
@@ -302,21 +298,22 @@ class Excursion:
         """
         Serialize an excursion kind, endpoints, and optional turning point.
 
-        :returns: A new JSON-compatible mapping of the object fields.
+        :returns: JSON-compatible mapping of the excursion kind, endpoints, and optional turn-back distance.
         :rtype: Dict
         """
         return {"kind": self.kind.name, "entry": self.entry.to_dict(), "exit": self.exit.to_dict(),
                 "turn_back": self.turn_back}
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "Excursion":
+    def from_dict(cls, data: Dict) -> Self:
         """
         Reconstruct an excursion from its serialized mapping.
 
         :param Dict data: Serialized mapping previously produced by ``to_dict``.
-        :returns: The reconstructed object.
+        :returns: Reconstructed excursion.
         :rtype: Excursion
-        :raises KeyError: If a required serialized field or map identifier is absent.
+        :raises KeyError: If a required field is absent or ``kind`` is not a known excursion kind.
+        :raises ValueError: If a nested curb point or the reconstructed excursion is invalid.
         """
         return cls(ExcursionKind[data["kind"]], CurbPoint.from_dict(data["entry"]), CurbPoint.from_dict(data["exit"]),
                    data.get("turn_back"))
@@ -333,7 +330,6 @@ class WalkRoute:
     :param Tuple[Excursion, ...] excursions: Up to ``MAX_EXCURSIONS``; only the last may turn back.
     :param CurbPoint end: Where the walk ends, on the last arrival's sidewalk.
     """
-
     start: CurbPoint
     """Where the walk starts."""
     excursions: Tuple[Excursion, ...]
@@ -347,7 +343,7 @@ class WalkRoute:
 
         :returns: ``None`` if validation succeeds.
         :rtype: None
-        :raises ValueError: If input fields or bounds violate the validation conditions of this operation.
+        :raises ValueError: If there are too many excursions or a non-final excursion turns back.
         """
         if len(self.excursions) > MAX_EXCURSIONS:
             raise ValueError(f"a walk has at most {MAX_EXCURSIONS} excursions")
@@ -361,8 +357,8 @@ class WalkRoute:
         excursion ``i`` (``w<n>`` after the last), ``x<i>`` the excursion out,
         ``x<i>b`` its way back after a turn back. Speed points name them.
 
-        :rtype: Tuple[str, ...]
         :returns: Element IDs in walking order, including outbound and return excursion elements.
+        :rtype: Tuple[str, ...]
         """
         names = []
         for index, excursion in enumerate(self.excursions):
@@ -373,21 +369,22 @@ class WalkRoute:
         """
         Serialize the walk endpoints and ordered excursions.
 
-        :returns: A new JSON-compatible mapping of the object fields.
+        :returns: JSON-compatible mapping of the walk endpoints and excursions.
         :rtype: Dict
         """
         return {"start": self.start.to_dict(), "excursions": [excursion.to_dict() for excursion in self.excursions],
                 "end": self.end.to_dict()}
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "WalkRoute":
+    def from_dict(cls, data: Dict) -> Self:
         """
         Reconstruct a walk from its serialized mapping.
 
         :param Dict data: Serialized mapping previously produced by ``to_dict``.
-        :returns: The reconstructed object.
+        :returns: Reconstructed walk.
         :rtype: WalkRoute
-        :raises KeyError: If a required serialized field or map identifier is absent.
+        :raises KeyError: If a required serialized field is absent or an excursion kind is unknown.
+        :raises ValueError: If a nested value or the reconstructed walk is invalid.
         """
         return cls(CurbPoint.from_dict(data["start"]), tuple(Excursion.from_dict(item) for item in data["excursions"]),
                    CurbPoint.from_dict(data["end"]))
@@ -397,13 +394,12 @@ class WalkElement(NamedTuple):
     """
     One element of a walk: its name (``WalkRoute.lanes``), raw vertices and length.
 
-    :param str name: Element or object name.
+    :param str name: Walk-element name.
     :param Tuple[Tuple[float, float], ...] coords: Ordered map-coordinate vertices.
     :param float length: Length in metres.
     """
-
     name: str
-    """Element or object name."""
+    """Walk-element name."""
     coords: Tuple[Tuple[float, float], ...]
     """Ordered map-coordinate vertices."""
     length: float
@@ -414,15 +410,23 @@ class WalkFrame:
     """
     Walked distance along a walk's elements, unsmoothed, and conversions
     between (element, s) and that distance, as ``replay.RouteFrame`` does for lanes.
+
+    :param Tuple[WalkElement, ...] elements: Walk elements in walking order.
     """
+    elements: Tuple[WalkElement, ...]
+    """Walk elements in walking order."""
+    index: Dict[str, int]
+    """Walk-element name to element-index mapping."""
+    offsets: List[float]
+    """Walked-distance offset of each element, in metres."""
+    total: float
+    """Total walked distance represented by the frame, in metres."""
 
     def __init__(self, elements: Sequence[WalkElement]) -> None:
         """
         Build element lookup and cumulative walked distances.
 
         :param Sequence[WalkElement] elements: Ordered named walk elements with their geometry and lengths.
-        :returns: ``None``.
-        :rtype: None
         """
         self.elements = tuple(elements)
         self.index = {element.name: index for index, element in enumerate(self.elements)}
@@ -433,8 +437,8 @@ class WalkFrame:
         """
         The stretch [0, length] of an element.
 
-        :param str name: Element or agent name used for lookup and diagnostics.
-        :returns: The start and end position of the driven lane or walk element, in metres.
+        :param str name: Walk-element name.
+        :returns: Local element interval ``(0, length)`` in metres.
         :rtype: Tuple[float, float]
         """
         return 0.0, self.elements[self.index[name]].length
@@ -443,9 +447,9 @@ class WalkFrame:
         """
         Walked distance to ``s`` on an element, clamped to it.
 
-        :param str name: Element or agent name used for lookup and diagnostics.
-        :param float s: Position along the lane, element, or path, in metres.
-        :returns: Travelled distance to the local position, in metres, clamped to its driven window.
+        :param str name: Walk-element name.
+        :param float s: Position along the element, in metres.
+        :returns: Walked distance to the local element position, clamped to the element, in metres.
         :rtype: float
         """
         index = self.index[name]
@@ -455,8 +459,8 @@ class WalkFrame:
         """
         The (element, s) at a walked distance; on the later element at a boundary.
 
-        :param float distance: Travelled distance, in metres.
-        :returns: The lane or element ID and its local position, in metres.
+        :param float distance: Walked distance from the route start, in metres.
+        :returns: Walk-element name and local position at the requested walked distance.
         :rtype: Tuple[str, float]
         """
         distance = min(max(distance, 0.0), self.total)
@@ -470,10 +474,8 @@ class WalkFrame:
         """
         Check that every speed point lies on its element.
 
+        :param Sequence profile: Ordered speed points anchored to walk elements.
         :raises InvalidRoute: For the first point outside.
-        :param Sequence profile: Ordered target-speed points; positions are lane or walk-element metres.
-        :returns: ``None`` if all speed points lie within their driven element windows.
-        :rtype: None
         """
         for point in profile:
             low, high = self.window(point.lane_id)
@@ -488,7 +490,7 @@ def _undirected_angle(a: float, b: float) -> float:
 
     :param float a: First direction, in radians.
     :param float b: Second direction, in radians.
-    :returns: The computed distance, duration, or scalar value described above.
+    :returns: Smallest undirected angular difference, in radians within [0, pi / 2].
     :rtype: float
     """
     turn = abs(normalize_angle(a - b))
@@ -569,9 +571,9 @@ def _min_rect_axis(polygon: Polygon) -> Tuple[LineString, float]:
         """
         Return the coordinate-wise midpoint of two points.
 
-        :param Sequence[float] a: First position, coordinate, or direction being compared.
-        :param Sequence[float] b: Second position, coordinate, or direction being compared.
-        :returns: The middle values described above.
+        :param Sequence[float] a: First coordinate.
+        :param Sequence[float] b: Second coordinate.
+        :returns: Coordinate-wise midpoint of ``a`` and ``b``.
         :rtype: Tuple[float, float]
         """
         return (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
@@ -599,25 +601,67 @@ def _ring_line(coords: List) -> LineString:
 
 class WalkNetwork:
     """
-    The sidewalks, refuges and crossings of one loaded map; read-only.
+    The sidewalks, refuges and crossings of one loaded map; read-only after construction.
 
     Build it with ``walk_network(service)``, which caches one per map.
 
-    :ivar Dict[str, LineString] sidewalks: Closed rings by ID, counter-clockwise.
-    :ivar Tuple[Polygon, ...] refuges: Medians and islands narrower than ``REFUGE_WIDTH``.
-    :ivar Dict[str, Crossing] crossings: Marked crossings by ID.
-    :ivar Dict[str, Polygon] junctions: Junction polygons by ID.
-    :ivar int unconnected_crossings: Crosswalk chains without a sidewalk at both ends.
+    :param MapService service: Loaded map service from which the network was derived.
     """
+    service: MapService
+    """Loaded map service from which the network was derived."""
+    sidewalks: Dict[str, LineString]
+    """Closed sidewalk rings by ID, counter-clockwise."""
+    surface: BaseGeometry
+    """Derived road surface used to place and validate crossings."""
+    refuges: Tuple[Polygon, ...]
+    """Medians and islands narrower than ``REFUGE_WIDTH``."""
+    crossings: Dict[str, Crossing]
+    """Marked crossings by ID."""
+    junctions: Dict[str, Polygon]
+    """Junction polygons by ID."""
+    unconnected_crossings: int
+    """Crosswalk chains without a sidewalk at both ends."""
+    edge_gates: Tuple[LineString, ...]
+    """Map-edge road-end gates that walks may not cross."""
+    _surface_pieces: List[Polygon]
+    """Lane-area pieces used by the road-surface spatial index."""
+    _surface_tree: STRtree
+    """Spatial index over ``_surface_pieces``."""
+    _road_pieces: List[Polygon]
+    """Road, refuge, and crosswalk pieces that crossings may traverse."""
+    _road_tree: STRtree
+    """Spatial index over ``_road_pieces``."""
+    _junction_ids: List[str]
+    """Junction IDs in stable index order."""
+    _junction_tree: STRtree
+    """Spatial index over junction polygons."""
+    _sidewalk_ids: List[str]
+    """Sidewalk IDs in stable index order."""
+    _sidewalk_tree: STRtree
+    """Spatial index over sidewalk rings."""
+    _crossing_ids: List[str]
+    """Crossing IDs in stable index order."""
+    _crossing_tree: STRtree
+    """Spatial index over crossing polygons."""
+    _road_lanes: List[str]
+    """Non-junction city-driving lane IDs used for random mid-block proposals."""
+    _road_lane_lengths: np.ndarray
+    """Cumulative lengths of ``_road_lanes``."""
+    _ring_lengths: np.ndarray
+    """Cumulative lengths of ``_sidewalk_ids``."""
+    _diagonals: Dict[str, List]
+    """Cached feasible diagonal landing pairs by junction ID."""
+    _checks: Dict
+    """Bounded cache of excursion and walk-element validation results."""
+    _gate_tree: STRtree
+    """Spatial index over ``edge_gates``."""
 
     def __init__(self, service: MapService) -> None:
         """
         Derive sidewalks, crossings, refuges, and spatial indexes from a loaded map.
 
         :param MapService service: Loaded map service supplying geometry, descriptors, and spatial indexes.
-        :returns: ``None``.
-        :rtype: None
-        :raises RuntimeError: If required map data is unavailable or no valid candidate is found within the attempt limit.
+        :raises RuntimeError: If the map was loaded without its routing graph or lane index.
         """
         if service.routing_graph is None or service.lane_index is None:
             raise RuntimeError("WalkNetwork needs a map loaded with load_only=False")
@@ -673,8 +717,6 @@ class WalkNetwork:
         self.edge_gates = self._edge_gates()
         self._gate_tree = STRtree(list(self.edge_gates))
 
-    # ----- construction -----
-
     def _edge_gates(self) -> Tuple[LineString, ...]:
         """
         Lines continuing every lane that ends at the edge of the map (``EDGE_GATE_LENGTH``): without a
@@ -682,7 +724,7 @@ class WalkNetwork:
         surface's convex hull. Lanes that end inside the map (at a curb, a driveway, a junction's edge)
         are not gates.
 
-        :returns: The edge gates values described above.
+        :returns: Map-edge gate segments in stable lane order.
         :rtype: Tuple[LineString, ...]
         """
         boundary = self.surface.boundary
@@ -709,12 +751,10 @@ class WalkNetwork:
         """
         Reject a sidewalk stretch or roadside walk that goes round a road end at the map edge.
 
-        :param str name: Element or agent name used for lookup and diagnostics.
+        :param str name: Walk-element name used in diagnostics.
         :param Sequence[Tuple[float, float]] coords: Ordered map coordinates in metres.
-        :param bool ends: Whether to check only the geometry endpoints against map-edge gates.
-        :returns: ``None`` if the operation succeeds.
-        :rtype: None
-        :raises InvalidRoute: If route geometry, topology, point placement, or map constraints fail the checks performed here.
+        :param bool ends: Whether to additionally require both geometry endpoints to keep the gate clearance.
+        :raises InvalidRoute: If the geometry crosses a map-edge gate or a checked endpoint lies too close to one.
         """
         if not self.edge_gates:
             return
@@ -733,7 +773,7 @@ class WalkNetwork:
         """
         Candidate sidewalk rings: the surface's boundary offset outward, outside refuges.
 
-        :returns: The rings values described above.
+        :returns: Candidate sidewalk-ring centerlines.
         :rtype: List[LineString]
         """
         grown = self.surface.buffer(SIDEWALK_OFFSET)
@@ -755,7 +795,7 @@ class WalkNetwork:
         Join crosswalks end to end and land each chain on a sidewalk at both ends.
 
         :param Dict[str, Polygon] crosswalks: Crosswalk polygons keyed by map ID.
-        :returns: The crossings values described above.
+        :returns: Connected marked crossings keyed by ID and the count of unconnected crosswalk chains.
         :rtype: Tuple[Dict[str, Crossing], int]
         """
         ids = sorted(crosswalks)
@@ -766,8 +806,8 @@ class WalkNetwork:
             """
             Find and compress the representative of a crosswalk chain.
 
-            :param str key: Lookup key whose representative is requested.
-            :returns: The requested string representation.
+            :param str key: Crosswalk ID whose chain representative is requested.
+            :returns: Representative crosswalk ID of the chain.
             :rtype: str
             """
             while parent[key] != key:
@@ -820,9 +860,9 @@ class WalkNetwork:
         sidewalk; at a corner, where the axis runs past the sidewalk's bend,
         the sidewalk point nearest the end within ``LANDING_SNAP``.
 
-        :param Point end: Ending lane, endpoint, or path position for this operation.
+        :param Point end: Crosswalk-axis endpoint to connect to a sidewalk.
         :param Tuple[float, float] outward: Unit direction extending a crossing axis toward a sidewalk.
-        :returns: The landing values described above.
+        :returns: Nearest sidewalk landing reached by the outward probe, or ``None`` if none is found.
         :rtype: CurbPoint | None
         """
         ux, uy = outward
@@ -847,9 +887,6 @@ class WalkNetwork:
     def _prune_sidewalks(self) -> None:
         """
         Drop small rings that no crossing reaches.
-
-        :returns: ``None`` if the operation succeeds.
-        :rtype: None
         """
         reached = {landing.sidewalk for crossing in self.crossings.values() for landing in crossing.landings}
         keep = {key for key, line in self.sidewalks.items()
@@ -858,15 +895,12 @@ class WalkNetwork:
         self._sidewalk_ids = sorted(self.sidewalks)
         self._sidewalk_tree = STRtree([self.sidewalks[key] for key in self._sidewalk_ids])
 
-    # ----- positions on sidewalks -----
-
     def ring_length(self, sidewalk: str) -> float:
         """
-        :raises KeyError: If the network has no such sidewalk.
-
-        :param str sidewalk: Sidewalk ring ID; ``None`` allows selection among all rings.
-        :returns: The computed distance, duration, or scalar value described above.
+        :param str sidewalk: Sidewalk ring ID.
+        :returns: Sidewalk-ring length, in metres.
         :rtype: float
+        :raises KeyError: If the network has no such sidewalk.
         """
         return self.sidewalks[sidewalk].length
 
@@ -874,8 +908,8 @@ class WalkNetwork:
         """
         The curb point at ``s`` metres along a ring, wrapped into ``[0, length)``.
 
-        :param str sidewalk: Sidewalk ring ID; ``None`` allows selection among all rings.
-        :param float s: Position along the lane, element, or path, in metres.
+        :param str sidewalk: Sidewalk ring ID.
+        :param float s: Position along the ring before wrapping, in metres.
         :returns: The curb point at ``s`` metres along a ring, wrapped into ``[0, length)``.
         :rtype: CurbPoint
         """
@@ -885,10 +919,10 @@ class WalkNetwork:
         """
         The map point of a curb point.
 
-        :raises InvalidRoute: If the sidewalk is unknown or ``s`` is outside the ring.
         :param CurbPoint curb: Position on a sidewalk ring.
         :returns: The map position as a Shapely point.
         :rtype: Point
+        :raises InvalidRoute: If the sidewalk is unknown or ``s`` is outside the ring.
         """
         line = self.sidewalks.get(curb.sidewalk)
         if line is None:
@@ -901,7 +935,7 @@ class WalkNetwork:
         """
         The curb point nearest ``point``, on ``sidewalk`` if given.
 
-        :param Point point: Map point or speed point used by this operation.
+        :param Point point: Map point to project onto a sidewalk.
         :param str | None sidewalk: Sidewalk ring ID; ``None`` allows selection among all rings.
         :returns: The curb point nearest ``point``, on ``sidewalk`` if given.
         :rtype: CurbPoint
@@ -916,9 +950,9 @@ class WalkNetwork:
         """
         Metres along the sidewalk between two points the shorter way; infinite on different rings.
 
-        :param CurbPoint a: First position, coordinate, or direction being compared.
-        :param CurbPoint b: Second position, coordinate, or direction being compared.
-        :returns: The computed distance, duration, or scalar value described above.
+        :param CurbPoint a: First curb point.
+        :param CurbPoint b: Second curb point.
+        :returns: Shorter sidewalk distance in metres, or infinity if the points are on different rings.
         :rtype: float
         """
         if a.sidewalk != b.sidewalk:
@@ -932,11 +966,11 @@ class WalkNetwork:
         The sidewalk's vertices from ``a`` to ``b`` the shorter way round,
         ``a`` and ``b`` included; one point if they coincide.
 
-        :raises InvalidRoute: If they lie on different sidewalks.
-        :param CurbPoint a: First position, coordinate, or direction being compared.
-        :param CurbPoint b: Second position, coordinate, or direction being compared.
+        :param CurbPoint a: Start curb point.
+        :param CurbPoint b: End curb point.
         :returns: The sidewalk's vertices from ``a`` to ``b`` the shorter way round, ``a`` and ``b`` included; one point if they coincide.
         :rtype: List[Tuple[float, float]]
+        :raises InvalidRoute: If they lie on different sidewalks.
         """
         if a.sidewalk != b.sidewalk:
             raise InvalidRoute(f"sidewalks {a.sidewalk!r} and {b.sidewalk!r} are not joined")
@@ -949,16 +983,14 @@ class WalkNetwork:
             return _ring_stretch(line, a.s, a.s + forward)
         return _ring_stretch(line, b.s, b.s + length - forward)[::-1]
 
-    # ----- road queries -----
-
     def road_near(self, geometry: BaseGeometry, reach: float = 0.0) -> BaseGeometry:
         """
         What a crossing may pass over around ``geometry`` (the road, refuges and
         crosswalks), from the pieces within ``reach``.
 
         :param BaseGeometry geometry: Geometry to query or decompose.
-        :param float reach: Maximum query or sampling distance, in metres.
-        :returns: The road near values described above.
+        :param float reach: Search distance around ``geometry``, in metres.
+        :returns: Union of nearby road, refuge, and crosswalk pieces.
         :rtype: BaseGeometry
         """
         return _near(self._road_tree, self._road_pieces, geometry, reach)
@@ -968,7 +1000,7 @@ class WalkNetwork:
         The road surface around ``geometry``, from the lane pieces within ``reach``.
 
         :param BaseGeometry geometry: Geometry to query or decompose.
-        :param float reach: Maximum query or sampling distance, in metres.
+        :param float reach: Search distance around ``geometry``, in metres.
         :returns: The road surface around ``geometry``, from the lane pieces within ``reach``.
         :rtype: BaseGeometry
         """
@@ -979,7 +1011,7 @@ class WalkNetwork:
         Metres along ``line`` from its start to where it first enters the road; its length if never.
 
         :param LineString line: Line geometry in map metres.
-        :returns: The computed distance, duration, or scalar value described above.
+        :returns: Distance from the line start to its first road entry, or the full line length if it never enters.
         :rtype: float
         """
         road = self.surface_near(line)
@@ -994,7 +1026,7 @@ class WalkNetwork:
         crossing in two stages waits there.
 
         :param LineString line: Line geometry in map metres.
-        :returns: The island spans values described above.
+        :returns: Sorted interior spans outside the road surface, in line metres.
         :rtype: List[Tuple[float, float]]
         """
         spans = []
@@ -1007,19 +1039,17 @@ class WalkNetwork:
                 spans.append((low, high))
         return sorted(spans)
 
-    # ----- excursions -----
-
     def excursion_line(self, kind: ExcursionKind, entry: CurbPoint, exit: CurbPoint) -> LineString:
         """
         The path of an excursion: a straight crossing, or for ``ROADSIDE`` a step
         into the road, a walk ``ROADSIDE_OFFSET`` inside the curb, and a step back.
 
-        :raises InvalidRoute: If a point is off the network or a roadside walk has no road beside it.
-        :param ExcursionKind kind: Traffic type name or excursion category selecting the applicable rules or prior.
+        :param ExcursionKind kind: Excursion category whose geometry or constraints apply.
         :param CurbPoint entry: Excursion entry position on a sidewalk.
         :param CurbPoint exit: Excursion exit position on a sidewalk.
         :returns: The path of an excursion: a straight crossing, or for ``ROADSIDE`` a step into the road, a walk ``ROADSIDE_OFFSET`` inside the curb, and a step back.
         :rtype: LineString
+        :raises InvalidRoute: If a point is off the network or a roadside walk has no road beside it.
         """
         a, b = self.point(entry), self.point(exit)
         if kind is not ExcursionKind.ROADSIDE:
@@ -1043,12 +1073,10 @@ class WalkNetwork:
         Check that leaving the sidewalk at ``entry`` and returning at ``exit``
         is an excursion of ``kind`` (``docs/pedestrian-agents.md``).
 
-        :raises InvalidRoute: With the reason it is not.
-        :param ExcursionKind kind: Traffic type name or excursion category selecting the applicable rules or prior.
+        :param ExcursionKind kind: Excursion category whose geometry or constraints apply.
         :param CurbPoint entry: Excursion entry position on a sidewalk.
         :param CurbPoint exit: Excursion exit position on a sidewalk.
-        :returns: ``None`` if the excursion satisfies its kind-specific map constraints.
-        :rtype: None
+        :raises InvalidRoute: If the entry and exit do not satisfy the requested excursion kind.
         """
         key = (kind, entry, exit)
         if key not in self._checks:
@@ -1067,12 +1095,10 @@ class WalkNetwork:
         """
         Validate the geometry and kind-specific constraints of one excursion.
 
-        :param ExcursionKind kind: Traffic type name or excursion category selecting the applicable rules or prior.
+        :param ExcursionKind kind: Excursion category whose geometry or constraints apply.
         :param CurbPoint entry: Excursion entry position on a sidewalk.
         :param CurbPoint exit: Excursion exit position on a sidewalk.
-        :returns: ``None`` if the operation succeeds.
-        :rtype: None
-        :raises InvalidRoute: If route geometry, topology, point placement, or map constraints fail the checks performed here.
+        :raises InvalidRoute: If the excursion is too short, misses the road, cuts through a block, or fails its kind-specific check.
         """
         line = self.excursion_line(kind, entry, exit)
         if kind is ExcursionKind.ROADSIDE:
@@ -1103,9 +1129,7 @@ class WalkNetwork:
         :param CurbPoint exit: Excursion exit position on a sidewalk.
         :param LineString line: Line geometry in map metres.
         :param BaseGeometry on_road: Part of the crossing geometry lying on road or refuge surfaces.
-        :returns: ``None`` if the operation succeeds.
-        :rtype: None
-        :raises InvalidRoute: If route geometry, topology, point placement, or map constraints fail the checks performed here.
+        :raises InvalidRoute: If the crossing cannot be matched to compatible marked-crosswalk geometry.
         """
         a, b = self.point(entry), self.point(exit)
         for crossing in self._crossings_near(line, 0.0):
@@ -1128,9 +1152,7 @@ class WalkNetwork:
         :param CurbPoint exit: Excursion exit position on a sidewalk.
         :param LineString line: Line geometry in map metres.
         :param BaseGeometry on_road: Part of the crossing geometry lying on road or refuge surfaces.
-        :returns: ``None`` if the operation succeeds.
-        :rtype: None
-        :raises InvalidRoute: If route geometry, topology, point placement, or map constraints fail the checks performed here.
+        :raises InvalidRoute: If the crossing is not suitably positioned beside a marked crosswalk.
         """
         middle = on_road.interpolate(0.5, normalized=True) if on_road.length else line.interpolate(0.5, normalized=True)
         for crossing in self._crossings_near(line, NEAR_RANGE[1] + 10):
@@ -1151,9 +1173,7 @@ class WalkNetwork:
         :param CurbPoint exit: Excursion exit position on a sidewalk.
         :param LineString line: Line geometry in map metres.
         :param BaseGeometry on_road: Part of the crossing geometry lying on road or refuge surfaces.
-        :returns: ``None`` if the operation succeeds.
-        :rtype: None
-        :raises InvalidRoute: If route geometry, topology, point placement, or map constraints fail the checks performed here.
+        :raises InvalidRoute: If the crossing is too close to a crosswalk or junction, or is too oblique to the road normal.
         """
         if len(self._crossing_tree.query(on_road, predicate="dwithin", distance=MID_BLOCK_CROSSWALK_CLEARANCE)):
             raise InvalidRoute(f"a mid-block crossing keeps more than {MID_BLOCK_CROSSWALK_CLEARANCE} m from crosswalks")
@@ -1171,9 +1191,7 @@ class WalkNetwork:
         :param CurbPoint exit: Excursion exit position on a sidewalk.
         :param LineString line: Line geometry in map metres.
         :param BaseGeometry on_road: Part of the crossing geometry lying on road or refuge surfaces.
-        :returns: ``None`` if the operation succeeds.
-        :rtype: None
-        :raises InvalidRoute: If route geometry, topology, point placement, or map constraints fail the checks performed here.
+        :raises InvalidRoute: If no junction satisfies the diagonal-crossing constraints.
         """
         a, b = self.point(entry), self.point(exit)
         for index in self._junction_tree.query(on_road, predicate="intersects"):
@@ -1199,9 +1217,7 @@ class WalkNetwork:
         :param CurbPoint entry: Excursion entry position on a sidewalk.
         :param CurbPoint exit: Excursion exit position on a sidewalk.
         :param LineString line: Line geometry in map metres.
-        :returns: ``None`` if the operation succeeds.
-        :rtype: None
-        :raises InvalidRoute: If route geometry, topology, point placement, or map constraints fail the checks performed here.
+        :raises InvalidRoute: If the roadside walk has an invalid length, leaves the road, or enters a junction.
         """
         gap = self.gap(entry, exit)
         if not ROADSIDE_RANGE[0] <= gap <= ROADSIDE_RANGE[1]:
@@ -1218,8 +1234,8 @@ class WalkNetwork:
         Find marked crossings near a geometry in stable spatial-index order.
 
         :param BaseGeometry geometry: Geometry to query or decompose.
-        :param float reach: Maximum query or sampling distance, in metres.
-        :returns: The crossings near values described above.
+        :param float reach: Search distance from ``geometry``, in metres; zero uses the landing-reach buffer.
+        :returns: Marked crossings returned in stable spatial-index order.
         :rtype: List[Crossing]
         """
         found = self._crossing_tree.query(geometry, predicate="dwithin", distance=reach) if reach \
@@ -1232,11 +1248,11 @@ class WalkNetwork:
         """
         The walk's elements with their raw geometry, in walking order.
 
-        :raises InvalidRoute: If a point is off the network, two consecutive
-            points lie on different sidewalks, or a turn back is out of range.
-        :param WalkRoute route: Route to inspect, validate, or convert.
+        :param WalkRoute route: Walk whose elements are requested.
         :returns: The walk's elements with their raw geometry, in walking order.
         :rtype: Tuple[WalkElement, ...]
+        :raises InvalidRoute: If a point is off the network, two consecutive
+            points lie on different sidewalks, or a turn back is out of range.
         """
         key = ("elements", route)
         if key not in self._checks:
@@ -1256,10 +1272,10 @@ class WalkNetwork:
         """
         Construct ordered sidewalk and excursion elements, checking turn backs and map-edge gates.
 
-        :param WalkRoute route: Route to inspect, validate, or convert.
-        :returns: The elements values described above.
+        :param WalkRoute route: Walk whose elements are constructed.
+        :returns: Raw sidewalk and excursion elements in walking order.
         :rtype: Tuple[WalkElement, ...]
-        :raises InvalidRoute: If route geometry, topology, point placement, or map constraints fail the checks performed here.
+        :raises InvalidRoute: If a curb point or sidewalk connection is invalid, a turn-back position is out of range, or an element violates a map-edge gate.
         """
         elements, here = [], route.start
         self.point(here)
@@ -1287,10 +1303,10 @@ class WalkNetwork:
         """
         Construct a sidewalk element along the shorter ring arc, rejecting map-edge gates.
 
-        :param str name: Element or agent name used for lookup and diagnostics.
-        :param CurbPoint a: First position, coordinate, or direction being compared.
-        :param CurbPoint b: Second position, coordinate, or direction being compared.
-        :returns: The sidewalk element values described above.
+        :param str name: Walk-element name.
+        :param CurbPoint a: Start curb point.
+        :param CurbPoint b: End curb point.
+        :returns: Named sidewalk element following the shorter ring arc.
         :rtype: WalkElement
         """
         self.point(b)
@@ -1303,10 +1319,8 @@ class WalkNetwork:
         Check a walk: its points on the network, consecutive points on one
         sidewalk, every excursion of its kind, and turn backs within range.
 
-        :raises InvalidRoute: With the first problem found.
-        :param WalkRoute route: Route to inspect, validate, or convert.
-        :returns: ``None`` if all applicable validation checks pass.
-        :rtype: None
+        :param WalkRoute route: Walk to validate.
+        :raises InvalidRoute: If an excursion is invalid or the walk has zero total length.
         """
         for excursion in route.excursions:
             self.check_excursion(excursion.kind, excursion.entry, excursion.exit)
@@ -1317,10 +1331,10 @@ class WalkNetwork:
         """
         Distances along the walk's elements (``WalkFrame``).
 
-        :raises InvalidRoute: As ``elements``.
-        :param WalkRoute route: Route to inspect, validate, or convert.
-        :returns: The frame values described above.
+        :param WalkRoute route: Walk whose distance frame is requested.
+        :returns: Distance frame over the walk elements.
         :rtype: WalkFrame
+        :raises InvalidRoute: If the walk cannot be converted to valid elements.
         """
         return WalkFrame(self.elements(route))
 
@@ -1329,11 +1343,11 @@ class WalkNetwork:
         Walked metres along the walk's raw elements; ``lane_change_s`` is ignored,
         so code shared with lane routes can measure walks.
 
-        :raises InvalidRoute: As ``elements``.
-        :param WalkRoute route: Route to inspect, validate, or convert.
-        :param Tuple[float, ...] lane_change_s: Lane-change start positions on source lanes, in metres; ``None`` uses default placement.
-        :returns: Total driven or walked length, in metres.
+        :param WalkRoute route: Walk whose raw length is measured.
+        :param Tuple[float, ...] lane_change_s: Compatibility argument for lane-route callers; ignored for walks.
+        :returns: Total walked length along the raw walk elements, in metres.
         :rtype: float
+        :raises InvalidRoute: If the walk cannot be converted to valid elements.
         """
         return self.frame(route).total
 
@@ -1351,14 +1365,15 @@ class WalkNetwork:
         the end as far from the last arrival, either way; a walk without
         excursions runs ``min_walk`` to twice ``max_approach`` metres.
 
-        :returns: A valid walk, or None if this attempt failed.
         :param Random rng: Random number generator used for sampling and selection.
-        :param Sequence[ExcursionKind] kinds: Allowed connector kinds or ordered excursion kinds for this operation.
+        :param Sequence[ExcursionKind] kinds: Excursion kinds to include, in walk order.
         :param float max_link: Maximum sidewalk distance between connected excursions, in metres.
         :param float max_approach: Maximum sidewalk distance from an endpoint to the adjacent excursion, in metres.
         :param float turn_back_probability: Probability that the final excursion contains a turning point.
         :param float min_walk: Minimum length of a sidewalk-only walk, in metres.
+        :returns: A valid sampled walk, or ``None`` if this attempt cannot satisfy the requested connections.
         :rtype: WalkRoute | None
+        :raises RuntimeError: If a sidewalk point is required but the network has no sidewalks.
         """
         excursions, near = [], None
         for kind in kinds:
@@ -1392,8 +1407,6 @@ class WalkNetwork:
             return None
         return route
 
-    # ----- proposals -----
-
     def kinds(self) -> FrozenSet[ExcursionKind]:
         """
         The excursion kinds this map has places for.
@@ -1419,7 +1432,7 @@ class WalkNetwork:
         :param Random rng: Random number generator used for sampling and selection.
         :returns: A curb point uniformly along all sidewalks.
         :rtype: CurbPoint
-        :raises RuntimeError: If required map data is unavailable or no valid candidate is found within the attempt limit.
+        :raises RuntimeError: If the network has no sidewalks.
         """
         if not self._sidewalk_ids:
             raise RuntimeError("the map has no sidewalks")
@@ -1436,11 +1449,11 @@ class WalkNetwork:
         ``reach`` metres along the sidewalk of ``near`` if given. One draw:
         the caller checks it (``check_excursion``) and retries.
 
-        :returns: (entry, exit), or None if nothing of the kind lies within reach.
-        :param ExcursionKind kind: Traffic type name or excursion category selecting the applicable rules or prior.
+        :param ExcursionKind kind: Excursion category to propose.
         :param Random rng: Random number generator used for sampling and selection.
         :param CurbPoint | None near: Optional sidewalk anchor for the excursion entry.
-        :param float reach: Maximum query or sampling distance, in metres.
+        :param float reach: Maximum sidewalk distance from ``near`` to the proposed entry, in metres.
+        :returns: (entry, exit), or None if nothing of the kind lies within reach.
         :rtype: Tuple[CurbPoint, CurbPoint] | None
         """
         draw = {
@@ -1460,8 +1473,8 @@ class WalkNetwork:
         List crossing landings within the requested sidewalk distance of an optional anchor.
 
         :param CurbPoint | None near: Optional sidewalk anchor for the excursion entry.
-        :param float reach: Maximum query or sampling distance, in metres.
-        :returns: The landings within values described above.
+        :param float reach: Maximum sidewalk distance from ``near``, in metres.
+        :returns: Crossing and landing-index pairs satisfying the optional sidewalk-distance bound.
         :rtype: List[Tuple[Crossing, int]]
         """
         return [(self.crossings[key], index) for key in self._crossing_ids for index in (0, 1)
@@ -1472,7 +1485,7 @@ class WalkNetwork:
         The point on landing ``index``'s sidewalk ``lateral`` metres left of the axis.
 
         :param Crossing crossing: Marked crossing supplying its axis and sidewalk landings.
-        :param int index: Index of the element, transition, or point being processed.
+        :param int index: Landing index, 0 or 1.
         :param float lateral: Signed lateral displacement from the crossing axis, in metres.
         :returns: The point on landing ``index``'s sidewalk ``lateral`` metres left of the axis.
         :rtype: CurbPoint
@@ -1488,7 +1501,7 @@ class WalkNetwork:
 
         :param Random rng: Random number generator used for sampling and selection.
         :param CurbPoint | None near: Optional sidewalk anchor for the excursion entry.
-        :param float reach: Maximum query or sampling distance, in metres.
+        :param float reach: Maximum sidewalk distance from ``near`` to a proposed entry, in metres.
         :returns: The sampled entry and exit, or ``None`` if no proposal is available.
         :rtype: Tuple[CurbPoint, CurbPoint] | None
         """
@@ -1507,7 +1520,7 @@ class WalkNetwork:
 
         :param Random rng: Random number generator used for sampling and selection.
         :param CurbPoint | None near: Optional sidewalk anchor for the excursion entry.
-        :param float reach: Maximum query or sampling distance, in metres.
+        :param float reach: Maximum sidewalk distance from ``near`` to a proposed entry, in metres.
         :returns: The sampled entry and exit, or ``None`` if no proposal is available.
         :rtype: Tuple[CurbPoint, CurbPoint] | None
         """
@@ -1529,7 +1542,7 @@ class WalkNetwork:
 
         :param Random rng: Random number generator used for sampling and selection.
         :param CurbPoint | None near: Optional sidewalk anchor for the excursion entry.
-        :param float reach: Maximum query or sampling distance, in metres.
+        :param float reach: Maximum sidewalk distance from ``near`` to a proposed entry, in metres.
         :returns: The sampled entry and exit, or ``None`` if no proposal is available.
         :rtype: Tuple[CurbPoint, CurbPoint] | None
         """
@@ -1564,7 +1577,7 @@ class WalkNetwork:
         """
         The heading of the lane nearest ``point``, there.
 
-        :param Point point: Map point or speed point used by this operation.
+        :param Point point: Map point at which the nearest road-lane heading is requested.
         :returns: The heading of the lane nearest ``point``, there.
         :rtype: float
         """
@@ -1599,7 +1612,7 @@ class WalkNetwork:
 
         :param Point origin: Origin of the ray, in map coordinates.
         :param float heading: Heading in radians.
-        :param float length: Length of the path, lane, or body, in metres.
+        :param float length: Maximum ray length, in metres.
         :returns: The first sidewalk point at least ``MIN_CROSSING`` from ``origin`` along ``heading``.
         :rtype: CurbPoint | None
         """
@@ -1618,7 +1631,7 @@ class WalkNetwork:
         Landing pairs of one junction's crossings that make diagonal crossings, both ways.
 
         :param str junction_id: Junction ID whose crossings or geometry are queried.
-        :returns: The diagonal pairs values described above.
+        :returns: Feasible diagonal landing pairs through the junction, in both directions.
         :rtype: List[Tuple[CurbPoint, CurbPoint]]
         """
         if junction_id not in self._diagonals:
@@ -1642,7 +1655,7 @@ class WalkNetwork:
 
         :param Random rng: Random number generator used for sampling and selection.
         :param CurbPoint | None near: Optional sidewalk anchor for the excursion entry.
-        :param float reach: Maximum query or sampling distance, in metres.
+        :param float reach: Maximum sidewalk distance from ``near`` to a proposed entry, in metres.
         :returns: The sampled entry and exit, or ``None`` if no proposal is available.
         :rtype: Tuple[CurbPoint, CurbPoint] | None
         """
@@ -1661,8 +1674,8 @@ class WalkNetwork:
 
         :param Random rng: Random number generator used for sampling and selection.
         :param CurbPoint | None near: Optional sidewalk anchor for the excursion entry.
-        :param float reach: Maximum query or sampling distance, in metres.
-        :returns: The sampled entry and exit, or ``None`` if no proposal is available.
+        :param float reach: Maximum sidewalk distance from ``near`` to a proposed entry, in metres.
+        :returns: Sampled roadside entry and exit on the same sidewalk.
         :rtype: Tuple[CurbPoint, CurbPoint]
         """
         entry = self.random_point(rng) if near is None else self.wrapped(
@@ -1675,9 +1688,9 @@ def _element(name: str, line: LineString) -> WalkElement:
     """
     Build a named walk element from the two-dimensional vertices of a line.
 
-    :param str name: Element or agent name used for lookup and diagnostics.
+    :param str name: Walk-element name.
     :param LineString line: Line geometry in map metres.
-    :returns: The element values described above.
+    :returns: Named walk element built from the line vertices.
     :rtype: WalkElement
     """
     return WalkElement(name, tuple(tuple(xy[:2]) for xy in line.coords), line.length)
@@ -1690,7 +1703,7 @@ def _near(tree: STRtree, pieces: List, geometry: BaseGeometry, reach: float) -> 
     :param STRtree tree: Spatial index over the supplied geometry components.
     :param List pieces: Geometry components used by the spatial index.
     :param BaseGeometry geometry: Geometry to query or decompose.
-    :param float reach: Maximum query or sampling distance, in metres.
+    :param float reach: Search distance around ``geometry``, in metres.
     :returns: The union of the pieces within ``reach`` of ``geometry``, small gaps closed.
     :rtype: BaseGeometry
     """
@@ -1706,8 +1719,8 @@ def _sideways(axis: LineString, point: Tuple[float, float]) -> float:
     Distance of ``point`` from the infinite line through ``axis``.
 
     :param LineString axis: Reference crossing axis.
-    :param Tuple[float, float] point: Map point or speed point used by this operation.
-    :returns: The computed distance, duration, or scalar value described above.
+    :param Tuple[float, float] point: Map coordinate whose perpendicular distance is measured.
+    :returns: Perpendicular distance from ``point`` to the infinite axis line, in metres.
     :rtype: float
     """
     (x0, y0), (x1, y1) = axis.coords[0], axis.coords[-1]
@@ -1736,9 +1749,9 @@ def _ring_stretch(line: LineString, start: float, end: float) -> List[Tuple[floa
     Vertices of a closed ring from ``start`` to ``end`` metres, which may wrap past its start.
 
     :param LineString line: Line geometry in map metres.
-    :param float start: Starting lane, endpoint, or path position for this operation.
-    :param float end: Ending lane, endpoint, or path position for this operation.
-    :returns: The ring stretch values described above.
+    :param float start: Start distance along the ring, in metres.
+    :param float end: End distance along the ring, in metres; may extend past one ring length to wrap.
+    :returns: Ordered vertices from ``start`` to ``end``, wrapping past the ring origin if needed.
     :rtype: List[Tuple[float, float]]
     """
     length = line.length
@@ -1758,8 +1771,9 @@ def walk_network(service: MapService) -> WalkNetwork:
     The walk network of a loaded map, built once per map.
 
     :param MapService service: A map loaded with ``load_only=False``.
-    :rtype: WalkNetwork
     :returns: The walk network of a loaded map, built once per map.
+    :rtype: WalkNetwork
+    :raises RuntimeError: If the map was loaded without its routing graph or lane index.
     """
     network = _NETWORKS.get(service)
     if network is None:
