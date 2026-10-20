@@ -8,9 +8,10 @@ crosses each gene with its own rate and returns two children.
 
 from dataclasses import replace
 from random import Random
-from typing import Tuple
+from typing import Callable, Dict, Tuple
 
-from ...scenario import BicycleAgent, RouteSpace
+from ...scenario import BicycleAgent, RouteSpace, LaneRoute
+from ...scenario.bicycle import PivotKey
 from .. import route_operators
 from ..common import vary
 from ..profile_operators import cx_drive_style, cx_speed_profile, cx_start_time
@@ -38,7 +39,7 @@ def cx_shared_lane(first: BicycleAgent, second: BicycleAgent, space: RouteSpace,
         if no shared-lane join avoids repeated lanes or ``on_route`` rejects the child.
     :rtype: BicycleAgent | None
     """
-    route = route_operators.cx_shared_lane(first.route, second.route, space, rng)
+    route: LaneRoute | None = route_operators.cx_shared_lane(first.route, second.route, space, rng)
     return on_route(first, route, space, rng, config,
                     keep={**second.turn_waits(space), **first.turn_waits(space)})
 
@@ -66,7 +67,7 @@ def cx_bridge(first: BicycleAgent, second: BicycleAgent, space: RouteSpace, rng:
         rejects the child.
     :rtype: BicycleAgent | None
     """
-    route = route_operators.cx_bridge(first.route, second.route, space, rng, config)
+    route: LaneRoute | None = route_operators.cx_bridge(first.route, second.route, space, rng, config)
     return on_route(first, route, space, rng, config,
                     keep={**second.turn_waits(space), **first.turn_waits(space)})
 
@@ -109,8 +110,8 @@ def cx_turn_dwell(first: BicycleAgent, second: BicycleAgent, space: RouteSpace) 
     :returns: The child, or None if no shared pivot has a different wait.
     :rtype: BicycleAgent | None
     """
-    theirs = second.turn_waits(space)
-    waits = tuple(theirs.get(key, wait) for key, wait in first.turn_waits(space).items())
+    theirs: Dict[PivotKey, float] = second.turn_waits(space)
+    waits: Tuple[float, ...] = tuple(theirs.get(key, wait) for key, wait in first.turn_waits(space).items())
     return None if waits == first.turn_dwell else replace(first, turn_dwell=waits)
 
 
@@ -170,7 +171,7 @@ def cx_bicycle(first: BicycleAgent, second: BicycleAgent, space: RouteSpace, rng
             and it already satisfies the acceptance checks.
         :rtype: BicycleAgent
         """
-        operators = {
+        operators: Dict[str, Callable[[BicycleAgent], BicycleAgent | None]] = {
             "shared_lane": lambda child: cx_shared_lane(child, other, space, rng, config),
             "bridge": lambda child: cx_bridge(child, other, space, rng, config),
             "turn_dwell": lambda child: cx_turn_dwell(child, other, space),

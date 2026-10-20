@@ -11,15 +11,16 @@ share one route space.
 
 from dataclasses import dataclass, field, replace
 from random import Random
-from typing import ClassVar, Mapping, Sequence, Tuple, List, Set
+from typing import ClassVar, Dict, List, Mapping, Sequence, Set, Tuple
 
 from ...scenario import RIDER_SPECS, BicycleAgent, InvalidRoute, LaneRoute, RiderType, RouteSpace
 from ...scenario.bicycle import PivotKey, starts_on_bike_lane
+from ...scenario.replay import ReplayTrajectory, SpeedPoint
 from ...scenario.realism import RIDER_MIX, mapped_speed
 from ...utils import require_nonnegative
 from ..common import ReplayOperatorConfig
 
-GENES = ("route", "turn_dwell", "rider_type", "speed_profile", "start_t")
+GENES: Tuple[str, ...] = ("route", "turn_dwell", "rider_type", "speed_profile", "start_t")
 """Bicycle genes, in the order each call varies them: the route first, since
 the turn waits are counted on it, and the speed profile after the rider type
 whose limits it must respect."""
@@ -166,7 +167,7 @@ def acceptable(space: RouteSpace, agent: BicycleAgent, config: BicycleOperatorCo
     if agent.start_t > config.max_start_t:
         return False
     try:
-        trajectory = agent.trajectory(space)
+        trajectory: ReplayTrajectory = agent.trajectory(space)
     except InvalidRoute:
         return False
     return (config.min_length <= trajectory.path.length <= config.max_length
@@ -242,8 +243,11 @@ def retyped(agent: BicycleAgent, rider_type: RiderType) -> BicycleAgent:
     """
     if rider_type is agent.rider_type:
         return agent
+    old: str
+    new: str
+    top: float
     old, new, top = agent.rider_type.name, rider_type.name, RIDER_SPECS[rider_type].max_speed
-    profile = tuple(replace(point, speed=min(mapped_speed(old, new, point.speed), top)) if point.speed > 0 else point
+    profile: Tuple[SpeedPoint, ...] = tuple(replace(point, speed=min(mapped_speed(old, new, point.speed), top)) if point.speed > 0 else point
                     for point in agent.speed_profile)
     return replace(agent, rider_type=rider_type, speed_profile=profile)
 
@@ -281,38 +285,38 @@ def rebalance_rider_types(population: Sequence[BicycleAgent], space: RouteSpace,
         so the resulting mix may still differ from the target.
     :rtype: List[BicycleAgent]
     """
-    offered = {name: weight for name, weight in config.rider_type_weights.items() if weight > 0}
+    offered: Dict[str, float] = {name: weight for name, weight in config.rider_type_weights.items() if weight > 0}
     population = list(population)
     if not offered or not population:
         return population
-    total = sum(offered.values())
-    exact = {name: weight / total * len(population) for name, weight in offered.items()}
-    target = {name: int(share) for name, share in exact.items()}
+    total: float = sum(offered.values())
+    exact: Dict[str, float] = {name: weight / total * len(population) for name, weight in offered.items()}
+    target: Dict[str, int] = {name: int(share) for name, share in exact.items()}
     for name in sorted(exact, key=lambda n: exact[n] - target[n], reverse=True)[:len(population) - sum(target.values())]:
         target[name] += 1
-    counts = {name: sum(agent.rider_type.name == name for agent in population) for name in offered}
+    counts: Dict[str, int] = {name: sum(agent.rider_type.name == name for agent in population) for name in offered}
     unreachable: Set[str] = set()
     while True:
-        short = [name for name in offered if counts[name] < target[name] and name not in unreachable]
+        short: List[str] = [name for name in offered if counts[name] < target[name] and name not in unreachable]
         if not short:
             return population
-        wanted = max(short, key=lambda name: target[name] - counts[name])
-        donors = [index for index, agent in enumerate(population)
+        wanted: str = max(short, key=lambda name: target[name] - counts[name])
+        donors: List[int] = [index for index, agent in enumerate(population)
                   if agent.rider_type.name not in offered or counts[agent.rider_type.name] > target[agent.rider_type.name]]
         rng.shuffle(donors)
-        child = None
+        child: BicycleAgent | None = None
         for index in donors:
             child = retyped(population[index], RiderType[wanted])
             if acceptable(space, child, config):
                 break
             child = None
         if child is None and redraw and donors:
-            index = donors[0]
+            index: int = donors[0]
             child = _fresh(space, RiderType[wanted], rng, config, starts_on_bike_lane(space, population[index].route))
         if child is None:
             unreachable.add(wanted)
             continue
-        old = population[index].rider_type.name
+        old: str = population[index].rider_type.name
         if old in counts:
             counts[old] -= 1
         counts[wanted] += 1
@@ -340,7 +344,7 @@ def _fresh(space: RouteSpace, rider_type: RiderType, rng: Random, config: Bicycl
     """
     for _ in range(attempts):
         try:
-            agent = BicycleAgent.random(space, rng, rider_type=rider_type, max_start_t=config.max_start_t,
+            agent: BicycleAgent = BicycleAgent.random(space, rng, rider_type=rider_type, max_start_t=config.max_start_t,
                                         min_length=config.min_length, max_length=config.max_length,
                                         min_speed=config.min_speed, bike_lane_start_share=float(on_bike_lane))
         except RuntimeError:

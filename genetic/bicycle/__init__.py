@@ -9,6 +9,8 @@ connectors give bike routes their branches, and repair turn waits with
 shared with NPC vehicles (``genetic.profile_operators``).
 """
 
+from typing import List
+
 from .common import GENES, BicycleOperatorConfig, acceptable, rebalance_rider_types
 from .crossover import (
     cx_bicycle, cx_bridge, cx_rider_type, cx_route_swap, cx_shared_lane, cx_drive_style, cx_speed_profile, cx_start_time,
@@ -19,7 +21,7 @@ from .mutation import (
     mut_start_t, mut_stop, mut_turn_dwell,
 )
 
-__all__ = [
+__all__: List[str] = [
     "GENES", "BicycleOperatorConfig", "acceptable", "rebalance_rider_types",
     "cx_bicycle", "cx_bridge", "cx_rider_type", "cx_route_swap", "cx_shared_lane", "cx_drive_style", "cx_speed_profile",
     "cx_start_time", "cx_turn_dwell",

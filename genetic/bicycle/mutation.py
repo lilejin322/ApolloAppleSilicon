@@ -8,7 +8,7 @@ change lanes, so there is no lane-change mutation.
 
 from dataclasses import replace
 from random import Random
-from typing import List
+from typing import Callable, Dict, List
 
 from ...scenario import BicycleAgent, RiderType, RouteSpace
 from .. import route_operators
@@ -110,8 +110,8 @@ def mut_turn_dwell(agent: BicycleAgent, rng: Random,
     """
     if not agent.turn_dwell:
         return None
-    index = rng.randrange(len(agent.turn_dwell))
-    wait = gauss_step(rng, agent.turn_dwell[index], config.sigma_turn_dwell, config.max_turn_dwell)
+    index: int = rng.randrange(len(agent.turn_dwell))
+    wait: float = gauss_step(rng, agent.turn_dwell[index], config.sigma_turn_dwell, config.max_turn_dwell)
     return replace(agent, turn_dwell=agent.turn_dwell[:index] + (wait,) + agent.turn_dwell[index + 1:])
 
 
@@ -135,7 +135,7 @@ def mut_rider_type(agent: BicycleAgent, rng: Random,
     :returns: The mutant, or None if the draw is the current type.
     :rtype: BicycleAgent | None
     """
-    rider_type = drawn if drawn is not None else RiderType[draw_type(rng, config.rider_type_weights)]
+    rider_type: RiderType = drawn if drawn is not None else RiderType[draw_type(rng, config.rider_type_weights)]
     return None if rider_type is agent.rider_type else retyped(agent, rider_type)
 
 
@@ -181,9 +181,9 @@ def mut_bicycle(agent: BicycleAgent, space: RouteSpace, rng: Random,
             draws.append(RiderType[draw_type(rng, config.rider_type_weights)])
         return mut_rider_type(child, rng, config, draws[0])
 
-    direction = rng.choice(("extend", "truncate"))  # extend/truncate direction for this event, kept over retries
-    point_action = rng.choice(SPEED_POINT_ACTIONS)  # speed-point action, kept over retries
-    operators = {
+    direction: str = rng.choice(("extend", "truncate"))  # extend/truncate direction for this event, kept over retries
+    point_action: str = rng.choice(SPEED_POINT_ACTIONS)  # speed-point action, kept over retries
+    operators: Dict[str, Callable[[BicycleAgent], BicycleAgent | None]] = {
         "reroute": lambda child: mut_reroute(child, space, rng, config),
         "extend_or_truncate": lambda child: mut_extend_or_truncate(child, space, rng, config, direction),
         "s": lambda child: mut_s(child, space, rng, config),
