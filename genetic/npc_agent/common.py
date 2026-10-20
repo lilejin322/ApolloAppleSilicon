@@ -15,7 +15,7 @@ from random import Random
 from typing import ClassVar, Mapping, Sequence, Tuple, Dict, List, Set
 
 from ...scenario import InvalidRoute, LaneRoute, NPCVehicleAgent, RouteSpace, VehicleType
-from ...scenario.npc_agents import VEHICLE_SPECS
+from ...scenario.npc_agent import VEHICLE_SPECS
 from ...scenario.realism import VEHICLE_MIX
 from ...utils import require_nonnegative
 from ..common import ReplayOperatorConfig

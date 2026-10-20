@@ -9,10 +9,10 @@ the virtual connectors of ``bike_connectors``. ``PedestrianAgent`` holds a
 trajectory through ``replay`` too.
 """
 
-from .ad_agents import ADAgent
+from .ad_agent import ADAgent
 from .bicycle import RIDER_SPECS, BicycleAgent, RiderSpec, RiderType, random_rider_type
 from .bike_connectors import ConnectorKind
-from .npc_agents import VEHICLE_SPECS, NPCVehicleAgent, VehicleSpec, VehicleType, random_vehicle_type
+from .npc_agent import VEHICLE_SPECS, NPCVehicleAgent, VehicleSpec, VehicleType, random_vehicle_type
 from .pedestrian import WALKER_SPECS, PedestrianAgent, WalkerSpec, WalkerType, random_walker_type
 from .replay import AgentState, ReplayTrajectory, SpeedPoint
 from .routing import (
