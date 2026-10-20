@@ -18,7 +18,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from random import Random
 from types import MappingProxyType
-from typing import Iterable, Mapping, Dict, FrozenSet, List, Set, Tuple
+from typing import Iterable, Mapping, Dict, FrozenSet, List, Set, Tuple, Self
 
 from .bike_connectors import DEFAULT_KINDS, ConnectorKind, bike_connectors
 from .replay import (
@@ -57,7 +57,7 @@ class RiderType(Enum):
     """E-bicycle"""
 
 
-def random_rider_type(rng: Random, weights: Mapping[str, float] = RIDER_MIX) -> "RiderType":
+def random_rider_type(rng: Random, weights: Mapping[str, float] = RIDER_MIX) -> RiderType:
     """
     A rider type drawn from a composition (type name -> weight); by default
     about one e-bike in six (``realism.RIDER_MIX``).
@@ -462,7 +462,7 @@ class BicycleAgent:
 
     def with_route(self, route: LaneRoute, space: RouteSpace, rng: Random, *,
                    keep: Mapping[PivotKey, float] | None = None,
-                   max_turn_dwell: float = 30.0) -> "BicycleAgent":
+                   max_turn_dwell: float = 30.0) -> Self:
         """
         Return this agent on another route, e.g. after crossover or mutation.
 
@@ -495,7 +495,7 @@ class BicycleAgent:
                min_length: float = 30.0, max_length: float = 300.0, stop_probability: float = 0.0,
                max_dwell: float = 5.0, max_turn_dwell: float = 30.0, min_speed: float = 1.0,
                max_attempts: int = 200, min_arrival_t: float = 0.0,
-               bike_lane_start_share: float = BIKE_LANE_START_SHARE) -> "BicycleAgent":
+               bike_lane_start_share: float = BIKE_LANE_START_SHARE) -> Self:
         """
         Draw a random valid bicycle of the given rider type.
 
@@ -554,7 +554,7 @@ class BicycleAgent:
     def _random_from(cls, space: RouteSpace, rng: Random, rider_type: RiderType, start_lanes: List[str] | None,
                      max_start_t: float, min_length: float, max_length: float, stop_probability: float,
                      max_dwell: float, max_turn_dwell: float, min_speed: float, max_attempts: int,
-                     min_arrival_t: float) -> "BicycleAgent":
+                     min_arrival_t: float) -> Self:
         """
         ``random`` with routes starting on ``start_lanes`` (any start lane if None).
 
@@ -626,7 +626,7 @@ class BicycleAgent:
         """
         return rebased(space, self.route, (), self.speed_profile, route, ())
 
-    def _placed_stops(self, space: RouteSpace) -> "BicycleAgent":
+    def _placed_stops(self, space: RouteSpace) -> Self:
         """
         This agent with each stop moved, if it lies on a connector or a
         junction lane, to the nearest riding position off them between its
@@ -673,7 +673,7 @@ class BicycleAgent:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "BicycleAgent":
+    def from_dict(cls, data: Dict) -> Self:
         """
         Build an agent from ``to_dict`` output.
 

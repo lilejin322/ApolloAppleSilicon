@@ -19,7 +19,7 @@ from random import Random
 from dataclasses import dataclass
 from math import ceil, cos, dist, isfinite, sin
 from types import MappingProxyType
-from typing import Callable, Iterable, Iterator, Mapping, NamedTuple, Dict, FrozenSet, List, Tuple
+from typing import Callable, Iterable, Iterator, Mapping, NamedTuple, Dict, FrozenSet, List, Tuple, Self
 import shapely
 from shapely.geometry import LineString, Point
 from shapely.ops import substring, unary_union
@@ -322,7 +322,7 @@ class LaneRoute:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "LaneRoute":
+    def from_dict(cls, data: Dict) -> Self:
         """
         Build a route from ``to_dict`` output.
 

@@ -15,7 +15,7 @@ from enum import Enum
 from math import hypot
 from random import Random
 from types import MappingProxyType
-from typing import Mapping, Sequence
+from typing import Mapping, Sequence, Self
 from shapely.geometry import LineString
 
 from .replay import (
@@ -47,7 +47,7 @@ class VehicleType(Enum):
     BUS = "BUS"
 
 
-def random_vehicle_type(rng: Random, weights: Mapping[str, float] = VEHICLE_MIX) -> "VehicleType":
+def random_vehicle_type(rng: Random, weights: Mapping[str, float] = VEHICLE_MIX) -> VehicleType:
     """
     A vehicle type drawn from a traffic composition (type name -> weight);
     by default urban US vehicle-miles (``realism.VEHICLE_MIX``).
@@ -316,7 +316,7 @@ class NPCVehicleAgent:
 
     def with_route(self, route: LaneRoute, space: RouteSpace, rng: Random, *,
                    keep: Mapping[Tuple[str, str], float] | None = None,
-                   attempts: int = 10) -> "NPCVehicleAgent":
+                   attempts: int = 10) -> Self:
         """
         Return this agent on another route, e.g. after crossover or mutation.
 
@@ -362,7 +362,7 @@ class NPCVehicleAgent:
                lane_change_probability: float = 0.2, stop_probability: float = 0.0,
                max_dwell: float = 5.0, min_speed: float = 4.5, max_attempts: int = 200,
                min_arrival_t: float = 0.0,
-               ) -> "NPCVehicleAgent":
+               ) -> Self:
         """
         Draw a random valid NPC of the given type.
 
@@ -503,7 +503,7 @@ class NPCVehicleAgent:
         """
         return rebased(space, self.route, self.lane_change_s, self.speed_profile, route, lane_change_s)
 
-    def _placed_stops(self, space: RouteSpace) -> "NPCVehicleAgent":
+    def _placed_stops(self, space: RouteSpace) -> Self:
         """
         This agent with each stop moved, if it lies on a junction lane or within
         a lane change's expected length, to the nearest driven position off
@@ -547,7 +547,7 @@ class NPCVehicleAgent:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict, space: RouteSpace | None = None) -> "NPCVehicleAgent":
+    def from_dict(cls, data: Dict, space: RouteSpace | None = None) -> Self:
         """
         Build an agent from ``to_dict`` output.
 

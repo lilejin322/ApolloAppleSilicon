@@ -12,13 +12,11 @@ from weakref import WeakKeyDictionary
 from shapely.geometry import LineString
 from typing import TYPE_CHECKING, Sequence, List
 
-from ..map.geometry import CenterlineProfile, normalize_angle
-from .routing import InvalidRoute, RouteSpace, _junction_info
 from ..map import MapService
 from ..map.types import LaneMarking
-
-if TYPE_CHECKING:
-    from .replay import ReplayLayout, SpeedPoint
+from ..map.geometry import CenterlineProfile, normalize_angle
+from .routing import InvalidRoute, RouteSpace, _junction_info
+from .replay import ReplayLayout, SpeedPoint
 
 FOOTPRINT_LATERAL_TOLERANCE = 0.2
 """Metres a body may overlap a parallel prohibiting marking on each side: coarse map
@@ -37,7 +35,7 @@ _FOOTPRINT_CACHE = WeakKeyDictionary()
 """At most 128 validation results per immutable loaded map; no trajectory arrays retained."""
 
 
-def check_stops(space: RouteSpace, layout: "ReplayLayout", profile: Sequence["SpeedPoint"],
+def check_stops(space: RouteSpace, layout: ReplayLayout, profile: Sequence[SpeedPoint],
                 positions: Sequence[float]) -> None:
     """
     Reject ordinary stops on junctions, connectors or lane-change stretches.

@@ -20,7 +20,7 @@ from random import Random
 from shapely.geometry import LineString
 from dataclasses import dataclass, replace
 from types import MappingProxyType
-from typing import Callable, Mapping, NamedTuple, Sequence, Dict, List, Tuple
+from typing import Callable, Mapping, NamedTuple, Sequence, Dict, List, Tuple, Self
 
 from ..map.geometry import normalize_angle, smooth_polyline
 from ..utils import require_nonnegative
@@ -89,7 +89,7 @@ class WalkerType(Enum):
     RUNNER = "RUNNER"
 
 
-def random_walker_type(rng: Random, weights: Mapping[str, float] = WALKER_MIX) -> "WalkerType":
+def random_walker_type(rng: Random, weights: Mapping[str, float] = WALKER_MIX) -> WalkerType:
     """
     A walker type drawn from a composition (type name -> weight); by default
     ``realism.WALKER_MIX``.
@@ -472,7 +472,7 @@ class PedestrianAgent:
                                  smoothing=WALK_SPEED_SMOOTHING)
         return ReplayTrajectory(layout.path, self.start_t, s, v, dwell, layout.pivots, yaw_rate=WALKER_YAW_RATE)
 
-    def with_route(self, route: WalkRoute, network: WalkNetwork) -> "PedestrianAgent":
+    def with_route(self, route: WalkRoute, network: WalkNetwork) -> Self:
         """
         Return this agent on another walk, e.g. after crossover or mutation.
 
@@ -497,7 +497,7 @@ class PedestrianAgent:
                count_weights: Mapping[int, float] = EXCURSION_COUNT_MIX,
                kind_weights: Mapping[str, float] = EXCURSION_MIX, max_link: float = 40.0,
                max_approach: float = 30.0, turn_back_probability: float = 0.05, min_speed: float = 0.5,
-               max_attempts: int = 100, min_arrival_t: float = 0.0) -> "PedestrianAgent":
+               max_attempts: int = 100, min_arrival_t: float = 0.0) -> Self:
         """
         Draw a random valid pedestrian of the given walker type.
 
@@ -555,7 +555,7 @@ class PedestrianAgent:
     def _random_with(cls, network: WalkNetwork, rng: Random, walker_type: WalkerType, kinds: List[ExcursionKind],
                      max_start_t: float, min_length: float, max_length: float, max_link: float, max_approach: float,
                      turn_back_probability: float, min_speed: float, max_attempts: int,
-                     min_arrival_t: float) -> "PedestrianAgent":
+                     min_arrival_t: float) -> Self:
         """
         ``random`` with the excursion kinds fixed.
 
@@ -617,7 +617,7 @@ class PedestrianAgent:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "PedestrianAgent":
+    def from_dict(cls, data: Dict) -> Self:
         """
         Build an agent from ``to_dict`` output.
 

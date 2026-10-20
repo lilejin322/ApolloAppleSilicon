@@ -11,7 +11,7 @@ from random import Random
 
 from .routing import ENDPOINT_JUNCTION_MARGIN, LaneRoute, RoutePoses, RouteRules, RouteSpace
 from ..utils import require_nonnegative
-from typing import Dict
+from typing import Dict, Self
 
 
 @dataclass(frozen=True)
@@ -79,7 +79,7 @@ class ADAgent:
     @classmethod
     def random(cls, space: RouteSpace, rng: Random, *, max_start_t: float = 10.0,
                min_length: float = 50.0, max_length: float = 500.0,
-               lane_change_probability: float = 0.2) -> "ADAgent":
+               lane_change_probability: float = 0.2) -> Self:
         """
         Draw a random ego with a valid route and a start time in ``[0, max_start_t]``.
 
@@ -107,7 +107,7 @@ class ADAgent:
         return {"route": self.route.to_dict(), "start_t": self.start_t}
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "ADAgent":
+    def from_dict(cls, data: Dict) -> Self:
         """
         Build an agent from ``to_dict`` output.
 
