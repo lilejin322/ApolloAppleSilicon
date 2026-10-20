@@ -560,20 +560,25 @@ class RouteSpace:
         centerline to its right (``centerline``): a bicycle rides near the curb
         of a driving lane. Lengths, positions, endpoints and replay paths all use
         the shifted line.
-
-    :ivar MapService service: Loaded map service used by this route space.
-    :ivar RouteRules rules: Route rules enforced by this space.
-    :ivar Dict[str, float] _offsets: Nonzero rightward centerline offsets by map-lane ID.
-    :ivar Dict[str, LineString] _offset_lines: Lazily computed shifted centerlines.
-    :ivar Dict[str, VirtualLane] _virtual: Virtual lanes by ID.
-    :ivar int _no_turn: Apollo enum number for lanes with no turn classification.
-    :ivar Dict[str, float] _lengths: Centerline lengths of allowed map and virtual lanes.
-    :ivar nx.DiGraph graph: Allowed routing graph with transition and search-cost attributes.
-    :ivar List[str] _start_lane_list: Lazily cached sorted map lanes on which a route may start.
-    :raises ValueError: If a virtual lane reuses an ID or joins an unknown lane,
-        or if virtual lanes are given with ``unambiguous`` rules, or if an extra
-        lane or an offset names an unknown lane.
     """
+    service: MapService
+    """Loaded map service used by this route space."""
+    rules: RouteRules
+    """Route rules enforced by this space."""
+    _offsets: Dict[str, float]
+    """Nonzero rightward centerline offsets by map-lane ID."""
+    _offset_lines: Dict[str, LineString]
+    """Lazily computed shifted centerlines."""
+    _virtual: Dict[str, VirtualLane]
+    """Virtual lanes by ID."""
+    _no_turn: int
+    """Apollo enum number for lanes with no turn classification."""
+    _lengths: Dict[str, float]
+    """Centerline lengths of allowed map and virtual lanes."""
+    graph: nx.DiGraph
+    """Allowed routing graph with transition and search-cost attributes."""
+    _start_lane_list: List[str]
+    """Lazily cached sorted map lanes on which a route may start."""
 
     def __init__(self, service: MapService, rules: RouteRules = RouteRules(),
                  virtual_lanes: Iterable[VirtualLane] = (), *, extra_lanes: Iterable[str] = (),
