@@ -17,7 +17,6 @@ to: where a bike lane stops, a rider carries on along the road.
 from enum import Enum
 from math import ceil, cos, dist, hypot, radians, sin
 from typing import Iterable, Iterator, Mapping
-
 import networkx as nx
 from shapely.geometry import LineString
 
@@ -35,7 +34,9 @@ class ConnectorKind(Enum):
     """
 
     STRAIGHT = "STRAIGHT"
+    """Straight connector"""
     RIGHT = "RIGHT"
+    """Right connector"""
     LEFT_TWO_STAGE = "LEFT_TWO_STAGE"
     """Straight to the far corner, a stop to turn in place, then straight across."""
     LEFT_DIAGONAL = "LEFT_DIAGONAL"
@@ -44,6 +45,7 @@ class ConnectorKind(Enum):
 
 
 DEFAULT_KINDS = frozenset({ConnectorKind.STRAIGHT, ConnectorKind.RIGHT, ConnectorKind.LEFT_TWO_STAGE})
+"""Default"""
 
 _TOPOLOGY_STEPS = 3
 """Car-lane forward steps followed from a dead end's neighbour, enough to cross a junction."""
