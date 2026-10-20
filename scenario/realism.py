@@ -112,7 +112,7 @@ def _usual(kind: str) -> Tuple[float, float, Tuple[float, float]]:
     """
     Return the mean, standard deviation, and bounds of the usual cruise component.
 
-    :param str kind: Traffic type name or excursion category selecting the applicable rules or prior.
+    :param str kind: Agent type name selecting the applicable speed prior.
     :returns: Mean, standard deviation, and lower/upper bounds of the usual component.
     :rtype: Tuple[float, float, Tuple[float, float]]
     """
@@ -125,7 +125,7 @@ def _slow(kind: str) -> Tuple[float, float]:
     """
     Return the lower and upper bounds of the slow cruise component.
 
-    :param str kind: Traffic type name or excursion category selecting the applicable rules or prior.
+    :param str kind: Agent type name selecting the applicable speed prior.
     :returns: The slow component lower and upper bounds.
     :rtype: Tuple[float, float]
     """
@@ -138,7 +138,7 @@ def reference_speed(kind: str, limit: float | None, max_speed: float) -> float:
     ``DEFAULT_SPEED_LIMIT``) capped by the type's ``max_speed`` for vehicles,
     1 for riders and walkers (``ABSOLUTE_CRUISE``).
 
-    :param str kind: Traffic type name or excursion category selecting the applicable rules or prior.
+    :param str kind: Agent type name selecting the applicable speed prior.
     :param float | None limit: Lane speed limit in m/s, or ``None`` if unspecified.
     :param float max_speed: Maximum allowed target speed, in m/s.
     :returns: The capped lane reference speed for vehicles, or 1 for absolute speed priors.
@@ -153,7 +153,7 @@ def density(kind: str, speed: float, reference: float, low: float, high: float) 
     """
     Unnormalized prior density of a target speed, zero outside [low, high].
 
-    :param str kind: Traffic type name or excursion category selecting the applicable rules or prior.
+    :param str kind: Agent type name selecting the applicable speed prior.
     :param float speed: Target speed, in m/s.
     :param float reference: Reference speed scaling the cruise prior, in m/s; absolute priors use 1.
     :param float low: Lowest allowed target speed, in m/s.
@@ -179,10 +179,10 @@ def draw_speed(rng: Random, kind: str, reference: float, low: float, high: float
     A target speed from the prior restricted to [low, high] (``high`` if it cannot hold any).
 
     :param Random rng: Random number generator used for sampling and selection.
-    :param str kind: Traffic type name or excursion category selecting the applicable rules or prior.
+    :param str kind: Agent type name selecting the applicable speed prior.
     :param float reference: Reference speed scaling the cruise prior, in m/s; absolute priors use 1.
-    :param float low: Lower bound in the units of the values being sampled or checked.
-    :param float high: Upper bound in the units of the values being sampled or checked.
+    :param float low: Minimum allowed target speed, in m/s.
+    :param float high: Maximum allowed target speed, in m/s.
     :param int tries: Maximum number of speed draws before using the bounded fallback.
     :returns: A sampled speed in m/s, or a bounded mean if the attempts are exhausted.
     :rtype: float
@@ -211,12 +211,12 @@ def speed_step(rng: Random, kind: str, speed: float, reference: float, low: floa
     density ratio. None when rejected. Repeated steps keep the prior.
 
     :param Random rng: Random number generator used for sampling and selection.
-    :param str kind: Traffic type name or excursion category selecting the applicable rules or prior.
+    :param str kind: Agent type name selecting the applicable speed prior.
     :param float speed: Target speed, in m/s.
     :param float reference: Reference speed scaling the cruise prior, in m/s; absolute priors use 1.
-    :param float low: Lower bound in the units of the values being sampled or checked.
-    :param float high: Upper bound in the units of the values being sampled or checked.
-    :param float sigma: Standard deviation of the normal proposal in the same units as the sampled value.
+    :param float low: Minimum allowed target speed, in m/s.
+    :param float high: Maximum allowed target speed, in m/s.
+    :param float sigma: Standard deviation of the speed proposal, in m/s.
     :returns: The proposed speed in m/s, or ``None`` if the Metropolis step is rejected.
     :rtype: float | None
     """
@@ -235,7 +235,7 @@ def comfort_limits(spec: ComfortSpec, kind: str, style: float) -> ComfortSpec:
     ``spec`` with the acceleration and comfortable braking of ``style``.
 
     :param ComfortSpec spec: Immutable motion specification whose comfortable limits are adjusted.
-    :param str kind: Traffic type name or excursion category selecting the applicable rules or prior.
+    :param str kind: Agent type name selecting the comfortable motion limits.
     :param float style: Style value in [0, 1] selecting comfortable acceleration and braking.
     :returns: A replacement specification of the same type with adjusted comfortable limits.
     :rtype: ComfortSpec
@@ -252,7 +252,7 @@ def style_step(rng: Random, style: float, sigma: float = STYLE_SIGMA) -> float:
 
     :param Random rng: Random number generator used for sampling and selection.
     :param float style: Style value in [0, 1] selecting comfortable acceleration and braking.
-    :param float sigma: Standard deviation of the normal proposal in the same units as the sampled value.
+    :param float sigma: Standard deviation of the dimensionless style proposal.
     :returns: The proposed style reflected into [0, 1].
     :rtype: float
     """
@@ -300,7 +300,7 @@ def draw_type(rng: Random, weights: Mapping[str, float]) -> str:
     :param Mapping[str, float] weights: Relative nonnegative sampling weights keyed by type name.
     :returns: A positively weighted type name.
     :rtype: str
-    :raises ValueError: If input fields or bounds violate the validation conditions of this operation.
+    :raises ValueError: If ``weights`` has no positive entry.
     """
     names = sorted(name for name, weight in weights.items() if weight > 0)
     if not names:
@@ -312,8 +312,8 @@ def _prior_cdf(kind: str, value: float) -> float:
     """
     CDF of ``kind``'s absolute target-speed prior (``draw_speed`` with reference 1, unrestricted).
 
-    :param str kind: Traffic type name or excursion category selecting the applicable rules or prior.
-    :param float value: Value to evaluate or transform in the units specified by this operation.
+    :param str kind: Agent type name selecting the applicable speed prior.
+    :param float value: Target speed whose prior quantile is evaluated, in m/s.
     :returns: The cumulative probability under the source type speed prior.
     :rtype: float
     """
@@ -332,8 +332,8 @@ def mapped_speed(kind: str, other: str, value: float) -> float:
     becomes a brisk runner, not a runner at walking pace. Values beyond the
     prior's support scale with its nearest end (a crossing sped up past the range).
 
-    :param str kind: Traffic type name or excursion category selecting the applicable rules or prior.
-    :param str other: Destination traffic type name for quantile mapping.
+    :param str kind: Source agent type name.
+    :param str other: Destination agent type name.
     :param float value: Positive target speed of the source type, in m/s.
     :returns: The mapped destination-type target speed, in m/s.
     :rtype: float
@@ -355,4 +355,3 @@ def mapped_speed(kind: str, other: str, value: float) -> float:
         else:
             hi = middle
     return (lo + hi) / 2
-
