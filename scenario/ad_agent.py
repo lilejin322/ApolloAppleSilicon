@@ -19,9 +19,9 @@ class ADAgent:
     """
     Genetic representation of one ego ADS instance.
 
-    The instance starts at ``(route.lanes[0], route.start_s)`` and, ``start_t``
-    seconds into the scenario, drives along ``route`` to
-    ``(route.lanes[-1], route.end_s)``.
+    The route starts at ``(route.lanes[0], route.start_s)`` and ends at
+    ``(route.lanes[-1], route.end_s)``. The routing request is sent
+    ``start_t`` seconds after the scenario starts.
 
     :param LaneRoute route: Lanes to drive, with start and end positions.
     :param float start_t: Seconds after scenario start to send the route.
@@ -70,9 +70,9 @@ class ADAgent:
         Build the routing request data for ``manager.routing``.
 
         :param RouteSpace space: The ego's route space, e.g. built with ``ADAgent.rules``.
-        :raises InvalidRoute: If the route is illegal or cannot be sent unambiguously.
-        :returns: The routing request values described above.
+        :returns: Route poses suitable for sending as the ego routing request.
         :rtype: RoutePoses
+        :raises InvalidRoute: If the route is illegal or cannot be sent unambiguously.
         """
         return space.poses(self.route)
 
@@ -91,6 +91,7 @@ class ADAgent:
         :param float lane_change_probability: Chance of a lane change where one is possible.
         :returns: A randomly generated valid agent satisfying the requested constraints.
         :rtype: ADAgent
+        :raises ValueError: If the sampled start time violates the agent's field constraints.
         """
         route = space.random_route(rng, min_length=min_length, max_length=max_length,
                                    lane_change_probability=lane_change_probability)
@@ -113,6 +114,6 @@ class ADAgent:
         :param Dict data: Serialized mapping previously produced by ``to_dict``.
         :returns: The reconstructed object.
         :rtype: ADAgent
-        :raises KeyError: If a required serialized field or map identifier is absent.
+        :raises KeyError: If a required serialized field is absent.
         """
         return cls(LaneRoute.from_dict(data["route"]), data["start_t"])
