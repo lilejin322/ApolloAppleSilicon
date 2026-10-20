@@ -29,6 +29,7 @@ from ..map import MapService
 from ..map.geometry import max_replay_curvature, polygon_to_shape
 from ..message.descriptor import DescriptorBundle
 from ..utils import require_nonnegative
+from typing import Dict, FrozenSet, List, Tuple
 
 _WAYPOINT_STEP = 1.0
 """Spacing in metres of the candidate waypoint positions tried on a lane."""
@@ -46,9 +47,9 @@ _CHANGE_SAMPLES = 64
 """Maximum draws while narrowing a lane-change window around a feasible continuation."""
 _JOIN_REACH = 10.0
 """Metres of each lane on either side of a forward step checked for the step's curvature."""
-_CURVATURE_CACHE: "weakref.WeakKeyDictionary[MapService, dict]" = weakref.WeakKeyDictionary()
+_CURVATURE_CACHE: "weakref.WeakKeyDictionary[MapService, Dict]" = weakref.WeakKeyDictionary()
 """Per map: replayed curvature of each lane and of each forward step between lanes."""
-_JUNCTION_CACHE: "weakref.WeakKeyDictionary[MapService, dict]" = weakref.WeakKeyDictionary()
+_JUNCTION_CACHE: "weakref.WeakKeyDictionary[MapService, Dict]" = weakref.WeakKeyDictionary()
 """Per map: the union of its junction polygons, its junction lanes, and endpoint ranges per lane and margin."""
 ENDPOINT_JUNCTION_MARGIN = 5.0
 """Default ``RouteRules.endpoint_junction_margin`` of ego and NPC rules, in metres."""
@@ -65,6 +66,14 @@ _ENDPOINT_OVERSHOOT = 100.0
 
 
 def _lane_curvature(service: MapService, lane_id: str) -> float:
+    """
+    Return the cached replay curvature of one map lane.
+
+    :param MapService service: Loaded map service supplying geometry, descriptors, and spatial indexes.
+    :param str lane_id: Map, virtual-lane, or walk-element ID, as applicable.
+    :returns: The computed distance, duration, or scalar value described above.
+    :rtype: float
+    """
     cache = _CURVATURE_CACHE.setdefault(service, {})
     key = ("lane", lane_id)
     if key not in cache:
@@ -73,7 +82,15 @@ def _lane_curvature(service: MapService, lane_id: str) -> float:
 
 
 def _join_curvature(service: MapService, source: str, target: str) -> float:
-    """Curvature of the last metres of ``source`` joined to the first metres of ``target``."""
+    """
+    Curvature of the last metres of ``source`` joined to the first metres of ``target``.
+
+    :param MapService service: Loaded map service supplying geometry, descriptors, and spatial indexes.
+    :param str source: Source lane ID.
+    :param str target: Target distance or target lane, as defined by this operation.
+    :returns: The computed distance, duration, or scalar value described above.
+    :rtype: float
+    """
     cache = _CURVATURE_CACHE.setdefault(service, {})
     key = ("join", source, target)
     if key not in cache:
@@ -92,6 +109,11 @@ def offset_line(line: LineString, offset: float) -> LineString:
     same direction: each vertex moves along the normal of its neighbours'
     chord, so vertices and their order are kept (shapely's ``offset_curve``
     may merge or reorder them on tight bends).
+
+    :param LineString line: Line geometry in map metres.
+    :param float offset: Signed lateral shift in metres; positive shifts right.
+    :returns: The constructed line geometry in map metres.
+    :rtype: LineString
     """
     coords = np.asarray(line.coords, dtype=float)[:, :2]
     if len(coords) < 2 or not offset:
@@ -106,21 +128,28 @@ def offset_line(line: LineString, offset: float) -> LineString:
     return LineString(shifted[keep])
 
 
-def junction_lanes(service: MapService) -> frozenset[str]:
+def junction_lanes(service: MapService) -> FrozenSet[str]:
     """
     The map's junction lanes (``RouteSpace.is_junction_lane``), without building a space.
 
-    :rtype: frozenset[str]
+    :rtype: FrozenSet[str]
+    :param MapService service: Loaded map service supplying geometry, descriptors, and spatial indexes.
+    :returns: The map's junction lanes (``RouteSpace.is_junction_lane``), without building a space.
     """
     lane_fields = DescriptorBundle(service.descriptor_path).message("apollo.hdmap.Lane").DESCRIPTOR.fields_by_name
     return frozenset(_junction_info(service, lane_fields["turn"].enum_type.values_by_name["NO_TURN"].number)["lanes"])
 
 
-def _junction_info(service: MapService, no_turn: int) -> dict:
+def _junction_info(service: MapService, no_turn: int) -> Dict:
     """
     The map's junction polygons as one shape (None without polygons) and its
     junction lanes: lanes with a ``junction_id``, lanes mostly inside junction
     polygons, and turn lanes that enter one (maps often leave ``junction_id`` unset).
+
+    :param MapService service: Loaded map service supplying geometry, descriptors, and spatial indexes.
+    :param int no_turn: Apollo enum number identifying a lane without a turn.
+    :returns: The map's junction polygons as one shape (None without polygons) and its junction lanes: lanes with a ``junction_id``, lanes mostly inside junction polygons, and turn lanes that enter one (maps often leave ``junction_id`` unset).
+    :rtype: Dict
     """
     info = _JUNCTION_CACHE.get(service)
     if info is None:
@@ -156,12 +185,25 @@ def _junction_info(service: MapService, no_turn: int) -> dict:
 
 
 def _quintic(u: float) -> float:
-    """Minimum-jerk blend weight: 0 to 1 with zero slope and curvature at both ends."""
+    """
+    Minimum-jerk blend weight: 0 to 1 with zero slope and curvature at both ends.
+
+    :param float u: Normalized blend position, or the source lane ID for an edge callback.
+    :returns: The computed distance, duration, or scalar value described above.
+    :rtype: float
+    """
     return u * u * u * (10 - 15 * u + 6 * u * u)
 
 
 def _ordered_subgraph(graph: nx.DiGraph, lanes: Iterable[str]) -> nx.DiGraph:
-    """Copy allowed nodes and edges in a stable order, including equal-cost search ties."""
+    """
+    Copy allowed nodes and edges in a stable order, including equal-cost search ties.
+
+    :param nx.DiGraph graph: Directed lane-routing graph.
+    :param Iterable[str] lanes: Lane IDs in driving order.
+    :returns: The ordered subgraph values described above.
+    :rtype: nx.DiGraph
+    """
     allowed = set(lanes)
     ordered = nx.DiGraph()
     ordered.add_nodes_from((lane, graph.nodes[lane]) for lane in sorted(allowed))
@@ -174,11 +216,15 @@ def _ordered_subgraph(graph: nx.DiGraph, lanes: Iterable[str]) -> nx.DiGraph:
 
 
 class InvalidRoute(ValueError):
-    """The route cannot be driven or sent unambiguously on this map."""
+    """
+    The route cannot be driven or sent unambiguously on this map.
+    """
 
 
 class Transition(Enum):
-    """How a route moves from one lane to the next, as in ``routing_graph``."""
+    """
+    How a route moves from one lane to the next, as in ``routing_graph``.
+    """
 
     FORWARD = "F"
     LEFT = "L"
@@ -190,6 +236,8 @@ def lane_changes(transitions: Iterable[Transition]) -> int:
     Count the lane changes among route transitions.
 
     :rtype: int
+    :param Iterable[Transition] transitions: Transitions connecting consecutive route lanes.
+    :returns: The number of non-forward transitions.
     """
     return sum(step is not Transition.FORWARD for step in transitions)
 
@@ -202,18 +250,29 @@ class LaneRoute:
     ``transitions[i]`` connects ``lanes[i]`` to ``lanes[i + 1]``. Where a lane
     change happens along a lane is decided by Apollo's planning, not here.
 
-    :param tuple[str, ...] lanes: Lane IDs in driving order.
-    :param tuple[Transition, ...] transitions: One step per consecutive lane pair.
+    :param Tuple[str, ...] lanes: Lane IDs in driving order.
+    :param Tuple[Transition, ...] transitions: One step per consecutive lane pair.
     :param float start_s: Start position in metres along the first lane's centerline.
     :param float end_s: End position in metres along the last lane's centerline.
     """
 
-    lanes: tuple[str, ...]
-    transitions: tuple[Transition, ...]
+    lanes: Tuple[str, ...]
+    """Lane IDs in driving order."""
+    transitions: Tuple[Transition, ...]
+    """One step per consecutive lane pair."""
     start_s: float
+    """Start position in metres along the first lane's centerline."""
     end_s: float
+    """End position in metres along the last lane's centerline."""
 
     def __post_init__(self) -> None:
+        """
+        Validate the field values and consistency of the constructed object.
+
+        :returns: ``None`` if validation succeeds.
+        :rtype: None
+        :raises ValueError: If input fields or bounds violate the validation conditions of this operation.
+        """
         if not self.lanes:
             raise ValueError("a route needs at least one lane")
         if len(self.transitions) != len(self.lanes) - 1:
@@ -227,32 +286,36 @@ class LaneRoute:
         The number of left and right lane changes.
 
         :rtype: int
+        :returns: The number of non-forward transitions.
         """
         return len(self.lane_change_indices)
 
     @property
-    def lane_change_indices(self) -> tuple[int, ...]:
+    def lane_change_indices(self) -> Tuple[int, ...]:
         """
         The positions in ``transitions`` of the lane changes, in route order.
 
-        :rtype: tuple[int, ...]
+        :rtype: Tuple[int, ...]
+        :returns: Indices of the non-forward transitions, in route order.
         """
         return tuple(index for index, step in enumerate(self.transitions) if step is not Transition.FORWARD)
 
     @property
-    def lane_change_pairs(self) -> tuple[tuple[str, str], ...]:
+    def lane_change_pairs(self) -> Tuple[Tuple[str, str], ...]:
         """
         The (source lane, target lane) of each lane change, in route order.
 
-        :rtype: tuple[tuple[str, str], ...]
+        :rtype: Tuple[Tuple[str, str], ...]
+        :returns: Source/target lane-ID pairs for the lane changes, in route order.
         """
         return tuple((self.lanes[index], self.lanes[index + 1]) for index in self.lane_change_indices)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> Dict:
         """
         Return a JSON-compatible representation.
 
-        :rtype: dict
+        :rtype: Dict
+        :returns: A new JSON-compatible mapping of the object fields.
         """
         return {
             "lanes": list(self.lanes),
@@ -262,12 +325,14 @@ class LaneRoute:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "LaneRoute":
+    def from_dict(cls, data: Dict) -> "LaneRoute":
         """
         Build a route from ``to_dict`` output.
 
-        :param dict data: Mapping with lanes, transitions, start_s, and end_s.
+        :param Dict data: Mapping with lanes, transitions, start_s, and end_s.
         :rtype: LaneRoute
+        :returns: The reconstructed object.
+        :raises KeyError: If a required serialized field or map identifier is absent.
         """
         return cls(
             tuple(data["lanes"]),
@@ -281,13 +346,24 @@ class LaneRoute:
 class RoutePose:
     """
     A position on a lane with its map coordinates and lane heading in radians.
+
+    :param str lane_id: Map or virtual lane ID.
+    :param float s: Position along the lane or sidewalk, in metres.
+    :param float x: Map X coordinate, in metres.
+    :param float y: Map Y coordinate, in metres.
+    :param float heading: Heading in radians.
     """
 
     lane_id: str
+    """Map or virtual lane ID."""
     s: float
+    """Position along the lane or sidewalk, in metres."""
     x: float
+    """Map X coordinate, in metres."""
     y: float
+    """Map Y coordinate, in metres."""
     heading: float
+    """Heading in radians."""
 
     @property
     def point(self) -> Point:
@@ -295,6 +371,7 @@ class RoutePose:
         The position as a Shapely Point.
 
         :rtype: Point
+        :returns: The map position as a Shapely point.
         """
         return Point(self.x, self.y)
 
@@ -303,27 +380,50 @@ class RoutePose:
 class RoutePoses:
     """
     The poses sent to Apollo for one route: start, intermediate waypoints, and end.
+
+    :param RoutePose start: Walk start on a sidewalk.
+    :param Tuple[RoutePose, ...] waypoints: Waypoints.
+    :param RoutePose end: Walk end on a sidewalk.
     """
 
     start: RoutePose
-    waypoints: tuple[RoutePose, ...]
+    """Walk start on a sidewalk."""
+    waypoints: Tuple[RoutePose, ...]
+    """Waypoints."""
     end: RoutePose
+    """Walk end on a sidewalk."""
 
 
 class RouteLeg(NamedTuple):
-    """The stretch ``[start_s, end_s]`` of one lane that a route drives along."""
+    """
+    The stretch ``[start_s, end_s]`` of one lane that a route drives along.
+
+    :param str lane_id: Map or virtual lane ID.
+    :param float start_s: Start position along the lane, in metres.
+    :param float end_s: End position along the lane, in metres.
+    """
 
     lane_id: str
+    """Map or virtual lane ID."""
     start_s: float
+    """Start position along the lane, in metres."""
     end_s: float
+    """End position along the lane, in metres."""
 
 
 class PathSection(NamedTuple):
-    """A stretch of a route's path and the lanes it lies on: one lane, or a
-    lane change's source and target lane."""
+    """
+    A stretch of a route's path and the lanes it lies on: one lane, or a
+    lane change's source and target lane.
 
-    lanes: tuple[str, ...]
+    :param Tuple[str, ...] lanes: Lane or element IDs in travel order.
+    :param LineString line: Line geometry in map metres.
+    """
+
+    lanes: Tuple[str, ...]
+    """Lane or element IDs in travel order."""
     line: LineString
+    """Line geometry in map metres."""
 
 
 @dataclass(frozen=True)
@@ -338,19 +438,31 @@ class VirtualLane:
 
     :param str lane_id: Must differ from every map lane ID.
     :param LineString line: Centerline in driving direction, without zero-length segments.
-    :param tuple[str, ...] predecessors: Lanes it continues forward from.
-    :param tuple[str, ...] successors: Lanes it leads forward to.
-    :param tuple[float, ...] pivots: Metres along ``line`` of its corner vertices,
+    :param Tuple[str, ...] predecessors: Lanes it continues forward from.
+    :param Tuple[str, ...] successors: Lanes it leads forward to.
+    :param Tuple[float, ...] pivots: Metres along ``line`` of its corner vertices,
         strictly increasing within ``(0, length)``.
     """
 
     lane_id: str
+    """Must differ from every map lane ID."""
     line: LineString
-    predecessors: tuple[str, ...] = ()
-    successors: tuple[str, ...] = ()
-    pivots: tuple[float, ...] = ()
+    """Centerline in driving direction, without zero-length segments."""
+    predecessors: Tuple[str, ...] = ()
+    """Lanes it continues forward from."""
+    successors: Tuple[str, ...] = ()
+    """Lanes it leads forward to."""
+    pivots: Tuple[float, ...] = ()
+    """Metres along ``line`` of its corner vertices, strictly increasing within ``(0, length)``."""
 
     def __post_init__(self) -> None:
+        """
+        Validate the field values and consistency of the constructed object.
+
+        :returns: ``None`` if validation succeeds.
+        :rtype: None
+        :raises ValueError: If input fields or bounds violate the validation conditions of this operation.
+        """
         if not self.lane_id:
             raise ValueError("a virtual lane needs an ID")
         if not self.line.length > 0:
@@ -371,7 +483,7 @@ class RouteRules:
     """
     Which lanes and steps an agent may use, and how routes are sent.
 
-    :param frozenset[str] lane_types: Allowed ``Lane.type`` names.
+    :param FrozenSet[str] lane_types: Allowed ``Lane.type`` names.
     :param float min_turn_radius: U-turn lanes tighter than this, in metres, are excluded.
     :param float min_lane_change_distance: Metres of a lane consumed by a lane change.
     :param float ambiguity_margin: No other lane may pass within this many metres of a sent pose.
@@ -387,15 +499,29 @@ class RouteRules:
         lane end that joins a junction lane. None allows any endpoint.
     """
 
-    lane_types: frozenset[str] = frozenset({"CITY_DRIVING"})
+    lane_types: FrozenSet[str] = frozenset({"CITY_DRIVING"})
+    """Allowed ``Lane.type`` names."""
     min_turn_radius: float = 0.0
+    """U-turn lanes tighter than this, in metres, are excluded."""
     min_lane_change_distance: float = 20.0
+    """Metres of a lane consumed by a lane change."""
     ambiguity_margin: float = 0.5
+    """No other lane may pass within this many metres of a sent pose."""
     unambiguous: bool = True
+    """Whether ``validate`` requires unambiguous poses. True for routes sent to Apollo (the ego); NPC routes are never matched to lanes by Apollo."""
     prune_tight_turns: bool = False
+    """Also exclude every lane, and every forward step between lanes, whose replayed curvature is tighter than ``min_turn_radius``, not only U-turn lanes. For vehicles that replay lane geometry (NPCs): a random walk then never enters a turn the vehicle cannot drive."""
     endpoint_junction_margin: float | None = None
+    """If set, routes must start and end off junction lanes (``RouteSpace.is_junction_lane``), at least this many metres from every junction polygon, and at least this far from a lane end that joins a junction lane. None allows any endpoint."""
 
     def __post_init__(self) -> None:
+        """
+        Validate the field values and consistency of the constructed object.
+
+        :returns: ``None`` if validation succeeds.
+        :rtype: None
+        :raises ValueError: If input fields or bounds violate the validation conditions of this operation.
+        """
         require_nonnegative(min_turn_radius=self.min_turn_radius,
                             min_lane_change_distance=self.min_lane_change_distance)
         if self.endpoint_junction_margin is not None:
@@ -450,6 +576,19 @@ class RouteSpace:
     def __init__(self, service: MapService, rules: RouteRules = RouteRules(),
                  virtual_lanes: Iterable[VirtualLane] = (), *, extra_lanes: Iterable[str] = (),
                  lane_offsets: Mapping[str, float] = MappingProxyType({})) -> None:
+        """
+        Build a route graph under vehicle rules, including virtual lanes and lateral offsets.
+
+        :param MapService service: Loaded map service supplying geometry, descriptors, and spatial indexes.
+        :param RouteRules rules: Vehicle-specific route validation and geometry rules.
+        :param Iterable[VirtualLane] virtual_lanes: Additional immutable lane geometries and their connections.
+        :param Iterable[str] extra_lanes: Additional map lanes admitted beyond the configured lane type.
+        :param Mapping[str, float] lane_offsets: Rightward centreline shifts by lane ID, in metres.
+        :returns: ``None``.
+        :rtype: None
+        :raises RuntimeError: If required map data is unavailable or no valid candidate is found within the attempt limit.
+        :raises ValueError: If input fields or bounds violate the validation conditions of this operation.
+        """
         if service.routing_graph is None or service.lane_index is None:
             raise RuntimeError("RouteSpace needs a map loaded with load_only=False")
         self.service = service
@@ -459,8 +598,8 @@ class RouteSpace:
         if unknown:
             raise ValueError(f"unknown extra or offset lanes {unknown[:5]}")
         self._offsets = {lane_id: float(offset) for lane_id, offset in lane_offsets.items() if offset}
-        self._offset_lines: dict[str, LineString] = {}
-        self._virtual: dict[str, VirtualLane] = {}
+        self._offset_lines: Dict[str, LineString] = {}
+        self._virtual: Dict[str, VirtualLane] = {}
         for lane in virtual_lanes:
             if lane.lane_id in service.lane_table or lane.lane_id in self._virtual:
                 raise ValueError(f"virtual lane ID {lane.lane_id!r} is already in use")
@@ -522,27 +661,32 @@ class RouteSpace:
             # A lane entered by a lane change may be left forward after any part of it.
             data["distance_lower_bound"] = 0.0 if forward and source in lateral_targets else data["cost"]
 
-    def validate(self, route: LaneRoute, *, lane_change_s: tuple[float, ...] | None = None) -> None:
+    def validate(self, route: LaneRoute, *, lane_change_s: Tuple[float, ...] | None = None) -> None:
         """
         Check that the route is legal and, if the rules require it, starts and
         ends away from junctions and is unambiguous to send.
 
         :param LaneRoute route: The route to check.
-        :param tuple[float, ...] | None lane_change_s: Where each lane change starts on
+        :param Tuple[float, ...] | None lane_change_s: Where each lane change starts on
             its source lane, in route order. By default each starts as soon as the
             route enters the source lane; Apollo's planning decides for the ego.
         :raises InvalidRoute: With the first problem found.
+        :returns: ``None`` if all applicable validation checks pass.
+        :rtype: None
         """
         self._check(route, lane_change_s)
         self._check_endpoints(route)
         if self.rules.unambiguous:
             self.poses(route)
 
-    def is_valid(self, route: LaneRoute, *, lane_change_s: tuple[float, ...] | None = None) -> bool:
+    def is_valid(self, route: LaneRoute, *, lane_change_s: Tuple[float, ...] | None = None) -> bool:
         """
         Return whether ``validate`` accepts the route.
 
         :rtype: bool
+        :param LaneRoute route: Route to inspect, validate, or convert.
+        :param Tuple[float, ...] | None lane_change_s: Lane-change start positions on source lanes, in metres; ``None`` uses default placement.
+        :returns: ``True`` if validation accepts the route; ``False`` if it raises ``InvalidRoute``.
         """
         try:
             self.validate(route, lane_change_s=lane_change_s)
@@ -551,7 +695,7 @@ class RouteSpace:
         return True
 
     def legs(self, route: LaneRoute, *,
-             lane_change_s: tuple[float, ...] | None = None) -> list[RouteLeg]:
+             lane_change_s: Tuple[float, ...] | None = None) -> List[RouteLeg]:
         """
         Return the stretch of each lane the route drives along.
 
@@ -561,9 +705,10 @@ class RouteSpace:
         after its leg, landing where the next leg starts.
 
         :param LaneRoute route: The route.
-        :param tuple[float, ...] | None lane_change_s: As in ``validate``.
+        :param Tuple[float, ...] | None lane_change_s: As in ``validate``.
         :raises InvalidRoute: If the route is illegal.
-        :rtype: list[RouteLeg]
+        :rtype: List[RouteLeg]
+        :returns: The legs values described above.
         """
         lengths, entries, changes = self._check(route, lane_change_s)
         ends = [lengths[index] if change is None else change for index, change in enumerate(changes)]
@@ -571,8 +716,8 @@ class RouteSpace:
                 for lane, start, end in zip(route.lanes, entries, ends + [route.end_s])]
 
     def path_sections(self, route: LaneRoute, *,
-                      lane_change_s: tuple[float, ...] | None = None,
-                      lane_change_distances: tuple[float, ...] | None = None) -> list[PathSection]:
+                      lane_change_s: Tuple[float, ...] | None = None,
+                      lane_change_distances: Tuple[float, ...] | None = None) -> List[PathSection]:
         """
         Return the line of ``path`` in sections by lane.
 
@@ -583,14 +728,16 @@ class RouteSpace:
         lane's start belongs to the later section.
 
         :param LaneRoute route: The route.
-        :param tuple[float, ...] | None lane_change_s: As in ``validate``.
-        :param tuple[float, ...] | None lane_change_distances: Desired length in
+        :param Tuple[float, ...] | None lane_change_s: As in ``validate``.
+        :param Tuple[float, ...] | None lane_change_distances: Desired length in
             metres of each lane change, in route order. Each is cut to the room
             the source lane and the target lane's stretch leave, and is never
             shorter than ``min_lane_change_distance``, the default. A longer
             change lands further along the target lane.
         :raises InvalidRoute: If the route is illegal.
-        :rtype: list[PathSection]
+        :rtype: List[PathSection]
+        :returns: The path sections values described above.
+        :raises ValueError: If input fields or bounds violate the validation conditions of this operation.
         """
         legs = self.legs(route, lane_change_s=lane_change_s)
         minimum = self.rules.min_lane_change_distance
@@ -598,10 +745,18 @@ class RouteSpace:
             raise ValueError(f"lane_change_distances needs one length per lane change "
                              f"({route.lane_changes}), got {len(lane_change_distances)}")
         desired = iter(lane_change_distances or ())
-        sections: list[PathSection] = []
-        last: tuple[float, float] | None = None
+        sections: List[PathSection] = []
+        last: Tuple[float, float] | None = None
 
-        def add(lanes: tuple[str, ...], points: Iterable[tuple[float, float]]) -> None:
+        def add(lanes: Tuple[str, ...], points: Iterable[Tuple[float, float]]) -> None:
+            """
+            Append a nondegenerate path section and join its first vertex to the preceding section.
+
+            :param Tuple[str, ...] lanes: Lane IDs in driving order.
+            :param Iterable[Tuple[float, float]] points: Ordered polyline vertices in map metres.
+            :returns: ``None`` if the operation succeeds.
+            :rtype: None
+            """
             nonlocal last
             line = [] if last is None else [last]
             for point in points:
@@ -651,8 +806,8 @@ class RouteSpace:
                 add((leg.lane_id, target_id), blend + [(end.x, end.y)])
         return sections
 
-    def _corridor_change(self, route: LaneRoute, legs: list[RouteLeg], index: int, wanted: float,
-                         ) -> tuple[list[tuple[float, float]], int, float] | None:
+    def _corridor_change(self, route: LaneRoute, legs: List[RouteLeg], index: int, wanted: float,
+                         ) -> Tuple[List[Tuple[float, float]], int, float] | None:
         """
         A lane change from the end of ``legs[index]`` that offsets laterally
         from the target side's centerline, along the target lane and the
@@ -662,6 +817,13 @@ class RouteSpace:
         the index of the leg it lands on and the landing s there; None if the
         change start is not abeam the target lane or no change longer than
         the minimum fits.
+
+        :param LaneRoute route: Route to inspect, validate, or convert.
+        :param List[RouteLeg] legs: Placed route legs with lane IDs and driven position intervals.
+        :param int index: Index of the element, transition, or point being processed.
+        :param float wanted: Requested lane-change length, in metres.
+        :returns: A lane change from the end of ``legs[index]`` that offsets laterally from the target side's centerline, along the target lane and the forward lanes after it up to the next lane change or the route end. Long changes need no room on the source lane and may land on a later lane than the target. Returns the blend points (landing included), the index of the leg it lands on and the landing s there; None if the change start is not abeam the target lane or no change longer than the minimum fits.
+        :rtype: Tuple[List[Tuple[float, float]], int, float] | None
         """
         minimum = self.rules.min_lane_change_distance
         source = self.service.get_lane_central_curve_by_id(legs[index].lane_id)
@@ -670,7 +832,7 @@ class RouteSpace:
         t0 = target.project(start)
         if t0 <= 0 or t0 >= legs[index + 1].end_s:
             return None                                       # Not abeam: the target lane starts later.
-        pieces: list[tuple[int, float, float, LineString]] = []   # (leg, start s, end s, line)
+        pieces: List[Tuple[int, float, float, LineString]] = []   # (leg, start s, end s, line)
         last = index + 1
         while True:
             low = t0 if last == index + 1 else legs[last].start_s
@@ -682,7 +844,7 @@ class RouteSpace:
             if not self._straight_ahead(legs[last + 1].lane_id):
                 break                                         # Never change lanes through a junction or turn.
             last += 1
-        corridor_points: list[tuple[float, float]] = []
+        corridor_points: List[Tuple[float, float]] = []
         for _, _, _, piece in pieces:
             for point in piece.coords:
                 if not corridor_points or corridor_points[-1] != point[:2]:
@@ -728,7 +890,13 @@ class RouteSpace:
         return None
 
     def _straight_ahead(self, lane_id: str) -> bool:
-        """Whether a map lane is not a turn lane and not a junction lane (``is_junction_lane``)."""
+        """
+        Whether a map lane is not a turn lane and not a junction lane (``is_junction_lane``).
+
+        :param str lane_id: Map, virtual-lane, or walk-element ID, as applicable.
+        :returns: ``True`` if a map lane is not a turn lane and not a junction lane (``is_junction_lane``); otherwise ``False``.
+        :rtype: bool
+        """
         if lane_id in self._virtual:
             return False
         return self.service.get_lane_by_id(lane_id).turn == self._no_turn and not self.is_junction_lane(lane_id)
@@ -740,6 +908,8 @@ class RouteSpace:
         turn lane that enters one.
 
         :rtype: bool
+        :param str lane_id: Map, virtual-lane, or walk-element ID, as applicable.
+        :returns: ``True`` if a lane belongs to a junction: it has a ``junction_id``, lies mostly (``JUNCTION_SHARE``) inside the map's junction polygons, or is a turn lane that enters one; otherwise ``False``.
         """
         return lane_id in _junction_info(self.service, self._no_turn)["lanes"]
 
@@ -750,10 +920,11 @@ class RouteSpace:
         (``RouteRules.endpoint_junction_margin``).
 
         :rtype: bool
+        :returns: ``True`` if the rules keep route starts and ends away from junctions (``RouteRules.endpoint_junction_margin``); otherwise ``False``.
         """
         return self.rules.endpoint_junction_margin is not None
 
-    def endpoint_ranges(self, lane_id: str) -> tuple[tuple[float, float], ...]:
+    def endpoint_ranges(self, lane_id: str) -> Tuple[Tuple[float, float], ...]:
         """
         The stretches ``(low, high)`` of an allowed lane where a route may start
         or end: none on a virtual lane, and the whole lane unless
@@ -762,7 +933,9 @@ class RouteSpace:
         junction polygon and from a lane end that joins a junction lane, checked
         every ``_ENDPOINT_STEP`` metres.
 
-        :rtype: tuple[tuple[float, float], ...]
+        :rtype: Tuple[Tuple[float, float], ...]
+        :param str lane_id: Map, virtual-lane, or walk-element ID, as applicable.
+        :returns: The stretches ``(low, high)`` of an allowed lane where a route may start or end: none on a virtual lane, and the whole lane unless ``restricts_endpoints``. Otherwise none on a junction lane, and elsewhere the positions at least ``endpoint_junction_margin`` metres from every junction polygon and from a lane end that joins a junction lane, checked every ``_ENDPOINT_STEP`` metres.
         """
         if lane_id in self._virtual:
             return ()
@@ -776,8 +949,18 @@ class RouteSpace:
             info["ranges"][key] = self._endpoint_ranges(lane_id, length, margin, info)
         return info["ranges"][key]
 
-    def _endpoint_ranges(self, lane_id: str, length: float, margin: float, info: dict,
-                         ) -> tuple[tuple[float, float], ...]:
+    def _endpoint_ranges(self, lane_id: str, length: float, margin: float, info: Dict,
+                         ) -> Tuple[Tuple[float, float], ...]:
+        """
+        Compute lane intervals whose endpoint centres and margins avoid junctions.
+
+        :param str lane_id: Map, virtual-lane, or walk-element ID, as applicable.
+        :param float length: Length of the path, lane, or body, in metres.
+        :param float margin: Minimum clearance from junction geometry, in metres.
+        :param Dict info: Cached junction geometry, lane membership, and endpoint intervals.
+        :returns: The endpoint ranges values described above.
+        :rtype: Tuple[Tuple[float, float], ...]
+        """
         if lane_id in info["lanes"]:
             return ()
         s = np.linspace(0.0, length, max(2, ceil(length / _ENDPOINT_STEP) + 1))
@@ -802,16 +985,22 @@ class RouteSpace:
                 first = None
         return tuple(ranges)
 
-    def start_lanes(self) -> list[str]:
+    def start_lanes(self) -> List[str]:
         """
         Sorted allowed map lanes a route may start on (with an allowed endpoint).
 
-        :rtype: list[str]
+        :rtype: List[str]
+        :returns: The start lanes values described above.
         """
         return list(self._start_lanes())
 
-    def _start_lanes(self) -> list[str]:
-        """Sorted allowed lanes a route may start on."""
+    def _start_lanes(self) -> List[str]:
+        """
+        Sorted allowed lanes a route may start on.
+
+        :returns: The start lanes values described above.
+        :rtype: List[str]
+        """
         if not hasattr(self, "_start_lane_list"):
             lanes = sorted(lane for lane in self.graph if lane not in self._virtual)
             self._start_lane_list = [lane for lane in lanes if self.endpoint_ranges(lane)] \
@@ -823,6 +1012,9 @@ class RouteSpace:
         Whether a route may start or end at ``s`` on an allowed lane (``endpoint_ranges``).
 
         :rtype: bool
+        :param str lane_id: Map, virtual-lane, or walk-element ID, as applicable.
+        :param float s: Position along the lane, element, or path, in metres.
+        :returns: ``True`` if a route may start or end at ``s`` on an allowed lane (``endpoint_ranges``); otherwise ``False``.
         """
         return any(low - 1e-9 <= s <= high + 1e-9 for low, high in self.endpoint_ranges(lane_id))
 
@@ -834,6 +1026,11 @@ class RouteSpace:
         restrictions this is ``rng.uniform(low, high)`` on a map lane.
 
         :rtype: float | None
+        :param str lane_id: Map, virtual-lane, or walk-element ID, as applicable.
+        :param Random rng: Random number generator used for sampling and selection.
+        :param float low: Lower bound in the units of the values being sampled or checked.
+        :param float | None high: Upper bound in the units of the values being sampled or checked.
+        :returns: A uniformly random allowed endpoint s on an allowed lane within ``[low, high]`` (default the whole lane), or None if there is none. Without endpoint restrictions this is ``rng.uniform(low, high)`` on a map lane.
         """
         high = self._lengths[lane_id] if high is None else high
         if not self.restricts_endpoints and lane_id not in self._virtual:
@@ -855,6 +1052,11 @@ class RouteSpace:
         ``s``, or None if there is none.
 
         :rtype: float | None
+        :param str lane_id: Map, virtual-lane, or walk-element ID, as applicable.
+        :param float s: Position along the lane, element, or path, in metres.
+        :param float low: Lower bound in the units of the values being sampled or checked.
+        :param float | None high: Upper bound in the units of the values being sampled or checked.
+        :returns: The allowed endpoint within ``[low, high]`` on an allowed lane nearest to ``s``, or None if there is none.
         """
         high = self._lengths[lane_id] if high is None else high
         best = None
@@ -868,6 +1070,14 @@ class RouteSpace:
         return best
 
     def _check_endpoints(self, route: LaneRoute) -> None:
+        """
+        Reject route endpoints that violate the route space endpoint restrictions.
+
+        :param LaneRoute route: Route to inspect, validate, or convert.
+        :returns: ``None`` if the operation succeeds.
+        :rtype: None
+        :raises InvalidRoute: If route geometry, topology, point placement, or map constraints fail the checks performed here.
+        """
         if not self.restricts_endpoints:
             return
         margin = self.rules.endpoint_junction_margin
@@ -877,11 +1087,20 @@ class RouteSpace:
                                    f"{margin} m of a junction")
 
     def _longer_change(self, source: LineString, change_s: float, target: LineString,
-                       landing: float, target_end: float, wanted: float) -> tuple[float, float]:
+                       landing: float, target_end: float, wanted: float) -> Tuple[float, float]:
         """
         The longest lane change up to ``wanted`` metres from ``change_s`` that
         fits the source lane and lands at least ``_LANDING_MARGIN`` before
         ``target_end``, with its landing; the minimum change otherwise.
+
+        :param LineString source: Source lane ID.
+        :param float change_s: Lane-change start position on the source lane, in metres.
+        :param LineString target: Target distance or target lane, as defined by this operation.
+        :param float landing: Position where the lane change reaches the target lane, in metres.
+        :param float target_end: End of the usable target-lane interval, in metres.
+        :param float wanted: Requested lane-change length, in metres.
+        :returns: The longest lane change up to ``wanted`` metres from ``change_s`` that fits the source lane and lands at least ``_LANDING_MARGIN`` before ``target_end``, with its landing; the minimum change otherwise.
+        :rtype: Tuple[float, float]
         """
         minimum = self.rules.min_lane_change_distance
         room = source.length - change_s
@@ -894,20 +1113,21 @@ class RouteSpace:
         return minimum, landing
 
     def path(self, route: LaneRoute, *,
-             lane_change_s: tuple[float, ...] | None = None,
-             lane_change_distances: tuple[float, ...] | None = None) -> LineString:
+             lane_change_s: Tuple[float, ...] | None = None,
+             lane_change_distances: Tuple[float, ...] | None = None) -> LineString:
         """
         Return the line the route drives along: the stretch of each lane's
         centerline, joined by lane changes that blend from the source to the
         target lane over ``min_lane_change_distance`` with a quintic (minimum-jerk) weight.
 
         :param LaneRoute route: The route.
-        :param tuple[float, ...] | None lane_change_s: As in ``validate``.
-        :param tuple[float, ...] | None lane_change_distances: As in ``path_sections``.
+        :param Tuple[float, ...] | None lane_change_s: As in ``validate``.
+        :param Tuple[float, ...] | None lane_change_distances: As in ``path_sections``.
         :raises InvalidRoute: If the route is illegal.
         :rtype: LineString
+        :returns: The constructed line geometry in map metres.
         """
-        points: list[tuple[float, float]] = []
+        points: List[Tuple[float, float]] = []
         for section in self.path_sections(route, lane_change_s=lane_change_s,
                                           lane_change_distances=lane_change_distances):
             coords = list(section.line.coords)
@@ -916,8 +1136,8 @@ class RouteSpace:
 
     def lane_change_positions(
         self, route: LaneRoute, rng: Random, *,
-        keep: Mapping[tuple[str, str], float] | None = None,
-    ) -> tuple[float, ...]:
+        keep: Mapping[Tuple[str, str], float] | None = None,
+    ) -> Tuple[float, ...]:
         """
         Choose where each lane change starts, for agents that drive their own changes.
 
@@ -928,15 +1148,33 @@ class RouteSpace:
 
         :param LaneRoute route: The route.
         :param Random rng: Source of randomness.
-        :param keep: Positions by (source lane, target lane), e.g. from a parent route.
+        :param Mapping[Tuple[str, str], float] | None keep: Positions by (source lane, target lane), e.g. from a parent route.
         :raises InvalidRoute: If no feasible continuation can be found.
-        :rtype: tuple[float, ...]
+        :rtype: Tuple[float, ...]
+        :returns: The lane change positions values described above.
         """
         self._route_lengths(route)
         keep = keep or {}
 
         def choose(index: int, earliest: float, latest: float) -> float:
+            """
+            Choose a lane-change start that permits the remaining route to be completed.
+
+            :param int index: Index of the element, transition, or point being processed.
+            :param float earliest: Earliest feasible lane-change start position, in metres.
+            :param float latest: Latest feasible lane-change start position, in metres.
+            :returns: The computed distance, duration, or scalar value described above.
+            :rtype: float
+            :raises InvalidRoute: If route geometry, topology, point placement, or map constraints fail the checks performed here.
+            """
             def can_finish(change: float) -> bool:
+                """
+                Check whether a proposed lane-change start leaves a feasible route continuation.
+
+                :param float change: Proposed lane-change start position, in metres.
+                :returns: ``True`` if the documented condition holds; otherwise ``False``.
+                :rtype: bool
+                """
                 entry = self.entry_after_change(route.lanes[index], change, route.lanes[index + 1])
                 suffix = LaneRoute(route.lanes[index + 1:], route.transitions[index + 1:], entry, route.end_s)
                 try:
@@ -948,6 +1186,15 @@ class RouteSpace:
                         return False
 
                     def preferred(i: int, low: float, high: float) -> float:
+                        """
+                        Reuse a preferred lane-change start when it fits the continuation window.
+
+                        :param int i: Index into the ordered input sequence.
+                        :param float low: Lower bound in the units of the values being sampled or checked.
+                        :param float high: Upper bound in the units of the values being sampled or checked.
+                        :returns: The computed distance, duration, or scalar value described above.
+                        :rtype: float
+                        """
                         value = keep.get((suffix.lanes[i], suffix.lanes[i + 1]))
                         return value if value is not None and low <= value <= high else low
 
@@ -986,6 +1233,9 @@ class RouteSpace:
 
         :raises KeyError: If there is no such edge for these rules.
         :rtype: Transition
+        :param str source: Source lane ID.
+        :param str target: Target distance or target lane, as defined by this operation.
+        :returns: The transition values described above.
         """
         return self.graph[source][target]["transition"]
 
@@ -994,6 +1244,8 @@ class RouteSpace:
         Return an allowed map or virtual lane's centerline length in metres.
 
         :rtype: float
+        :param str lane_id: Map, virtual-lane, or walk-element ID, as applicable.
+        :returns: The computed distance, duration, or scalar value described above.
         """
         return self._lengths[lane_id]
 
@@ -1003,6 +1255,8 @@ class RouteSpace:
         ``lane_offsets`` entry if it has one.
 
         :rtype: LineString
+        :param str lane_id: Map, virtual-lane, or walk-element ID, as applicable.
+        :returns: The constructed line geometry in map metres.
         """
         lane = self._virtual.get(lane_id)
         if lane is not None:
@@ -1021,6 +1275,8 @@ class RouteSpace:
         Metres the lane's centerline is shifted to its right (``lane_offsets``); 0 by default.
 
         :rtype: float
+        :param str lane_id: Map, virtual-lane, or walk-element ID, as applicable.
+        :returns: The computed distance, duration, or scalar value described above.
         """
         return self._offsets.get(lane_id, 0.0)
 
@@ -1029,6 +1285,8 @@ class RouteSpace:
         Return the virtual lane with this ID, or None for a map lane.
 
         :rtype: VirtualLane | None
+        :param str lane_id: Map, virtual-lane, or walk-element ID, as applicable.
+        :returns: The virtual lane values described above.
         """
         return self._virtual.get(lane_id)
 
@@ -1040,6 +1298,10 @@ class RouteSpace:
         the point there is projected onto the target lane.
 
         :rtype: float
+        :param str source: Source lane ID.
+        :param float change_s: Lane-change start position on the source lane, in metres.
+        :param str target: Target distance or target lane, as defined by this operation.
+        :returns: The computed distance, duration, or scalar value described above.
         """
         point = self._pose(source, change_s + self.rules.min_lane_change_distance).point
         return self.centerline(target).project(point)
@@ -1058,6 +1320,7 @@ class RouteSpace:
         :param LaneRoute route: The route to convert.
         :raises InvalidRoute: If the route is illegal or cannot be sent unambiguously.
         :rtype: RoutePoses
+        :returns: The poses values described above.
         """
         lengths, entries, _ = self._check(route)
         self._check_endpoints(route)
@@ -1094,14 +1357,16 @@ class RouteSpace:
         self._check(route, tuple(changes))
         return RoutePoses(start, tuple(waypoints), end)
 
-    def length(self, route: LaneRoute, *, lane_change_s: tuple[float, ...] | None = None) -> float:
+    def length(self, route: LaneRoute, *, lane_change_s: Tuple[float, ...] | None = None) -> float:
         """
         Return the driven distance in metres; each lane change counts as
         ``min_lane_change_distance``.
 
-        :param tuple[float, ...] | None lane_change_s: As in ``validate``.
+        :param Tuple[float, ...] | None lane_change_s: As in ``validate``.
         :raises InvalidRoute: If the route is illegal.
         :rtype: float
+        :param LaneRoute route: Route to inspect, validate, or convert.
+        :returns: Total driven or walked length, in metres.
         """
         legs = self.legs(route, lane_change_s=lane_change_s)
         return (sum(leg.end_s - leg.start_s for leg in legs)
@@ -1126,10 +1391,11 @@ class RouteSpace:
         :param float max_length: Maximum driven distance in metres.
         :param float lane_change_probability: Chance of a lane change where one is possible.
         :param int max_attempts: Walks to try before giving up.
-        :param start_lanes: If given, walks start only on these lanes (among
+        :param Iterable[str] | None start_lanes: If given, walks start only on these lanes (among
             those a route may start on), e.g. a bicycle's bike lanes.
         :raises RuntimeError: If no valid route was found.
         :rtype: LaneRoute
+        :returns: The random route values described above.
         """
         lanes = self._start_lanes()
         if start_lanes is not None:
@@ -1155,18 +1421,19 @@ class RouteSpace:
         raise RuntimeError(f"no valid route found in {max_attempts} attempts")
 
     def alternative_routes(
-        self, start: tuple[str, float], end: tuple[str, float], k: int = 5,
-    ) -> list[LaneRoute]:
+        self, start: Tuple[str, float], end: Tuple[str, float], k: int = 5,
+    ) -> List[LaneRoute]:
         """
         Return up to ``k`` valid routes between two lane positions, shortest first.
 
         Candidates are simple lane paths ordered by lane lengths, with each lane
         change costing ``min_lane_change_distance``.
 
-        :param tuple[str, float] start: Start lane ID and s.
-        :param tuple[str, float] end: End lane ID and s.
+        :param Tuple[str, float] start: Start lane ID and s.
+        :param Tuple[str, float] end: End lane ID and s.
         :param int k: Maximum number of routes.
-        :rtype: list[LaneRoute]
+        :rtype: List[LaneRoute]
+        :returns: The alternative routes values described above.
         """
         (start_lane, start_s), (end_lane, end_s) = start, end
         routes = []
@@ -1178,8 +1445,9 @@ class RouteSpace:
                     break
         return routes
 
-    def _weight(self, source: str, entry_s: float | None, attribute: str = "distance_lower_bound"):
-        """Edge weights for a search from ``source``, entered at ``entry_s``.
+    def _weight(self, source: str, entry_s: float | None, attribute: str = "distance_lower_bound") -> Callable[[str, str, Mapping[str, float | Transition]], float]:
+        """
+        Edge weights for a search from ``source``, entered at ``entry_s``.
 
         Without ``entry_s`` every edge costs its ``cost``. With it, the source's
         forward edges cost its remaining length and other edges ``attribute``.
@@ -1188,6 +1456,13 @@ class RouteSpace:
         would wrongly prune feasible routes. Zero is a safe lower bound for its
         forward remainder; complete children are validated with their actual
         entries after candidate selection.
+
+        :param str source: Source lane ID.
+        :param float | None entry_s: Entry position on the source lane, in metres; ``None`` uses full edge costs.
+        :param str attribute: Edge attribute used as the search cost away from the initial source.
+        :returns: An edge-cost callback for the supplied source entry and edge attribute.
+        :rtype: Callable[[str, str, Mapping[str, float | Transition]], float]
+        :raises ValueError: If input fields or bounds violate the validation conditions of this operation.
         """
         if entry_s is None:
             return lambda u, v, data: data["cost"]
@@ -1195,14 +1470,23 @@ class RouteSpace:
             raise ValueError("entry_s must be within the source lane")
         remaining = self._lengths[source] - entry_s
 
-        def weight(u, v, data):
+        def weight(u: str, v: str, data: Mapping[str, float | Transition]) -> float:
+            """
+            Compute the search edge cost using the source remainder or the selected edge attribute.
+
+            :param str u: Source lane ID of the edge.
+            :param str v: Destination lane ID of the edge.
+            :param Mapping[str, float | Transition] data: Edge attributes supplying transition kind and search costs.
+            :returns: The edge search cost, in metres.
+            :rtype: float
+            """
             if u == source and data["transition"] is Transition.FORWARD:
                 return remaining
             return data[attribute]
 
         return weight
 
-    def reachable(self, source: str, max_cost: float, *, entry_s: float | None = None) -> dict[str, float]:
+    def reachable(self, source: str, max_cost: float, *, entry_s: float | None = None) -> Dict[str, float]:
         """
         Return the lanes reachable from ``source`` within ``max_cost``, with their costs.
 
@@ -1213,7 +1497,7 @@ class RouteSpace:
         :param float | None entry_s: If supplied, use lower bounds on driven
             distance from this source position, including partial lane entries.
         :returns: Lane ID to cost; empty if ``source`` is not allowed.
-        :rtype: dict[str, float]
+        :rtype: Dict[str, float]
         """
         if source not in self.graph:
             return {}
@@ -1223,7 +1507,7 @@ class RouteSpace:
     def lane_paths(
         self, source: str, target: str, k: int = 5, *, max_cost: float | None = None,
         entry_s: float | None = None,
-    ) -> Iterator[tuple[tuple[str, ...], tuple[Transition, ...]]]:
+    ) -> Iterator[Tuple[Tuple[str, ...], Tuple[Transition, ...]]]:
         """
         Yield up to ``k`` simple lane paths from ``source`` to ``target``, cheapest first.
 
@@ -1241,6 +1525,7 @@ class RouteSpace:
             source prefix removed; validate complete routes before accepting them.
         :returns: (lanes, transitions) pairs; nothing if either lane is not allowed
             or the target is unreachable.
+        :rtype: Iterator[Tuple[Tuple[str, ...], Tuple[Transition, ...]]]
         """
         if source not in self.graph or target not in self.graph or k <= 0:
             return
@@ -1273,8 +1558,15 @@ class RouteSpace:
         except nx.NetworkXNoPath:
             return
 
-    def _route_lengths(self, route: LaneRoute) -> list[float]:
-        """Check topology and endpoint bounds without choosing lane-change positions."""
+    def _route_lengths(self, route: LaneRoute) -> List[float]:
+        """
+        Check topology and endpoint bounds without choosing lane-change positions.
+
+        :param LaneRoute route: Route to inspect, validate, or convert.
+        :returns: The route lengths values described above.
+        :rtype: List[float]
+        :raises InvalidRoute: If route geometry, topology, point placement, or map constraints fail the checks performed here.
+        """
         for lane_id in route.lanes:
             if lane_id not in self.graph:
                 raise InvalidRoute(f"lane {lane_id!r} is not allowed for these rules")
@@ -1295,10 +1587,18 @@ class RouteSpace:
             raise InvalidRoute(f"end_s={route.end_s} is outside lane {route.lanes[-1]!r}")
         return lengths
 
-    def _check(self, route: LaneRoute, lane_change_s: tuple[float, ...] | None = None,
-               ) -> tuple[list[float], list[float], list[float | None]]:
-        """Validate topology and progress; return lane lengths, entry positions,
-        and each transition's lane-change start (None for forward steps)."""
+    def _check(self, route: LaneRoute, lane_change_s: Tuple[float, ...] | None = None,
+               ) -> Tuple[List[float], List[float], List[float | None]]:
+        """
+        Validate topology and progress; return lane lengths, entry positions,
+        and each transition's lane-change start (None for forward steps).
+
+        :param LaneRoute route: Route to inspect, validate, or convert.
+        :param Tuple[float, ...] | None lane_change_s: Lane-change start positions on source lanes, in metres; ``None`` uses default placement.
+        :returns: ``None`` if the geometry satisfies the required constraints.
+        :rtype: Tuple[List[float], List[float], List[float | None]]
+        :raises InvalidRoute: If route geometry, topology, point placement, or map constraints fail the checks performed here.
+        """
         lengths = self._route_lengths(route)
         lateral = route.lane_change_indices
         if lane_change_s is not None and len(lane_change_s) != len(lateral):
@@ -1307,6 +1607,16 @@ class RouteSpace:
         given = dict(zip(lateral, lane_change_s or ()))
 
         def choose(index: int, earliest: float, latest: float) -> float:
+            """
+            Select a supplied or earliest lane-change start and validate its feasible window.
+
+            :param int index: Index of the element, transition, or point being processed.
+            :param float earliest: Earliest feasible lane-change start position, in metres.
+            :param float latest: Latest feasible lane-change start position, in metres.
+            :returns: The computed distance, duration, or scalar value described above.
+            :rtype: float
+            :raises InvalidRoute: If route geometry, topology, point placement, or map constraints fail the checks performed here.
+            """
             change = given.get(index, earliest)
             if not (isfinite(change) and earliest <= change <= latest):
                 raise InvalidRoute(f"lane change from {route.lanes[index]!r} must start within "
@@ -1320,10 +1630,17 @@ class RouteSpace:
         return lengths, entries, changes
 
     def _entries(self, route: LaneRoute, choose: Callable[[int, float, float], float],
-                 ) -> tuple[list[float], list[float | None]]:
-        """Walk the route: where it enters each lane, and where each transition's
+                 ) -> Tuple[List[float], List[float | None]]:
+        """
+        Walk the route: where it enters each lane, and where each transition's
         lane change starts (None for forward steps). ``choose(index, earliest,
-        latest)`` places the lane change at ``route.transitions[index]``."""
+        latest)`` places the lane change at ``route.transitions[index]``.
+
+        :param LaneRoute route: Route to inspect, validate, or convert.
+        :param Callable[[int, float, float], float] choose: Callback choosing a lane-change start within the supplied feasible window.
+        :returns: The entries values described above.
+        :rtype: Tuple[List[float], List[float | None]]
+        """
         entries, changes = [route.start_s], []
         for index, transition in enumerate(route.transitions):
             if transition is Transition.FORWARD:
@@ -1336,8 +1653,16 @@ class RouteSpace:
             entries.append(self.entry_after_change(source, change, target))
         return entries, changes
 
-    def _change_window(self, source: str, entry: float) -> tuple[float, float]:
-        """Earliest and latest start of a lane change from ``source``, entered at ``entry``."""
+    def _change_window(self, source: str, entry: float) -> Tuple[float, float]:
+        """
+        Earliest and latest start of a lane change from ``source``, entered at ``entry``.
+
+        :param str source: Source lane ID.
+        :param float entry: Excursion entry position on a sidewalk.
+        :returns: The change window values described above.
+        :rtype: Tuple[float, float]
+        :raises InvalidRoute: If route geometry, topology, point placement, or map constraints fail the checks performed here.
+        """
         distance = self.rules.min_lane_change_distance
         latest = self._lengths[source] - distance
         if latest < entry:
@@ -1346,14 +1671,38 @@ class RouteSpace:
         return entry, latest
 
     def _pose(self, lane_id: str, s: float) -> RoutePose:
+        """
+        Convert a lane position to its map coordinates and heading.
+
+        :param str lane_id: Map, virtual-lane, or walk-element ID, as applicable.
+        :param float s: Position along the lane, element, or path, in metres.
+        :returns: The pose values described above.
+        :rtype: RoutePose
+        """
         point, heading = self.service.get_lane_coord_and_heading(lane_id, s)
         return RoutePose(lane_id, s, point.x, point.y, heading)
 
     def _unambiguous(self, pose: RoutePose) -> bool:
-        """No lane of any type other than the pose's own lies within the margin."""
+        """
+        No lane of any type other than the pose's own lies within the margin.
+
+        :param RoutePose pose: Lane position with its map coordinates and heading.
+        :returns: ``True`` if the documented condition holds; otherwise ``False``.
+        :rtype: bool
+        """
         return set(self.service.get_lanes(pose.point, self.rules.ambiguity_margin)) == {pose.lane_id}
 
     def _waypoint(self, lane_id: str, low: float, high: float, *, early: bool) -> RoutePose | None:
+        """
+        Find an unambiguous waypoint within a lane interval.
+
+        :param str lane_id: Map, virtual-lane, or walk-element ID, as applicable.
+        :param float low: Lower bound in the units of the values being sampled or checked.
+        :param float high: Upper bound in the units of the values being sampled or checked.
+        :param bool early: Whether to prefer the earliest allowed position.
+        :returns: The waypoint values described above.
+        :rtype: RoutePose | None
+        """
         if high < low:
             return None
         middle = (low + high) / 2
@@ -1367,17 +1716,41 @@ class RouteSpace:
 
     @staticmethod
     def _candidate_s(low: float, high: float) -> Iterator[float]:
+        """
+        Yield regularly spaced candidate positions and the interval end.
+
+        :param float low: Lower bound in the units of the values being sampled or checked.
+        :param float high: Upper bound in the units of the values being sampled or checked.
+        :returns: The candidate s values described above.
+        :rtype: Iterator[float]
+        """
         steps = int((high - low) // _WAYPOINT_STEP)
         yield from (low + index * _WAYPOINT_STEP for index in range(steps + 1))
         if low + steps * _WAYPOINT_STEP < high:
             yield high
 
-    def _transitions(self, path: list[str]) -> tuple[Transition, ...]:
+    def _transitions(self, path: List[str]) -> Tuple[Transition, ...]:
+        """
+        Collect the legal transitions between consecutive lanes in a path.
+
+        :param List[str] path: Path geometry or ordered lane sequence used by this operation.
+        :returns: The transitions values described above.
+        :rtype: Tuple[Transition, ...]
+        """
         return tuple(self.transition(source, target) for source, target in zip(path, path[1:]))
 
     def _walk(self, rng: Random, lane_id: str, target: float,
               lane_change_probability: float) -> LaneRoute | None:
-        """One random walk of about ``target`` metres; validated by the caller."""
+        """
+        One random walk of about ``target`` metres; validated by the caller.
+
+        :param Random rng: Random number generator used for sampling and selection.
+        :param str lane_id: Map, virtual-lane, or walk-element ID, as applicable.
+        :param float target: Target distance or target lane, as defined by this operation.
+        :param float lane_change_probability: Probability of selecting a lane change during random route generation.
+        :returns: The walk values described above.
+        :rtype: LaneRoute | None
+        """
         distance = self.rules.min_lane_change_distance
         start_s = self.random_endpoint(lane_id, rng)
         if start_s is None:
