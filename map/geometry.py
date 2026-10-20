@@ -268,7 +268,7 @@ def turn_curvatures(line: LineString) -> List[Tuple[float, float, float]]:
         ``low`` and ``high`` are distances along the line in metres and
         ``curvature`` is the absolute heading change per metre. Returns an
         empty list if the line has no turns.
-    :rtype: list[tuple[float, float, float]]
+    :rtype: List[Tuple[float, float, float]]
     """
     profile = CenterlineProfile(line)
     spans = []
