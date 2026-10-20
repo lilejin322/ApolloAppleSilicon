@@ -1,5 +1,4 @@
 """
-
 Speed-profile, style, and start-time operators shared by replayed agents.
 
 Operators return a replacement agent or ``None`` when no applicable or valid
@@ -10,12 +9,11 @@ Agents provide the attributes used by each operator, such as ``speed_profile``,
 ``spec.max_speed``, ``start_t``, or ``drive_style``. Lane-aware profile operators
 also use ``route``, ``lane_change_s``, ``route_distance``, and ``route_point``.
 Pedestrian wrappers supply compatible walk-network distance and point mapping.
-
 """
 
 from dataclasses import replace
 from random import Random
-from typing import Sequence, TypeVar
+from typing import Sequence, TypeVar, List, Tuple
 
 from ..scenario import InvalidRoute, RouteSpace, SpeedPoint
 from ..scenario.replay import MAX_SPEED_POINTS, point_reference
@@ -31,14 +29,14 @@ __all__ = [
 ]
 
 
-def clamp_speeds(profile: Sequence[SpeedPoint], max_speed: float) -> tuple[SpeedPoint, ...]:
+def clamp_speeds(profile: Sequence[SpeedPoint], max_speed: float) -> Tuple[SpeedPoint, ...]:
     """
     Cap every target speed in the profile at ``max_speed``.
 
     :param Sequence[SpeedPoint] profile: Speed points whose target speeds are capped.
     :param float max_speed: Maximum target speed, in m/s.
     :returns: A tuple of updated speed points with all other point attributes preserved.
-    :rtype: tuple[SpeedPoint, ...]
+    :rtype: Tuple[SpeedPoint, ...]
     """
     return tuple(replace(point, speed=min(point.speed, max_speed)) for point in profile)
 
@@ -109,13 +107,13 @@ def cx_speed_profile(first: Replayed, second: Replayed, rng: Random, space: Rout
     if space is None:
         order = {lane_id: index for index, lane_id in enumerate(first.route.lanes)}
 
-        def key(point):
+        def key(point: SpeedPoint) -> Tuple[int, float]:
             """
             Return a speed point's position in the lead parent's lane order.
 
             :param SpeedPoint point: Point on a lane present in the lead parent's route.
             :returns: The route lane index and position along that lane, in metres.
-            :rtype: tuple[int, float]
+            :rtype: Tuple[int, float]
             :raises KeyError: If the point's lane is absent from the lead parent's route.
             """
             return order[point.lane_id], point.s
@@ -180,7 +178,7 @@ def cx_speed_profile(first: Replayed, second: Replayed, rng: Random, space: Rout
     return with_profile(first, profile)
 
 
-def _distinct(placed: list) -> list:
+def _distinct(placed: List) -> List:
     """
     Sort distance/point pairs in driving order and discard near-duplicate distances.
 
@@ -188,9 +186,9 @@ def _distinct(placed: list) -> list:
     metres of the last retained distance as duplicates. Equal-distance pairs
     retain their input order before filtering.
 
-    :param list placed: Pairs of driven distance in metres and the corresponding speed point.
+    :param List placed: Pairs of driven distance in metres and the corresponding speed point.
     :returns: A new list of retained distance/point pairs in ascending distance order.
-    :rtype: list
+    :rtype: List
     """
     kept = []
     for distance, point in sorted(placed, key=lambda item: item[0]):
