@@ -26,10 +26,13 @@ from ..map.geometry import chord_heading, normalize_angle
 from ..message.descriptor import DescriptorBundle
 from .replay import curvature_spans
 from .routing import VirtualLane
+from typing import FrozenSet, List, Tuple
 
 
 class ConnectorKind(Enum):
-    """How a connector crosses: by the change of heading from dead end to start."""
+    """
+    How a connector crosses: by the change of heading from dead end to start.
+    """
 
     STRAIGHT = "STRAIGHT"
     RIGHT = "RIGHT"
@@ -63,19 +66,20 @@ _CORNER_MARGIN = 1.0
 def bike_connectors(service: MapService, *, min_turn_radius: float,
                     kinds: Iterable[ConnectorKind] = DEFAULT_KINDS,
                     max_length: float = 100.0,
-                    road_lanes: Mapping[str, LineString] | None = None) -> tuple[VirtualLane, ...]:
+                    road_lanes: Mapping[str, LineString] | None = None) -> Tuple[VirtualLane, ...]:
     """
     Return the connectors between the map's bike lanes, sorted by ID.
 
     :param MapService service: A map with its routing graph built; it is only read.
     :param float min_turn_radius: Connectors tighter than this, in metres, are
         dropped; corners at pivots are turned at rest and not measured.
-    :param kinds: The kinds of connector to generate.
+    :param Iterable[ConnectorKind] kinds: The kinds of connector to generate.
     :param float max_length: Longest connector in metres.
-    :param road_lanes: Road lanes a dead end may continue onto, by ID, with the
+    :param Mapping[str, LineString] | None road_lanes: Road lanes a dead end may continue onto, by ID, with the
         line a rider follows on each (its start is the connector's end).
     :raises RuntimeError: If the map was loaded without its routing graph.
-    :rtype: tuple[VirtualLane, ...]
+    :rtype: Tuple[VirtualLane, ...]
+    :returns: The bike connectors values described above.
     """
     if service.routing_graph is None:
         raise RuntimeError("bike_connectors needs a map loaded with load_only=False")
@@ -86,11 +90,25 @@ def bike_connectors(service: MapService, *, min_turn_radius: float,
     lanes, graph = service.lane_table, service.routing_graph
     bikes = {lane_id for lane_id, lane in lanes.items() if lane.type == biking}
 
-    def forward(lane_id: str) -> list[str]:
+    def forward(lane_id: str) -> List[str]:
+        """
+        List forward successor lanes in stable order.
+
+        :param str lane_id: Map, virtual-lane, or walk-element ID, as applicable.
+        :returns: Forward-connected lane IDs in stable order.
+        :rtype: List[str]
+        """
         return sorted(target for target in graph.successors(lane_id)
                       if graph[lane_id][target]["direction_type"] == "F")
 
-    def car_neighbours(lane_id: str) -> list[str]:
+    def car_neighbours(lane_id: str) -> List[str]:
+        """
+        List city-driving lanes beside a bike lane.
+
+        :param str lane_id: Map, virtual-lane, or walk-element ID, as applicable.
+        :returns: IDs of adjacent city-driving lanes.
+        :rtype: List[str]
+        """
         lane = lanes[lane_id]
         return [other.id for other in (*lane.left_neighbor_forward_lane_id, *lane.right_neighbor_forward_lane_id)
                 if other.id in lanes and lanes[other.id].type == city]
@@ -130,6 +148,13 @@ def bike_connectors(service: MapService, *, min_turn_radius: float,
                 pairs.add((end, start))
 
     def usable(connector: VirtualLane) -> bool:
+        """
+        Check connector length, turning radius, and physical-curb conflicts.
+
+        :param VirtualLane connector: Virtual bicycle lane whose geometry is checked.
+        :returns: ``True`` if the connector meets length, curvature, and curb checks.
+        :rtype: bool
+        """
         return (connector.line.length <= max_length and not _too_tight(connector, min_turn_radius)
                 and not any(not mark.virtual and "CURB" in mark.types
                             for mark in service.get_lane_markings(connector.line)))
@@ -143,23 +168,45 @@ def bike_connectors(service: MapService, *, min_turn_radius: float,
     return tuple(sorted(connectors, key=lambda connector: connector.lane_id))
 
 
-Pose = tuple[tuple[float, float], float]
+Pose = Tuple[Tuple[float, float], float]
 """A point and a heading in radians."""
 
 
 def _end_pose(line: LineString) -> Pose:
-    """The last point of a lane and its heading over the last ``_HEADING_CHORD`` metres."""
+    """
+    The last point of a lane and its heading over the last ``_HEADING_CHORD`` metres.
+
+    :param LineString line: Line geometry in map metres.
+    :returns: The last point of a lane and its heading over the last ``_HEADING_CHORD`` metres.
+    :rtype: Pose
+    """
     return line.coords[-1][:2], chord_heading(line, max(0.0, line.length - _HEADING_CHORD), line.length)
 
 
 def _start_pose(line: LineString) -> Pose:
-    """The first point of a lane and its heading over the first ``_HEADING_CHORD`` metres."""
+    """
+    The first point of a lane and its heading over the first ``_HEADING_CHORD`` metres.
+
+    :param LineString line: Line geometry in map metres.
+    :returns: The first point of a lane and its heading over the first ``_HEADING_CHORD`` metres.
+    :rtype: Pose
+    """
     return line.coords[0][:2], chord_heading(line, 0.0, min(_HEADING_CHORD, line.length))
 
 
 def _connect(end: str, end_pose: Pose, start: str, start_pose: Pose,
-             kinds: frozenset[ConnectorKind]) -> Iterator[VirtualLane]:
-    """The connectors of the allowed kinds from ``end`` to ``start``, before length and radius checks."""
+             kinds: FrozenSet[ConnectorKind]) -> Iterator[VirtualLane]:
+    """
+    The connectors of the allowed kinds from ``end`` to ``start``, before length and radius checks.
+
+    :param str end: Ending lane, endpoint, or path position for this operation.
+    :param Pose end_pose: Position and heading at the source lane end.
+    :param str start: Starting lane, endpoint, or path position for this operation.
+    :param Pose start_pose: Position and heading at the destination lane start.
+    :param FrozenSet[ConnectorKind] kinds: Allowed connector kinds or ordered excursion kinds for this operation.
+    :returns: The connectors of the allowed kinds from ``end`` to ``start``, before length and radius checks.
+    :rtype: Iterator[VirtualLane]
+    """
     (p0, h0), (p3, h3) = end_pose, start_pose
     if dist(p0, p3) == 0:
         return
@@ -185,8 +232,17 @@ def _connect(end: str, end_pose: Pose, start: str, start_pose: Pose,
             yield VirtualLane(lane_id, _bezier(p0, h0, p3, h3), (end,), (start,))
 
 
-def _bezier(p0: tuple[float, float], h0: float, p3: tuple[float, float], h3: float) -> LineString:
-    """A cubic Bézier curve from ``p0`` to ``p3``, leaving along ``h0`` and arriving along ``h3``."""
+def _bezier(p0: Tuple[float, float], h0: float, p3: Tuple[float, float], h3: float) -> LineString:
+    """
+    A cubic Bézier curve from ``p0`` to ``p3``, leaving along ``h0`` and arriving along ``h3``.
+
+    :param Tuple[float, float] p0: Starting map coordinate, in metres.
+    :param float h0: Departure heading, in radians.
+    :param Tuple[float, float] p3: Ending map coordinate, in metres.
+    :param float h3: Arrival heading, in radians.
+    :returns: A cubic Bézier curve from ``p0`` to ``p3``, leaving along ``h0`` and arriving along ``h3``.
+    :rtype: LineString
+    """
     reach = dist(p0, p3) / 3
     p1 = (p0[0] + reach * cos(h0), p0[1] + reach * sin(h0))
     p2 = (p3[0] - reach * cos(h3), p3[1] - reach * sin(h3))
@@ -201,12 +257,19 @@ def _bezier(p0: tuple[float, float], h0: float, p3: tuple[float, float], h3: flo
     return LineString(points)
 
 
-def _corner(p0: tuple[float, float], h0: float, p3: tuple[float, float], h3: float,
-            ) -> tuple[float, float] | None:
+def _corner(p0: Tuple[float, float], h0: float, p3: Tuple[float, float], h3: float,
+            ) -> Tuple[float, float] | None:
     """
     Where the line through ``p0`` along ``h0`` meets the line through ``p3``
     along ``h3``, if it lies at least ``_CORNER_MARGIN`` beyond ``p0`` and
     before ``p3``; otherwise None.
+
+    :param Tuple[float, float] p0: Starting map coordinate, in metres.
+    :param float h0: Departure heading, in radians.
+    :param Tuple[float, float] p3: Ending map coordinate, in metres.
+    :param float h3: Arrival heading, in radians.
+    :returns: The corner values described above.
+    :rtype: Tuple[float, float] | None
     """
     u0, u3 = (cos(h0), sin(h0)), (cos(h3), sin(h3))
     determinant = u0[0] * u3[1] - u0[1] * u3[0]
@@ -221,6 +284,13 @@ def _corner(p0: tuple[float, float], h0: float, p3: tuple[float, float], h3: flo
 
 
 def _too_tight(connector: VirtualLane, min_turn_radius: float) -> bool:
-    """Whether any heading interval of the connector, pivots aside, is tighter than ``min_turn_radius``."""
+    """
+    Whether any heading interval of the connector, pivots aside, is tighter than ``min_turn_radius``.
+
+    :param VirtualLane connector: Virtual bicycle lane whose geometry is checked.
+    :param float min_turn_radius: Minimum permitted turning radius, in metres.
+    :returns: ``True`` if any heading interval of the connector, pivots aside, is tighter than ``min_turn_radius``; otherwise ``False``.
+    :rtype: bool
+    """
     return any(curvature > 1 / min_turn_radius + 1e-9
                for _, _, curvature in curvature_spans(connector.line, connector.pivots))
