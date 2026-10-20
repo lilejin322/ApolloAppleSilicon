@@ -8,9 +8,9 @@ crosses each gene with its own rate and returns two children.
 
 from dataclasses import replace
 from random import Random
-from typing import Tuple
+from typing import Callable, Dict, Tuple
 
-from ...scenario import NPCVehicleAgent
+from ...scenario import NPCVehicleAgent, LaneRoute, RouteSpace
 from .. import route_operators
 from ..common import vary
 from ..profile_operators import cx_drive_style, cx_speed_profile, cx_start_time
@@ -32,8 +32,8 @@ def cx_shared_lane(first: NPCVehicleAgent, second: NPCVehicleAgent, spaces: Spac
     :returns: The child, or ``None`` if no shared lane allows joining without repeats.
     :rtype: NPCVehicleAgent | None
     """
-    space = spaces[first.vehicle_type]
-    route = route_operators.cx_shared_lane(first.route, second.route, space, rng)
+    space: RouteSpace = spaces[first.vehicle_type]
+    route: LaneRoute | None = route_operators.cx_shared_lane(first.route, second.route, space, rng)
     return on_route(first, route, space, rng, keep={**positions(second), **positions(first)})
 
 
@@ -52,8 +52,8 @@ def cx_bridge(first: NPCVehicleAgent, second: NPCVehicleAgent, spaces: Spaces, r
     :returns: The child, or ``None`` if no lane pair is reachable within ``config.max_length``.
     :rtype: NPCVehicleAgent | None
     """
-    space = spaces[first.vehicle_type]
-    route = route_operators.cx_bridge(first.route, second.route, space, rng, config,
+    space: RouteSpace = spaces[first.vehicle_type]
+    route: LaneRoute | None = route_operators.cx_bridge(first.route, second.route, space, rng, config,
                                       lane_change_s=first.lane_change_s)
     return on_route(first, route, space, rng, keep={**positions(second), **positions(first)})
 
@@ -76,7 +76,7 @@ def cx_route_swap(first: NPCVehicleAgent, second: NPCVehicleAgent, spaces: Space
     """
     if (first.route, first.lane_change_s) == (second.route, second.lane_change_s):
         return None
-    space = spaces[first.vehicle_type]
+    space: RouteSpace = spaces[first.vehicle_type]
     return on_route(first, second.route, space, rng, keep=positions(second))
 
 
@@ -89,8 +89,8 @@ def cx_lane_change_s(first: NPCVehicleAgent, second: NPCVehicleAgent) -> NPCVehi
     :returns: The child, or ``None`` if no shared lane change has a different position.
     :rtype: NPCVehicleAgent | None
     """
-    theirs = positions(second)
-    changes = tuple(theirs.get(pair, s) for pair, s in zip(first.route.lane_change_pairs, first.lane_change_s))
+    theirs: Dict[Tuple[str, str], float] = positions(second)
+    changes: Tuple[float, ...] = tuple(theirs.get(pair, s) for pair, s in zip(first.route.lane_change_pairs, first.lane_change_s))
     return None if changes == first.lane_change_s else replace(first, lane_change_s=changes)
 
 
@@ -142,8 +142,8 @@ def cx_npc_agent(first: NPCVehicleAgent, second: NPCVehicleAgent, spaces: Spaces
         # ``config.cross_type_routes``): a car takes a van's road freely, but a
         # van rarely fits a car's, so routes flowed into the roads large vehicles
         # fit (shalun: car routes fitting a van 14% -> 51% in 30 generations).
-        routes = config.cross_type_routes or lead.vehicle_type is other.vehicle_type
-        operators = {
+        routes: bool = config.cross_type_routes or lead.vehicle_type is other.vehicle_type
+        operators: Dict[str, Callable[[NPCVehicleAgent], NPCVehicleAgent | None]] = {
             "shared_lane": lambda child: cx_shared_lane(child, other, spaces, rng) if routes else None,
             "bridge": lambda child: cx_bridge(child, other, spaces, rng, config) if routes else None,
             "lane_change_s": lambda child: cx_lane_change_s(child, other),

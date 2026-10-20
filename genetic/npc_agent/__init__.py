@@ -8,6 +8,8 @@ positions, vehicle type, speed profile, and start time. Route changes reuse
 type's ``RouteSpace``.
 """
 
+from typing import List
+
 from .common import GENES, NPCOperatorConfig, Spaces, acceptable, rebalance_vehicle_types
 from .crossover import (
     cx_bridge, cx_lane_change_s, cx_npc_agent, cx_route_swap, cx_shared_lane, cx_drive_style, cx_speed_profile, cx_start_time,
@@ -18,7 +20,7 @@ from .mutation import (
     mut_speed_point, mut_start_t, mut_stop, mut_vehicle_type,
 )
 
-__all__ = [
+__all__: List[str] = [
     "GENES", "NPCOperatorConfig", "Spaces", "acceptable", "rebalance_vehicle_types",
     "cx_bridge", "cx_lane_change_s", "cx_npc_agent", "cx_route_swap", "cx_shared_lane", "cx_drive_style", "cx_speed_profile",
     "cx_start_time", "cx_vehicle_type",

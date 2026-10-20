@@ -7,13 +7,13 @@ not apply. ``mut_npc_agent`` mutates each gene with its rate.
 
 from dataclasses import replace
 from random import Random
-from typing import List
+from typing import Callable, Dict, List, Tuple
 
-from ...scenario import NPCVehicleAgent, VehicleType
+from ...scenario import NPCVehicleAgent, VehicleType, LaneRoute, RouteSpace
+from ...scenario.realism import draw_type
 from .. import profile_operators, route_operators
 from ..common import vary
 from ..profile_operators import mut_drive_style, mut_speed, mut_start_t, mut_stop
-from ...scenario.realism import draw_type
 from .common import NPCOperatorConfig, Spaces, acceptable, on_route, retyped
 
 
@@ -29,8 +29,8 @@ def mut_reroute(agent: NPCVehicleAgent, spaces: Spaces, rng: Random,
     :returns: The mutant, or ``None`` if no alternative fits.
     :rtype: NPCVehicleAgent | None
     """
-    space = spaces[agent.vehicle_type]
-    route = route_operators.mut_reroute(agent.route, space, rng, config, lane_change_s=agent.lane_change_s)
+    space: RouteSpace = spaces[agent.vehicle_type]
+    route: LaneRoute | None = route_operators.mut_reroute(agent.route, space, rng, config, lane_change_s=agent.lane_change_s)
     return on_route(agent, route, space, rng)
 
 
@@ -49,7 +49,7 @@ def mut_extend_or_truncate(agent: NPCVehicleAgent, spaces: Spaces, rng: Random,
     :returns: The mutant, or ``None`` if no change applies.
     :rtype: NPCVehicleAgent | None
     """
-    space = spaces[agent.vehicle_type]
+    space: RouteSpace = spaces[agent.vehicle_type]
     return on_route(agent, route_operators.mut_extend_or_truncate(agent.route, space, rng, config, direction=direction), space, rng)
 
 
@@ -68,8 +68,8 @@ def mut_lane_change(agent: NPCVehicleAgent, spaces: Spaces, rng: Random,
     :returns: The mutant, or ``None`` if the route can neither gain nor lose a lane change.
     :rtype: NPCVehicleAgent | None
     """
-    space = spaces[agent.vehicle_type]
-    route = route_operators.mut_lane_change(agent.route, space, rng, config, lane_change_s=agent.lane_change_s,
+    space: RouteSpace = spaces[agent.vehicle_type]
+    route: LaneRoute | None = route_operators.mut_lane_change(agent.route, space, rng, config, lane_change_s=agent.lane_change_s,
                                             acceptance=acceptance)
     return on_route(agent, route, space, rng)
 
@@ -86,7 +86,7 @@ def mut_s(agent: NPCVehicleAgent, spaces: Spaces, rng: Random,
     :returns: The mutant, or ``None`` if no lane-change positions fit the new ends.
     :rtype: NPCVehicleAgent | None
     """
-    space = spaces[agent.vehicle_type]
+    space: RouteSpace = spaces[agent.vehicle_type]
     return on_route(agent, route_operators.mut_s(agent.route, space, rng, config), space, rng)
 
 
@@ -105,13 +105,13 @@ def mut_lane_change_s(agent: NPCVehicleAgent, spaces: Spaces, rng: Random,
     """
     if not agent.lane_change_s:
         return None
-    space = spaces[agent.vehicle_type]
-    index = rng.randrange(len(agent.lane_change_s))
-    lane = agent.route.lane_change_indices[index]
-    low = space.legs(agent.route, lane_change_s=agent.lane_change_s)[lane].start_s
-    high = space.lane_length(agent.route.lanes[lane]) - space.rules.min_lane_change_distance
-    change = min(max(agent.lane_change_s[index] + rng.gauss(0, config.sigma_s), low), high)
-    changes = agent.lane_change_s[:index] + (change,) + agent.lane_change_s[index + 1:]
+    space: RouteSpace = spaces[agent.vehicle_type]
+    index: int = rng.randrange(len(agent.lane_change_s))
+    lane: int = agent.route.lane_change_indices[index]
+    low: float = space.legs(agent.route, lane_change_s=agent.lane_change_s)[lane].start_s
+    high: float = space.lane_length(agent.route.lanes[lane]) - space.rules.min_lane_change_distance
+    change: float = min(max(agent.lane_change_s[index] + rng.gauss(0, config.sigma_s), low), high)
+    changes: Tuple[float, ...] = agent.lane_change_s[:index] + (change,) + agent.lane_change_s[index + 1:]
     return replace(agent, lane_change_s=changes)
 
 
@@ -138,7 +138,7 @@ def mut_vehicle_type(agent: NPCVehicleAgent, spaces: Spaces, rng: Random,
     :returns: The mutant, or ``None`` if the drawn type is unchanged or no type is available.
     :rtype: NPCVehicleAgent | None
     """
-    vehicle_type = drawn if drawn is not None else draw_vehicle_type(spaces, rng, config)
+    vehicle_type: VehicleType | None = drawn if drawn is not None else draw_vehicle_type(spaces, rng, config)
     if vehicle_type is None or vehicle_type is agent.vehicle_type:
         return None
     return retyped(agent, vehicle_type)
@@ -155,7 +155,7 @@ def draw_vehicle_type(spaces: Spaces, rng: Random,
     :returns: The drawn type, or ``None`` if no available type has positive weight.
     :rtype: VehicleType | None
     """
-    weights = {name: weight for name, weight in config.vehicle_type_weights.items()
+    weights: Dict[str, float] = {name: weight for name, weight in config.vehicle_type_weights.items()
                if VehicleType[name] in spaces}
     if not any(weight > 0 for weight in weights.values()):
         return None
@@ -180,7 +180,7 @@ def mut_speed_point(agent: NPCVehicleAgent, rng: Random,
     :returns: The mutant, or ``None`` if the change would leave a malformed profile.
     :rtype: NPCVehicleAgent | None
     """
-    space = spaces.get(agent.vehicle_type) if spaces is not None else None
+    space: RouteSpace | None = spaces.get(agent.vehicle_type) if spaces is not None else None
     return profile_operators.mut_speed_point(agent, rng, config, space, action)
 
 
@@ -214,11 +214,11 @@ def mut_npc_agent(agent: NPCVehicleAgent, spaces: Spaces, rng: Random,
             draws.append(draw_vehicle_type(spaces, rng, config))
         return mut_vehicle_type(child, spaces, rng, config, draws[0])
 
-    acceptance = rng.random()  # lane-change acceptance draw for this mutation event, kept over retries
-    direction = rng.choice(("extend", "truncate"))  # extend/truncate direction for this event, kept over retries
-    point_action = rng.choice(profile_operators.SPEED_POINT_ACTIONS)  # speed-point action, kept over retries
+    acceptance: float = rng.random()  # lane-change acceptance draw for this mutation event, kept over retries
+    direction: str = rng.choice(("extend", "truncate"))  # extend/truncate direction for this event, kept over retries
+    point_action: str = rng.choice(profile_operators.SPEED_POINT_ACTIONS)  # speed-point action, kept over retries
 
-    operators = {
+    operators: Dict[str, Callable[[NPCVehicleAgent], NPCVehicleAgent | None]] = {
         "reroute": lambda child: mut_reroute(child, spaces, rng, config),
         "extend_or_truncate": lambda child: mut_extend_or_truncate(child, spaces, rng, config, direction),
         "lane_change": lambda child: mut_lane_change(child, spaces, rng, config, acceptance),

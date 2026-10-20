@@ -12,21 +12,22 @@ with a replay path within the length bounds and a start time within range.
 
 from dataclasses import dataclass, field, replace
 from random import Random
-from typing import ClassVar, Mapping, Sequence, Tuple, Dict, List, Set
+from typing import ClassVar, Dict, List, Mapping, Sequence, Set, Tuple, TypeAlias
 
 from ...scenario import InvalidRoute, LaneRoute, NPCVehicleAgent, RouteSpace, VehicleType
 from ...scenario.npc_agent import VEHICLE_SPECS
 from ...scenario.realism import VEHICLE_MIX
+from ...scenario.replay import ReplayTrajectory, SpeedPoint
 from ...utils import require_nonnegative
 from ..common import ReplayOperatorConfig
 from ..profile_operators import clamp_speeds
 
-GENES = ("route", "lane_change_s", "vehicle_type", "speed_profile", "start_t")
+GENES: Tuple[str, ...] = ("route", "lane_change_s", "vehicle_type", "speed_profile", "start_t")
 """NPC genes, in the order each call varies them: the route first, since the
 other genes are checked on it, and the speed profile after the vehicle type
 whose limits it must respect."""
 
-Spaces = Mapping[VehicleType, RouteSpace]
+Spaces: TypeAlias = Mapping[VehicleType, RouteSpace]
 """A route space per vehicle type, built with ``NPCVehicleAgent.rules``. Only
 the types present are offered to vehicle-type crossover and mutation."""
 
@@ -173,7 +174,7 @@ def acceptable(spaces: Spaces, agent: NPCVehicleAgent, config: NPCOperatorConfig
     if agent.start_t > config.max_start_t or agent.vehicle_type not in spaces:
         return False
     try:
-        trajectory = agent.trajectory(spaces[agent.vehicle_type])
+        trajectory: ReplayTrajectory = agent.trajectory(spaces[agent.vehicle_type])
     except InvalidRoute:
         return False
     return (config.min_length <= trajectory.path.length <= config.max_length
@@ -234,7 +235,7 @@ def retyped(agent: NPCVehicleAgent, vehicle_type: VehicleType) -> NPCVehicleAgen
         vehicle type are not checked here.
     :rtype: NPCVehicleAgent
     """
-    profile = clamp_speeds(agent.speed_profile, VEHICLE_SPECS[vehicle_type].max_speed)
+    profile: Tuple[SpeedPoint, ...] = clamp_speeds(agent.speed_profile, VEHICLE_SPECS[vehicle_type].max_speed)
     return replace(agent, vehicle_type=vehicle_type, speed_profile=profile)
 
 
@@ -275,41 +276,41 @@ def rebalance_vehicle_types(population: Sequence[NPCVehicleAgent], spaces: Space
         resulting mix may still differ from the target.
     :rtype: List[NPCVehicleAgent]
     """
-    offered = {name: weight for name, weight in config.vehicle_type_weights.items()
+    offered: Dict[str, float] = {name: weight for name, weight in config.vehicle_type_weights.items()
                if weight > 0 and VehicleType[name] in spaces}
     population = list(population)
     if not offered or not population:
         return population
-    total = sum(offered.values())
-    exact = {name: weight / total * len(population) for name, weight in offered.items()}
-    target = {name: int(share) for name, share in exact.items()}
+    total: float = sum(offered.values())
+    exact: Dict[str, float] = {name: weight / total * len(population) for name, weight in offered.items()}
+    target: Dict[str, int] = {name: int(share) for name, share in exact.items()}
     for name in sorted(exact, key=lambda n: exact[n] - target[n], reverse=True)[:len(population) - sum(target.values())]:
         target[name] += 1
-    counts = {name: sum(agent.vehicle_type.name == name for agent in population) for name in offered}
+    counts: Dict[str, int] = {name: sum(agent.vehicle_type.name == name for agent in population) for name in offered}
     unreachable: Set[str] = set()
     while True:
-        short = [name for name in offered if counts[name] < target[name] and name not in unreachable]
+        short: List[str] = [name for name in offered if counts[name] < target[name] and name not in unreachable]
         if not short:
             return population
-        wanted = max(short, key=lambda name: target[name] - counts[name])
-        donors = [index for index, agent in enumerate(population)
+        wanted: str = max(short, key=lambda name: target[name] - counts[name])
+        donors: List[int] = [index for index, agent in enumerate(population)
                   if agent.vehicle_type.name not in offered or counts[agent.vehicle_type.name] > target[agent.vehicle_type.name]]
         rng.shuffle(donors)
         for index in donors:
-            child = retyped(population[index], VehicleType[wanted])
+            child: NPCVehicleAgent = retyped(population[index], VehicleType[wanted])
             if acceptable(spaces, child, config):
-                old = population[index].vehicle_type.name
+                old: str = population[index].vehicle_type.name
                 if old in counts:
                     counts[old] -= 1
                 counts[wanted] += 1
                 population[index] = child
                 break
         else:
-            fresh = _fresh(spaces, VehicleType[wanted], rng, config) if redraw and donors else None
+            fresh: NPCVehicleAgent | None = _fresh(spaces, VehicleType[wanted], rng, config) if redraw and donors else None
             if fresh is None:
                 unreachable.add(wanted)
                 continue
-            index = donors[0]
+            index: int = donors[0]
             old = population[index].vehicle_type.name
             if old in counts:
                 counts[old] -= 1
@@ -332,7 +333,7 @@ def _fresh(spaces: Spaces, vehicle_type: VehicleType, rng: Random, config: NPCOp
     """
     for _ in range(attempts):
         try:
-            agent = NPCVehicleAgent.random(spaces[vehicle_type], rng, vehicle_type=vehicle_type,
+            agent: NPCVehicleAgent = NPCVehicleAgent.random(spaces[vehicle_type], rng, vehicle_type=vehicle_type,
                                            max_start_t=config.max_start_t, min_speed=config.min_speed)
         except InvalidRoute:
             continue
