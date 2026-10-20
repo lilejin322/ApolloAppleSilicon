@@ -159,6 +159,20 @@ class RouteFrame:
     rules' minimum: where each lane's driven stretch lies, and conversions
     between (lane, s) and that distance. Independent of the speed profile.
     """
+    route: LaneRoute
+    """Route whose driven lane stretches are indexed."""
+    index: dict[str, int]
+    """Lane ID to route-leg index."""
+    starts: List[float]
+    """Start position of each driven lane stretch, in lane metres."""
+    ends: List[float]
+    """End position of each driven lane stretch, in lane metres."""
+    offsets: List[float]
+    """Cumulative driven distance at each lane stretch's start, in metres."""
+    gaps: List[float]
+    """Minimum lane-change distance after each lane stretch, or zero, in metres."""
+    total: float
+    """Total driven distance including minimum lane-change distances, in metres."""
 
     def __init__(self, space: RouteSpace, route: LaneRoute, lane_change_s: Tuple[float, ...]) -> None:
         """
@@ -680,6 +694,24 @@ class ReplayTrajectory:
     speed (``yaw_rate``, rad/s; ``PIVOT_YAW_RATE`` by default), then waits for
     its dwell before departing.
     """
+    path: LineString
+    """Replay-path geometry in map metres."""
+    start_t: float
+    """Start time in scenario seconds."""
+    _starts: List[float]
+    """Start distance of each path piece between pivots, in path metres."""
+    _profiles: List[CenterlineProfile]
+    """Heading profiles for the path pieces between pivots."""
+    _s: List[float]
+    """Increasing grid positions along the replay path, in metres."""
+    _v: List[float]
+    """Feasible speed at each grid position, in m/s."""
+    _arrive: List[float]
+    """Arrival time at each grid position, in seconds since start_t."""
+    _depart: List[float]
+    """Departure time after turning and dwelling, in seconds since start_t."""
+    _turns: dict[float, Tuple[float, float, float]]
+    """Pivot grid metres mapped to incoming heading, signed turn radians, and turn seconds."""
 
     def __init__(self, path: LineString, start_t: float, s: List[float], v: List[float],
                  dwell: List[float], pivots: Sequence[float] = (), yaw_rate: float = PIVOT_YAW_RATE) -> None:
