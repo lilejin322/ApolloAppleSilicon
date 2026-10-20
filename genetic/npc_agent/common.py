@@ -12,7 +12,7 @@ with a replay path within the length bounds and a start time within range.
 
 from dataclasses import dataclass, field, replace
 from random import Random
-from typing import ClassVar, Mapping, Sequence, Tuple, Dict, List
+from typing import ClassVar, Mapping, Sequence, Tuple, Dict, List, Set
 
 from ...scenario import InvalidRoute, LaneRoute, NPCVehicleAgent, RouteSpace, VehicleType
 from ...scenario.npc_agents import VEHICLE_SPECS
@@ -286,7 +286,7 @@ def rebalance_vehicle_types(population: Sequence[NPCVehicleAgent], spaces: Space
     for name in sorted(exact, key=lambda n: exact[n] - target[n], reverse=True)[:len(population) - sum(target.values())]:
         target[name] += 1
     counts = {name: sum(agent.vehicle_type.name == name for agent in population) for name in offered}
-    unreachable: set[str] = set()
+    unreachable: Set[str] = set()
     while True:
         short = [name for name in offered if counts[name] < target[name] and name not in unreachable]
         if not short:

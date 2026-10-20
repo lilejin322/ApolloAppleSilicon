@@ -11,7 +11,7 @@ share one route space.
 
 from dataclasses import dataclass, field, replace
 from random import Random
-from typing import ClassVar, Mapping, Sequence, Tuple, List
+from typing import ClassVar, Mapping, Sequence, Tuple, List, Set
 
 from ...scenario import RIDER_SPECS, BicycleAgent, InvalidRoute, LaneRoute, RiderType, RouteSpace
 from ...scenario.bicycle import PivotKey, starts_on_bike_lane
@@ -291,7 +291,7 @@ def rebalance_rider_types(population: Sequence[BicycleAgent], space: RouteSpace,
     for name in sorted(exact, key=lambda n: exact[n] - target[n], reverse=True)[:len(population) - sum(target.values())]:
         target[name] += 1
     counts = {name: sum(agent.rider_type.name == name for agent in population) for name in offered}
-    unreachable: set[str] = set()
+    unreachable: Set[str] = set()
     while True:
         short = [name for name in offered if counts[name] < target[name] and name not in unreachable]
         if not short:

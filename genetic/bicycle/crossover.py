@@ -8,6 +8,7 @@ crosses each gene with its own rate and returns two children.
 
 from dataclasses import replace
 from random import Random
+from typing import Tuple
 
 from ...scenario import BicycleAgent, RouteSpace
 from .. import route_operators
@@ -128,7 +129,7 @@ def cx_rider_type(first: BicycleAgent, second: BicycleAgent) -> BicycleAgent | N
 
 
 def cx_bicycle(first: BicycleAgent, second: BicycleAgent, space: RouteSpace, rng: Random,
-               config: BicycleOperatorConfig = BicycleOperatorConfig()) -> tuple[BicycleAgent, BicycleAgent]:
+               config: BicycleOperatorConfig = BicycleOperatorConfig()) -> Tuple[BicycleAgent, BicycleAgent]:
     """
     Return two children: one led by ``first``, one led by ``second``.
 
@@ -154,7 +155,7 @@ def cx_bicycle(first: BicycleAgent, second: BicycleAgent, space: RouteSpace, rng
         leading parent, including when its unchanged fallback fails acceptance.
     :returns: Two children in leading-parent order. A child with no accepted changes
         is its original leading parent, provided that parent passes acceptance.
-    :rtype: tuple[BicycleAgent, BicycleAgent]
+    :rtype: Tuple[BicycleAgent, BicycleAgent]
     """
     def child_of(lead: BicycleAgent, other: BicycleAgent) -> BicycleAgent:
         """
