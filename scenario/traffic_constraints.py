@@ -1,4 +1,5 @@
-"""Map constraints shared by replay validation and genetic acceptance.
+"""
+Map constraints shared by replay validation and genetic acceptance.
 
 Missing boundary geometry is not evidence of free space. These checks reject
 known conflicts, but cannot certify areas the map does not describe.
@@ -7,13 +8,15 @@ known conflicts, but cannot certify areas the map does not describe.
 from math import ceil, hypot, pi
 from typing import TYPE_CHECKING, Sequence
 from weakref import WeakKeyDictionary
-
 import numpy as np
 import shapely
 from shapely.geometry import LineString
 
 from ..map.geometry import CenterlineProfile, normalize_angle
 from .routing import InvalidRoute, RouteSpace, _junction_info
+from ..map import MapService
+from ..map.types import LaneMarking
+from typing import List
 
 if TYPE_CHECKING:
     from .replay import ReplayLayout, SpeedPoint
@@ -37,7 +40,17 @@ _FOOTPRINT_CACHE = WeakKeyDictionary()
 
 def check_stops(space: RouteSpace, layout: "ReplayLayout", profile: Sequence["SpeedPoint"],
                 positions: Sequence[float]) -> None:
-    """Reject ordinary stops on junctions, connectors or lane-change stretches."""
+    """
+    Reject ordinary stops on junctions, connectors or lane-change stretches.
+
+    :param RouteSpace space: Route space supplying lane geometry, topology, and vehicle-specific constraints.
+    :param ReplayLayout layout: Replay layout containing the path and mappings from raw geometry.
+    :param Sequence['SpeedPoint'] profile: Ordered target-speed points; positions are lane or walk-element metres.
+    :param Sequence[float] positions: Travelled positions along the replay path, in metres.
+    :returns: ``None`` if every ordinary stop avoids the prohibited regions.
+    :rtype: None
+    :raises InvalidRoute: If route geometry, topology, point placement, or map constraints fail the checks performed here.
+    """
     from .replay import STOP_CLEARANCE
 
     changes = [(layout.moved(offset), layout.moved(offset + line.length))
@@ -55,8 +68,18 @@ def check_stops(space: RouteSpace, layout: "ReplayLayout", profile: Sequence["Sp
             raise InvalidRoute("ordinary stop lies inside a junction polygon")
 
 
-def _boxes(x, y, headings, length: float, width: float):
-    """Oriented rectangular footprints, centred on the replay positions."""
+def _boxes(x: Sequence[float] | np.ndarray, y: Sequence[float] | np.ndarray, headings: np.ndarray, length: float, width: float) -> np.ndarray:
+    """
+    Oriented rectangular footprints, centred on the replay positions.
+
+    :param Sequence[float] | np.ndarray x: X coordinate or sampled X coordinates, in map metres.
+    :param Sequence[float] | np.ndarray y: Y coordinate or sampled Y coordinates, in map metres.
+    :param np.ndarray headings: Body headings in radians at the sampled positions.
+    :param float length: Length of the path, lane, or body, in metres.
+    :param float width: Body or crossing width, in metres.
+    :returns: An array of oriented rectangular body polygons.
+    :rtype: np.ndarray
+    """
     corners = np.asarray([[-length / 2, -width / 2], [length / 2, -width / 2],
                           [length / 2, width / 2], [-length / 2, width / 2]])
     c, s = np.cos(headings)[:, None], np.sin(headings)[:, None]
@@ -67,11 +90,21 @@ def _boxes(x, y, headings, length: float, width: float):
 
 def check_footprint(space: RouteSpace, path: LineString, length: float, width: float, *,
                     pivots: Sequence[float] = ()) -> None:
-    """Check sampled body footprints against real prohibiting markings and endpoint junctions.
+    """
+    Check sampled body footprints against real prohibiting markings and endpoint junctions.
 
     Samples are at most 0.5 m apart, including every path vertex and pivot;
     turning in place is sampled every five degrees. This is a map-based
     rejection check, not a continuous collision or road-surface certificate.
+
+    :param RouteSpace space: Route space supplying lane geometry, topology, and vehicle-specific constraints.
+    :param LineString path: Path geometry or ordered lane sequence used by this operation.
+    :param float length: Length of the path, lane, or body, in metres.
+    :param float width: Body or crossing width, in metres.
+    :param Sequence[float] pivots: Distances along the path where motion stops to turn in place, in metres.
+    :returns: ``None`` if all sampled footprints pass the map conflict checks.
+    :rtype: None
+    :raises InvalidRoute: If route geometry, topology, point placement, or map constraints fail the checks performed here.
     """
     cache = _FOOTPRINT_CACHE.setdefault(space.service, {})
     key = (path.wkb, length, width, tuple(pivots), space.restricts_endpoints)
@@ -88,18 +121,37 @@ def check_footprint(space: RouteSpace, path: LineString, length: float, width: f
         raise InvalidRoute(cache[key])
 
 
-def _nearby_prohibiting_markings(service, path: LineString, reach: float) -> list:
-    """Prohibiting markings within ``reach`` of ``path``, in index order.
+def _nearby_prohibiting_markings(service: MapService, path: LineString, reach: float) -> List[LaneMarking]:
+    """
+    Prohibiting markings within ``reach`` of ``path``, in index order.
 
     Queries the marking index directly: ``MapService.get_lane_markings`` also
     sorts by exact distance to the whole path, which dominated GA run time.
+
+    :param MapService service: Loaded map service supplying geometry, descriptors, and spatial indexes.
+    :param LineString path: Path geometry or ordered lane sequence used by this operation.
+    :param float reach: Maximum query or sampling distance, in metres.
+    :returns: The nearby prohibiting markings values described above.
+    :rtype: List[LaneMarking]
     """
     index = service._index("lane marking")
     found = sorted(int(i) for i in index.tree.query(path, predicate="dwithin", distance=reach))
     return [index.items[i] for i in found if index.items[i].prohibits_crossing]
 
 
-def _check_footprint(space, path, length, width, pivots):
+def _check_footprint(space: RouteSpace, path: LineString, length: float, width: float, pivots: Sequence[float]) -> None:
+    """
+    Reject sampled body footprints that conflict with map markings or endpoint junctions.
+
+    :param RouteSpace space: Route space supplying lane geometry, topology, and vehicle-specific constraints.
+    :param LineString path: Path geometry or ordered lane sequence used by this operation.
+    :param float length: Length of the path, lane, or body, in metres.
+    :param float width: Body or crossing width, in metres.
+    :param Sequence[float] pivots: Distances along the path where motion stops to turn in place, in metres.
+    :returns: ``None`` if the operation succeeds.
+    :rtype: None
+    :raises InvalidRoute: If route geometry, topology, point placement, or map constraints fail the checks performed here.
+    """
     reach = hypot(length, width) / 2
     markings = _nearby_prohibiting_markings(space.service, path, reach)
     area = _junction_info(space.service, space._no_turn)["union"]
@@ -149,8 +201,15 @@ def _check_footprint(space, path, length, width, pivots):
             raise InvalidRoute("endpoint vehicle footprint overlaps a junction")
 
 
-def _headings_at(profile: CenterlineProfile, positions) -> np.ndarray:
-    """Vectorized ``CenterlineProfile.heading_at``."""
+def _headings_at(profile: CenterlineProfile, positions: np.ndarray) -> np.ndarray:
+    """
+    Vectorized ``CenterlineProfile.heading_at``.
+
+    :param CenterlineProfile profile: Ordered target-speed points; positions are lane or walk-element metres.
+    :param np.ndarray positions: Travelled positions along the replay path, in metres.
+    :returns: Interpolated headings wrapped into [-pi, pi), in radians.
+    :rtype: np.ndarray
+    """
     mids = np.asarray(profile.midpoint_s)
     heads = np.asarray(profile.headings)
     index = np.searchsorted(mids, positions, side="right")
@@ -166,7 +225,16 @@ def _headings_at(profile: CenterlineProfile, positions) -> np.ndarray:
 
 
 def _parallel(line: LineString, x: float, y: float, heading: float) -> bool:
-    """Whether ``line`` runs within ``CROSSING_ANGLE`` of ``heading`` near (x, y), either direction."""
+    """
+    Whether ``line`` runs within ``CROSSING_ANGLE`` of ``heading`` near (x, y), either direction.
+
+    :param LineString line: Line geometry in map metres.
+    :param float x: X coordinate or sampled X coordinates, in map metres.
+    :param float y: Y coordinate or sampled Y coordinates, in map metres.
+    :param float heading: Heading in radians.
+    :returns: ``True`` if the nearby marking direction is within the crossing-angle threshold of the body axis.
+    :rtype: bool
+    """
     s = line.project(shapely.Point(x, y))
     a, b = line.interpolate(max(s - 0.5, 0.0)), line.interpolate(min(s + 0.5, line.length))
     if a.equals(b):
