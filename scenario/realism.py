@@ -27,6 +27,15 @@ These are plausible literature-range defaults, not calibrated to measured data.
 from dataclasses import replace
 from math import erf, exp, pi, sqrt
 from random import Random
+from typing import Mapping, TYPE_CHECKING, Tuple, TypeVar
+
+if TYPE_CHECKING:
+    from .bicycle import RiderSpec
+    from .npc_agent import VehicleSpec
+    from .pedestrian import WalkerSpec
+
+ComfortSpec = TypeVar("ComfortSpec", "VehicleSpec", "RiderSpec", "WalkerSpec")
+"""Motion specification type preserved by ``comfort_limits``."""
 
 DEFAULT_SPEED_LIMIT = 13.4
 """m/s (30 mph) assumed where a lane has no speed limit."""
@@ -89,16 +98,37 @@ STYLE_SIGMA = 0.15
 
 
 def _normal_cdf(x: float) -> float:
+    """
+    Evaluate the standard normal cumulative distribution function.
+
+    :param float x: Standard-normal variate at which to evaluate the CDF.
+    :returns: The standard normal cumulative probability at ``x``.
+    :rtype: float
+    """
     return 0.5 * (1 + erf(x / sqrt(2)))
 
 
-def _usual(kind: str):
+def _usual(kind: str) -> Tuple[float, float, Tuple[float, float]]:
+    """
+    Return the mean, standard deviation, and bounds of the usual cruise component.
+
+    :param str kind: Traffic type name or excursion category selecting the applicable rules or prior.
+    :returns: Mean, standard deviation, and lower/upper bounds of the usual component.
+    :rtype: Tuple[float, float, Tuple[float, float]]
+    """
     if kind in ABSOLUTE_CRUISE:
         return ABSOLUTE_CRUISE[kind]
     return CRUISE_FACTOR[kind], CRUISE_SIGMA, CRUISE_RANGE
 
 
-def _slow(kind: str):
+def _slow(kind: str) -> Tuple[float, float]:
+    """
+    Return the lower and upper bounds of the slow cruise component.
+
+    :param str kind: Traffic type name or excursion category selecting the applicable rules or prior.
+    :returns: The slow component lower and upper bounds.
+    :rtype: Tuple[float, float]
+    """
     return _ABSOLUTE_SLOW_RANGE[kind] if kind in _ABSOLUTE_SLOW_RANGE else SLOW_RANGE
 
 
@@ -107,6 +137,12 @@ def reference_speed(kind: str, limit: float | None, max_speed: float) -> float:
     What target speeds of ``kind`` are relative to: the lane limit (or
     ``DEFAULT_SPEED_LIMIT``) capped by the type's ``max_speed`` for vehicles,
     1 for riders and walkers (``ABSOLUTE_CRUISE``).
+
+    :param str kind: Traffic type name or excursion category selecting the applicable rules or prior.
+    :param float | None limit: Lane speed limit in m/s, or ``None`` if unspecified.
+    :param float max_speed: Maximum allowed target speed, in m/s.
+    :returns: The capped lane reference speed for vehicles, or 1 for absolute speed priors.
+    :rtype: float
     """
     if kind in ABSOLUTE_CRUISE:
         return 1.0
@@ -114,7 +150,17 @@ def reference_speed(kind: str, limit: float | None, max_speed: float) -> float:
 
 
 def density(kind: str, speed: float, reference: float, low: float, high: float) -> float:
-    """Unnormalized prior density of a target speed, zero outside [low, high]."""
+    """
+    Unnormalized prior density of a target speed, zero outside [low, high].
+
+    :param str kind: Traffic type name or excursion category selecting the applicable rules or prior.
+    :param float speed: Target speed, in m/s.
+    :param float reference: Reference speed scaling the cruise prior, in m/s; absolute priors use 1.
+    :param float low: Lowest allowed target speed, in m/s.
+    :param float high: Highest allowed target speed, in m/s.
+    :returns: The unnormalized mixture density, or zero outside the allowed support.
+    :rtype: float
+    """
     if not low <= speed <= high or reference <= 0:
         return 0.0
     factor = speed / reference
@@ -129,7 +175,18 @@ def density(kind: str, speed: float, reference: float, low: float, high: float) 
 
 
 def draw_speed(rng: Random, kind: str, reference: float, low: float, high: float, tries: int = 200) -> float:
-    """A target speed from the prior restricted to [low, high] (``high`` if it cannot hold any)."""
+    """
+    A target speed from the prior restricted to [low, high] (``high`` if it cannot hold any).
+
+    :param Random rng: Random number generator used for sampling and selection.
+    :param str kind: Traffic type name or excursion category selecting the applicable rules or prior.
+    :param float reference: Reference speed scaling the cruise prior, in m/s; absolute priors use 1.
+    :param float low: Lower bound in the units of the values being sampled or checked.
+    :param float high: Upper bound in the units of the values being sampled or checked.
+    :param int tries: Maximum number of speed draws before using the bounded fallback.
+    :returns: A sampled speed in m/s, or a bounded mean if the attempts are exhausted.
+    :rtype: float
+    """
     mean, sigma, (a, b) = _usual(kind)
     c, d = _slow(kind)
     for _ in range(tries):
@@ -152,6 +209,16 @@ def speed_step(rng: Random, kind: str, speed: float, reference: float, low: floa
     """
     A Metropolis step from ``speed``: a normal proposal, accepted with the prior
     density ratio. None when rejected. Repeated steps keep the prior.
+
+    :param Random rng: Random number generator used for sampling and selection.
+    :param str kind: Traffic type name or excursion category selecting the applicable rules or prior.
+    :param float speed: Target speed, in m/s.
+    :param float reference: Reference speed scaling the cruise prior, in m/s; absolute priors use 1.
+    :param float low: Lower bound in the units of the values being sampled or checked.
+    :param float high: Upper bound in the units of the values being sampled or checked.
+    :param float sigma: Standard deviation of the normal proposal in the same units as the sampled value.
+    :returns: The proposed speed in m/s, or ``None`` if the Metropolis step is rejected.
+    :rtype: float | None
     """
     proposal = speed + rng.gauss(0, sigma)
     new = density(kind, proposal, reference, low, high)
@@ -163,8 +230,16 @@ def speed_step(rng: Random, kind: str, speed: float, reference: float, low: floa
     return proposal
 
 
-def comfort_limits(spec, kind: str, style: float):
-    """``spec`` with the acceleration and comfortable braking of ``style``."""
+def comfort_limits(spec: ComfortSpec, kind: str, style: float) -> ComfortSpec:
+    """
+    ``spec`` with the acceleration and comfortable braking of ``style``.
+
+    :param ComfortSpec spec: Immutable motion specification whose comfortable limits are adjusted.
+    :param str kind: Traffic type name or excursion category selecting the applicable rules or prior.
+    :param float style: Style value in [0, 1] selecting comfortable acceleration and braking.
+    :returns: A replacement specification of the same type with adjusted comfortable limits.
+    :rtype: ComfortSpec
+    """
     (a0, a1), (d0, d1) = COMFORT[kind]
     acceleration = min(a0 + (a1 - a0) * style, spec.max_acceleration)
     braking = min(d0 + (d1 - d0) * style, spec.max_deceleration)
@@ -172,7 +247,15 @@ def comfort_limits(spec, kind: str, style: float):
 
 
 def style_step(rng: Random, style: float, sigma: float = STYLE_SIGMA) -> float:
-    """A reflected normal step within [0, 1]; keeps a uniform distribution uniform."""
+    """
+    A reflected normal step within [0, 1]; keeps a uniform distribution uniform.
+
+    :param Random rng: Random number generator used for sampling and selection.
+    :param float style: Style value in [0, 1] selecting comfortable acceleration and braking.
+    :param float sigma: Standard deviation of the normal proposal in the same units as the sampled value.
+    :returns: The proposed style reflected into [0, 1].
+    :rtype: float
+    """
     value = style + rng.gauss(0, sigma)
     while not 0 <= value <= 1:
         value = -value if value < 0 else 2 - value
@@ -209,8 +292,16 @@ EXCURSION_COUNT_MIX = {0: 0.15, 1: 0.65, 2: 0.20}
 """Default share of walks by how often they leave the sidewalk; plausible, not calibrated."""
 
 
-def draw_type(rng: Random, weights) -> str:
-    """A type name drawn with probability proportional to ``weights`` (name -> weight)."""
+def draw_type(rng: Random, weights: Mapping[str, float]) -> str:
+    """
+    A type name drawn with probability proportional to ``weights`` (name -> weight).
+
+    :param Random rng: Random number generator used for sampling and selection.
+    :param Mapping[str, float] weights: Relative nonnegative sampling weights keyed by type name.
+    :returns: A positively weighted type name.
+    :rtype: str
+    :raises ValueError: If input fields or bounds violate the validation conditions of this operation.
+    """
     names = sorted(name for name, weight in weights.items() if weight > 0)
     if not names:
         raise ValueError("type weights must have a positive entry")
@@ -218,7 +309,14 @@ def draw_type(rng: Random, weights) -> str:
 
 
 def _prior_cdf(kind: str, value: float) -> float:
-    """CDF of ``kind``'s absolute target-speed prior (``draw_speed`` with reference 1, unrestricted)."""
+    """
+    CDF of ``kind``'s absolute target-speed prior (``draw_speed`` with reference 1, unrestricted).
+
+    :param str kind: Traffic type name or excursion category selecting the applicable rules or prior.
+    :param float value: Value to evaluate or transform in the units specified by this operation.
+    :returns: The cumulative probability under the source type speed prior.
+    :rtype: float
+    """
     mean, sigma, (a, b) = _usual(kind)
     c, d = _slow(kind)
     slow = min(max((value - c) / (d - c), 0.0), 1.0) if d > c else float(value >= c)
@@ -233,6 +331,12 @@ def mapped_speed(kind: str, other: str, value: float) -> float:
     has under ``kind``'s (absolute priors, ``ABSOLUTE_CRUISE``): a brisk adult
     becomes a brisk runner, not a runner at walking pace. Values beyond the
     prior's support scale with its nearest end (a crossing sped up past the range).
+
+    :param str kind: Traffic type name or excursion category selecting the applicable rules or prior.
+    :param str other: Destination traffic type name for quantile mapping.
+    :param float value: Positive target speed of the source type, in m/s.
+    :returns: The mapped destination-type target speed, in m/s.
+    :rtype: float
     """
     low = min(_slow(kind)[0], _usual(kind)[2][0])
     high = max(_slow(kind)[1], _usual(kind)[2][1])
