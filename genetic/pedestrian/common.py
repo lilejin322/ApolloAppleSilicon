@@ -94,45 +94,69 @@ class PedestrianOperatorConfig(ReplayOperatorConfig):
     """
 
     GENES: ClassVar[Tuple[str, ...]] = GENES
+    """Pedestrian gene names, in the order each variation call processes them."""
     CROSSOVERS: ClassVar[Tuple[str, ...]] = ("shared_sidewalk", "walker_type", "speed_profile", "walk_style",
                                              "start_time")
+    """Supported crossover names used as keys in ``crossover_weights``."""
     MUTATIONS: ClassVar[Tuple[str, ...]] = (
         "shift", "redraw", "kind", "count", "turn_back", "walker_type", "speed", "speed_point", "stop", "walk_style",
         "start_t")
+    """Supported mutation names used as keys in ``mutation_weights``."""
     CROSSOVER_GENES: ClassVar[Mapping[str, str]] = {
         "shared_sidewalk": "route", "walker_type": "walker_type", "speed_profile": "speed_profile",
         "walk_style": "speed_profile", "start_time": "start_t",
     }
+    """Map each crossover operator to the pedestrian gene it changes."""
     MUTATION_GENES: ClassVar[Mapping[str, str]] = {
         "shift": "route", "redraw": "route", "kind": "route", "count": "route", "turn_back": "route",
         "walker_type": "walker_type", "speed": "speed_profile", "speed_point": "speed_profile",
         "stop": "speed_profile", "walk_style": "speed_profile", "start_t": "start_t",
     }
+    """Map each mutation operator to the pedestrian gene it changes."""
 
     min_length: float = 10.0
+    """Shortest accepted replay path length, in metres."""
     max_length: float = 200.0
+    """Longest accepted replay path length, in metres."""
     crossover_weights: Mapping[str, float] = field(default_factory=lambda: {
         "shared_sidewalk": 1.0, "walker_type": 1.0, "speed_profile": 1.0, "walk_style": 1.0, "start_time": 1.0,
     })
+    """Relative selection weights of crossover operators within each selected gene."""
     mutation_weights: Mapping[str, float] = field(default_factory=lambda: {
         "shift": 3.0, "redraw": 2.0, "kind": 1.0, "count": 1.0, "turn_back": 1.0, "walker_type": 1.0, "speed": 2.0,
         "speed_point": 1.0, "stop": 1.0, "walk_style": 1.0, "start_t": 1.0,
     })
+    """Relative selection weights of mutation operators; zero disables an operator."""
     crossover_rates: Mapping[str, float] = field(default_factory=lambda: dict.fromkeys(GENES, 0.5))
+    """Independent crossover probability per gene; missing genes are disabled."""
     mutation_rates: Mapping[str, float] = field(default_factory=lambda: dict.fromkeys(GENES, 0.3))
+    """Independent mutation probability per gene; missing genes are disabled."""
     walker_type_weights: Mapping[str, float] = field(default_factory=lambda: dict(WALKER_MIX))
+    """Walker-type composition used for weighted type sampling."""
     kind_weights: Mapping[str, float] = field(default_factory=lambda: dict(EXCURSION_MIX))
+    """Excursion-kind weights used for kind mutation and added excursions."""
     count_weights: Mapping[int, float] = field(default_factory=lambda: dict(EXCURSION_COUNT_MIX))
+    """Target excursion-count distribution maintained by count mutation."""
     sigma_s: float = 2.0
+    """Standard deviation of walk endpoint and speed-point position steps, in metres."""
     sigma_speed: float = 0.2
+    """Standard deviation of target speed steps, in m/s."""
     min_speed: float = 0.5
+    """Lowest nonzero target speed drawn or stepped to, in m/s."""
     max_dwell: float = 20.0
+    """Longest stop drawn or stepped to, in seconds."""
     sigma_curb: float = 0.5
+    """Standard deviation of excursion entry or exit steps along the sidewalk, in metres."""
     sigma_turn_back: float = 1.0
+    """Standard deviation of turning-point steps, in metres."""
     turn_back_probability: float = 0.05
+    """Probability that turn-back redraw produces a turning point rather than none."""
     redraw_reach: float = 10.0
+    """Maximum distance along the sidewalk from the old entry to a redrawn excursion entry, in metres."""
     max_link: float = 40.0
+    """Maximum distance along the sidewalk from the walk end to an added excursion entry, in metres."""
     max_approach: float = 30.0
+    """Maximum distance along the sidewalk from an entry or arrival to a sampled endpoint, in metres."""
 
     def __post_init__(self) -> None:
         """

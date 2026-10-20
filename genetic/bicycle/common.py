@@ -112,23 +112,35 @@ class BicycleOperatorConfig(ReplayOperatorConfig):
     """Map each mutation operator to the bicycle gene it changes."""
 
     min_length: float = 30.0
+    """Shortest accepted replay path length, in metres."""
     max_length: float = 300.0
+    """Longest accepted replay path length and lane-path search distance, in metres."""
     crossover_weights: Mapping[str, float] = field(default_factory=lambda: {
         "shared_lane": 3.0, "bridge": 2.0, "turn_dwell": 1.0, "rider_type": 1.0, "speed_profile": 1.0,
         "drive_style": 1.0, "start_time": 1.0,
     })
+    """Relative selection weights of crossover operators within each selected gene."""
     mutation_weights: Mapping[str, float] = field(default_factory=lambda: {
         "reroute": 3.0, "extend_or_truncate": 2.0, "s": 2.0, "turn_dwell": 1.0, "rider_type": 1.0, "speed": 2.0,
         "speed_point": 1.0, "stop": 0.0, "drive_style": 1.0, "start_t": 1.0,
     })
+    """Relative selection weights of mutation operators; zero disables an operator."""
     rider_type_weights: Mapping[str, float] = field(default_factory=lambda: dict(RIDER_MIX))
+    """Rider-type composition used for weighted type sampling."""
     crossover_rates: Mapping[str, float] = field(default_factory=lambda: dict.fromkeys(GENES, 0.5))
+    """Independent crossover probability per gene."""
     mutation_rates: Mapping[str, float] = field(default_factory=lambda: dict.fromkeys(GENES, 0.3))
+    """Independent mutation probability per gene."""
     min_speed: float = 1.0
+    """Lowest nonzero target speed drawn or stepped to, in m/s."""
     sigma_turn_dwell: float = 3.0
+    """Standard deviation of turn wait steps, in seconds."""
     max_turn_dwell: float = 30.0
+    """Longest turn wait drawn or stepped to, in seconds."""
     keep_start_kind: bool = True
+    """Whether route variation preserves the parent's start-lane kind: bike lane or road."""
     bridge_within_parents: bool = True
+    """Whether bridge crossover constrains child length to the widened parental range."""
 
     def __post_init__(self) -> None:
         """
