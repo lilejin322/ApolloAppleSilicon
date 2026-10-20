@@ -41,6 +41,8 @@ from ..map import MapService
 from ..map.geometry import curve_to_line, normalize_angle, polygon_to_shape
 from ..message.descriptor import DescriptorBundle
 from .routing import InvalidRoute, junction_lanes, offset_line
+from typing import Dict, FrozenSet, List, Mapping, Tuple
+from google.protobuf.message import Message
 
 SIDEWALK_OFFSET = 1.5
 """Metres from the curb (the road surface's edge) to the line walkers follow
@@ -130,7 +132,9 @@ _NETWORKS: "weakref.WeakKeyDictionary[MapService, WalkNetwork]" = weakref.WeakKe
 
 
 class ExcursionKind(Enum):
-    """How a walker leaves the sidewalk."""
+    """
+    How a walker leaves the sidewalk.
+    """
 
     CROSSWALK = "CROSSWALK"
     NEAR_CROSSWALK = "NEAR_CROSSWALK"
@@ -149,19 +153,42 @@ class CurbPoint:
     """
 
     sidewalk: str
+    """A sidewalk ring of the walk network."""
     s: float
+    """Metres along the ring from its start, in ``[0, ring length)``."""
 
     def __post_init__(self) -> None:
+        """
+        Validate the field values and consistency of the constructed object.
+
+        :returns: ``None`` if validation succeeds.
+        :rtype: None
+        :raises ValueError: If input fields or bounds violate the validation conditions of this operation.
+        """
         if not self.sidewalk:
             raise ValueError("a curb point needs a sidewalk")
         if not (isfinite(self.s) and self.s >= 0):
             raise ValueError("curb point s must be finite and nonnegative")
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> Dict:
+        """
+        Serialize the sidewalk ID and position to a JSON-compatible mapping.
+
+        :returns: A new JSON-compatible mapping of the object fields.
+        :rtype: Dict
+        """
         return {"sidewalk": self.sidewalk, "s": self.s}
 
     @classmethod
-    def from_dict(cls, data: dict) -> "CurbPoint":
+    def from_dict(cls, data: Dict) -> "CurbPoint":
+        """
+        Reconstruct a sidewalk position from its serialized mapping.
+
+        :param Dict data: Serialized mapping previously produced by ``to_dict``.
+        :returns: The reconstructed object.
+        :rtype: CurbPoint
+        :raises KeyError: If a required serialized field or map identifier is absent.
+        """
         return cls(data["sidewalk"], data["s"])
 
 
@@ -171,36 +198,60 @@ class Crossing:
     A marked crossing: crosswalk polygons joined end to end, from sidewalk to sidewalk.
 
     :param str crossing_id: Its crosswalk IDs joined by ``+``.
-    :param tuple[str, ...] crosswalks: Its crosswalk IDs, sorted.
+    :param Tuple[str, ...] crosswalks: Its crosswalk IDs, sorted.
     :param Polygon polygon: The union of its crosswalk polygons.
     :param LineString axis: From the first landing to the second, on the sidewalks.
     :param float width: Metres, the narrowest of its polygons.
-    :param tuple landings: Where it meets the sidewalks, at the axis ends.
+    :param Tuple landings: Where it meets the sidewalks, at the axis ends.
     :param str | None junction: The junction it belongs to, if any.
     """
 
     crossing_id: str
-    crosswalks: tuple[str, ...]
+    """Its crosswalk IDs joined by ``+``."""
+    crosswalks: Tuple[str, ...]
+    """Its crosswalk IDs, sorted."""
     polygon: Polygon
+    """The union of its crosswalk polygons."""
     axis: LineString
+    """From the first landing to the second, on the sidewalks."""
     width: float
-    landings: tuple[CurbPoint, CurbPoint]
+    """Metres, the narrowest of its polygons."""
+    landings: Tuple[CurbPoint, CurbPoint]
+    """Where it meets the sidewalks, at the axis ends."""
     junction: str | None
+    """The junction it belongs to, if any."""
 
     @property
-    def direction(self) -> tuple[float, float]:
-        """Unit vector along the axis, from the first landing to the second."""
+    def direction(self) -> Tuple[float, float]:
+        """
+        Unit vector along the axis, from the first landing to the second.
+
+        :returns: The direction values described above.
+        :rtype: Tuple[float, float]
+        """
         (x0, y0), (x1, y1) = self.axis.coords[0], self.axis.coords[-1]
         length = hypot(x1 - x0, y1 - y0)
         return (x1 - x0) / length, (y1 - y0) / length
 
     def lateral(self, point: Point) -> float:
-        """Signed metres of ``point`` left of the axis."""
+        """
+        Signed metres of ``point`` left of the axis.
+
+        :param Point point: Map point or speed point used by this operation.
+        :returns: The computed distance, duration, or scalar value described above.
+        :rtype: float
+        """
         (x0, y0), (ux, uy) = self.axis.coords[0], self.direction
         return ux * (point.y - y0) - uy * (point.x - x0)
 
     def along(self, point: Point) -> float:
-        """Metres of ``point``'s projection along the axis from the first landing."""
+        """
+        Metres of ``point``'s projection along the axis from the first landing.
+
+        :param Point point: Map point or speed point used by this operation.
+        :returns: The computed distance, duration, or scalar value described above.
+        :rtype: float
+        """
         (x0, y0), (ux, uy) = self.axis.coords[0], self.direction
         return ux * (point.x - x0) + uy * (point.y - y0)
 
@@ -218,25 +269,55 @@ class Excursion:
     """
 
     kind: ExcursionKind
+    """How the walker leaves the sidewalk; the network checks it."""
     entry: CurbPoint
+    """Where the walker leaves the sidewalk."""
     exit: CurbPoint
+    """Where it returns; on the same sidewalk for ``ROADSIDE``."""
     turn_back: float | None = None
+    """Metres from ``entry`` along the excursion where the walker stops, turns round and walks back to ``entry``; None to carry on."""
 
     def __post_init__(self) -> None:
+        """
+        Validate the field values and consistency of the constructed object.
+
+        :returns: ``None`` if validation succeeds.
+        :rtype: None
+        :raises ValueError: If input fields or bounds violate the validation conditions of this operation.
+        """
         if self.turn_back is not None and not (isfinite(self.turn_back) and self.turn_back > 0):
             raise ValueError("turn_back must be finite and positive, or None")
 
     @property
     def arrival(self) -> CurbPoint:
-        """Where the walker is back on a sidewalk: the entry after a turn back, else the exit."""
+        """
+        Where the walker is back on a sidewalk: the entry after a turn back, else the exit.
+
+        :returns: The entry after a turn back, otherwise the excursion exit.
+        :rtype: CurbPoint
+        """
         return self.entry if self.turn_back is not None else self.exit
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> Dict:
+        """
+        Serialize an excursion kind, endpoints, and optional turning point.
+
+        :returns: A new JSON-compatible mapping of the object fields.
+        :rtype: Dict
+        """
         return {"kind": self.kind.name, "entry": self.entry.to_dict(), "exit": self.exit.to_dict(),
                 "turn_back": self.turn_back}
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Excursion":
+    def from_dict(cls, data: Dict) -> "Excursion":
+        """
+        Reconstruct an excursion from its serialized mapping.
+
+        :param Dict data: Serialized mapping previously produced by ``to_dict``.
+        :returns: The reconstructed object.
+        :rtype: Excursion
+        :raises KeyError: If a required serialized field or map identifier is absent.
+        """
         return cls(ExcursionKind[data["kind"]], CurbPoint.from_dict(data["entry"]), CurbPoint.from_dict(data["exit"]),
                    data.get("turn_back"))
 
@@ -249,50 +330,84 @@ class WalkRoute:
     keeps to one sidewalk the shorter way round.
 
     :param CurbPoint start: Where the walk starts.
-    :param tuple[Excursion, ...] excursions: Up to ``MAX_EXCURSIONS``; only the last may turn back.
+    :param Tuple[Excursion, ...] excursions: Up to ``MAX_EXCURSIONS``; only the last may turn back.
     :param CurbPoint end: Where the walk ends, on the last arrival's sidewalk.
     """
 
     start: CurbPoint
-    excursions: tuple[Excursion, ...]
+    """Where the walk starts."""
+    excursions: Tuple[Excursion, ...]
+    """Up to ``MAX_EXCURSIONS``; only the last may turn back."""
     end: CurbPoint
+    """Where the walk ends, on the last arrival's sidewalk."""
 
     def __post_init__(self) -> None:
+        """
+        Validate the field values and consistency of the constructed object.
+
+        :returns: ``None`` if validation succeeds.
+        :rtype: None
+        :raises ValueError: If input fields or bounds violate the validation conditions of this operation.
+        """
         if len(self.excursions) > MAX_EXCURSIONS:
             raise ValueError(f"a walk has at most {MAX_EXCURSIONS} excursions")
         if any(excursion.turn_back is not None for excursion in self.excursions[:-1]):
             raise ValueError("only the last excursion may turn back")
 
     @property
-    def lanes(self) -> tuple[str, ...]:
+    def lanes(self) -> Tuple[str, ...]:
         """
         The walk's elements in walking order: ``w<i>`` the sidewalk before
         excursion ``i`` (``w<n>`` after the last), ``x<i>`` the excursion out,
         ``x<i>b`` its way back after a turn back. Speed points name them.
 
-        :rtype: tuple[str, ...]
+        :rtype: Tuple[str, ...]
+        :returns: Element IDs in walking order, including outbound and return excursion elements.
         """
         names = []
         for index, excursion in enumerate(self.excursions):
             names += [f"w{index}", f"x{index}"] + ([f"x{index}b"] if excursion.turn_back is not None else [])
         return tuple(names + [f"w{len(self.excursions)}"])
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> Dict:
+        """
+        Serialize the walk endpoints and ordered excursions.
+
+        :returns: A new JSON-compatible mapping of the object fields.
+        :rtype: Dict
+        """
         return {"start": self.start.to_dict(), "excursions": [excursion.to_dict() for excursion in self.excursions],
                 "end": self.end.to_dict()}
 
     @classmethod
-    def from_dict(cls, data: dict) -> "WalkRoute":
+    def from_dict(cls, data: Dict) -> "WalkRoute":
+        """
+        Reconstruct a walk from its serialized mapping.
+
+        :param Dict data: Serialized mapping previously produced by ``to_dict``.
+        :returns: The reconstructed object.
+        :rtype: WalkRoute
+        :raises KeyError: If a required serialized field or map identifier is absent.
+        """
         return cls(CurbPoint.from_dict(data["start"]), tuple(Excursion.from_dict(item) for item in data["excursions"]),
                    CurbPoint.from_dict(data["end"]))
 
 
 class WalkElement(NamedTuple):
-    """One element of a walk: its name (``WalkRoute.lanes``), raw vertices and length."""
+    """
+    One element of a walk: its name (``WalkRoute.lanes``), raw vertices and length.
+
+    :param str name: Element or object name.
+    :param Tuple[Tuple[float, float], ...] coords: Ordered map-coordinate vertices.
+    :param float length: Length in metres.
+    """
 
     name: str
-    coords: tuple[tuple[float, float], ...]
+    """Element or object name."""
+    coords: Tuple[Tuple[float, float], ...]
+    """Ordered map-coordinate vertices."""
     length: float
+    """Length in metres."""
 
 
 class WalkFrame:
@@ -302,22 +417,48 @@ class WalkFrame:
     """
 
     def __init__(self, elements: Sequence[WalkElement]) -> None:
+        """
+        Build element lookup and cumulative walked distances.
+
+        :param Sequence[WalkElement] elements: Ordered named walk elements with their geometry and lengths.
+        :returns: ``None``.
+        :rtype: None
+        """
         self.elements = tuple(elements)
         self.index = {element.name: index for index, element in enumerate(self.elements)}
         self.offsets = list(np.r_[0.0, np.cumsum([element.length for element in self.elements])][:-1])
         self.total = float(sum(element.length for element in self.elements))
 
-    def window(self, name: str) -> tuple[float, float]:
-        """The stretch [0, length] of an element."""
+    def window(self, name: str) -> Tuple[float, float]:
+        """
+        The stretch [0, length] of an element.
+
+        :param str name: Element or agent name used for lookup and diagnostics.
+        :returns: The start and end position of the driven lane or walk element, in metres.
+        :rtype: Tuple[float, float]
+        """
         return 0.0, self.elements[self.index[name]].length
 
     def distance(self, name: str, s: float) -> float:
-        """Walked distance to ``s`` on an element, clamped to it."""
+        """
+        Walked distance to ``s`` on an element, clamped to it.
+
+        :param str name: Element or agent name used for lookup and diagnostics.
+        :param float s: Position along the lane, element, or path, in metres.
+        :returns: Travelled distance to the local position, in metres, clamped to its driven window.
+        :rtype: float
+        """
         index = self.index[name]
         return self.offsets[index] + min(max(s, 0.0), self.elements[index].length)
 
-    def at(self, distance: float) -> tuple[str, float]:
-        """The (element, s) at a walked distance; on the later element at a boundary."""
+    def at(self, distance: float) -> Tuple[str, float]:
+        """
+        The (element, s) at a walked distance; on the later element at a boundary.
+
+        :param float distance: Travelled distance, in metres.
+        :returns: The lane or element ID and its local position, in metres.
+        :rtype: Tuple[str, float]
+        """
         distance = min(max(distance, 0.0), self.total)
         last = max((index for index, element in enumerate(self.elements) if element.length > 0), default=0)
         for index, element in enumerate(self.elements):
@@ -330,6 +471,9 @@ class WalkFrame:
         Check that every speed point lies on its element.
 
         :raises InvalidRoute: For the first point outside.
+        :param Sequence profile: Ordered target-speed points; positions are lane or walk-element metres.
+        :returns: ``None`` if all speed points lie within their driven element windows.
+        :rtype: None
         """
         for point in profile:
             low, high = self.window(point.lane_id)
@@ -339,22 +483,49 @@ class WalkFrame:
 
 
 def _undirected_angle(a: float, b: float) -> float:
-    """Angle between two directions as lines, in [0, pi / 2]."""
+    """
+    Angle between two directions as lines, in [0, pi / 2].
+
+    :param float a: First direction, in radians.
+    :param float b: Second direction, in radians.
+    :returns: The computed distance, duration, or scalar value described above.
+    :rtype: float
+    """
     turn = abs(normalize_angle(a - b))
     return min(turn, pi - turn)
 
 
 def _heading(line: LineString) -> float:
+    """
+    Compute the heading from the first to the last vertex of a line.
+
+    :param LineString line: Line geometry in map metres.
+    :returns: Heading of the line endpoint chord, in radians.
+    :rtype: float
+    """
     (x0, y0), (x1, y1) = line.coords[0], line.coords[-1]
     return atan2(y1 - y0, x1 - x0)
 
 
-def _parts(geometry: BaseGeometry) -> list:
+def _parts(geometry: BaseGeometry) -> List:
+    """
+    Return nonempty geometry components as a list.
+
+    :param BaseGeometry geometry: Geometry to query or decompose.
+    :returns: The nonempty geometry components, or an empty list for an empty geometry.
+    :rtype: List
+    """
     return [] if geometry.is_empty else list(getattr(geometry, "geoms", [geometry]))
 
 
-def _polygons(table) -> dict[str, Polygon]:
-    """The valid polygons of a junction or crosswalk table, by ID; objects without a polygon are left out."""
+def _polygons(table: Mapping[str, Message]) -> Dict[str, Polygon]:
+    """
+    The valid polygons of a junction or crosswalk table, by ID; objects without a polygon are left out.
+
+    :param Mapping[str, Message] table: Map objects keyed by ID, each providing a polygon.
+    :returns: Valid polygonal geometries keyed by map object ID.
+    :rtype: Dict[str, Polygon]
+    """
     shapes = {}
     for key, item in table.items():
         shape = polygon_to_shape(item.polygon)
@@ -363,8 +534,14 @@ def _polygons(table) -> dict[str, Polygon]:
     return shapes
 
 
-def _lane_polygons(service: MapService) -> list[Polygon]:
-    """Lane areas between their boundary curves; lanes without both curves are skipped."""
+def _lane_polygons(service: MapService) -> List[Polygon]:
+    """
+    Lane areas between their boundary curves; lanes without both curves are skipped.
+
+    :param MapService service: Loaded map service supplying geometry, descriptors, and spatial indexes.
+    :returns: Lane areas with usable boundary geometry.
+    :rtype: List[Polygon]
+    """
     polygons = []
     for lane in service.lane_table.values():
         try:
@@ -377,12 +554,26 @@ def _lane_polygons(service: MapService) -> list[Polygon]:
     return polygons
 
 
-def _min_rect_axis(polygon: Polygon) -> tuple[LineString, float]:
-    """The long axis of the minimum rotated rectangle, through its middle, and the short side."""
+def _min_rect_axis(polygon: Polygon) -> Tuple[LineString, float]:
+    """
+    The long axis of the minimum rotated rectangle, through its middle, and the short side.
+
+    :param Polygon polygon: Polygon whose geometry is inspected.
+    :returns: The long rectangle axis and its short-side width, in metres.
+    :rtype: Tuple[LineString, float]
+    """
     corners = list(polygon.minimum_rotated_rectangle.exterior.coords)[:4]
     first, second = hypot(*np.subtract(corners[1], corners[0])), hypot(*np.subtract(corners[2], corners[1]))
 
-    def middle(a, b):
+    def middle(a: Sequence[float], b: Sequence[float]) -> Tuple[float, float]:
+        """
+        Return the coordinate-wise midpoint of two points.
+
+        :param Sequence[float] a: First position, coordinate, or direction being compared.
+        :param Sequence[float] b: Second position, coordinate, or direction being compared.
+        :returns: The middle values described above.
+        :rtype: Tuple[float, float]
+        """
         return (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
 
     if first >= second:
@@ -390,8 +581,14 @@ def _min_rect_axis(polygon: Polygon) -> tuple[LineString, float]:
     return LineString([middle(corners[0], corners[1]), middle(corners[2], corners[3])]), first
 
 
-def _ring_line(coords: list) -> LineString:
-    """A closed ring as a counter-clockwise line starting at its lowest vertex."""
+def _ring_line(coords: List) -> LineString:
+    """
+    A closed ring as a counter-clockwise line starting at its lowest vertex.
+
+    :param List coords: Ordered map coordinates in metres.
+    :returns: A closed ring as a counter-clockwise line starting at its lowest vertex.
+    :rtype: LineString
+    """
     points = [tuple(round(value, 6) for value in point[:2]) for point in coords[:-1]]
     if shapely.LinearRing(points).is_ccw is False:
         points.reverse()
@@ -406,14 +603,22 @@ class WalkNetwork:
 
     Build it with ``walk_network(service)``, which caches one per map.
 
-    :ivar dict[str, LineString] sidewalks: Closed rings by ID, counter-clockwise.
-    :ivar tuple[Polygon, ...] refuges: Medians and islands narrower than ``REFUGE_WIDTH``.
-    :ivar dict[str, Crossing] crossings: Marked crossings by ID.
-    :ivar dict[str, Polygon] junctions: Junction polygons by ID.
+    :ivar Dict[str, LineString] sidewalks: Closed rings by ID, counter-clockwise.
+    :ivar Tuple[Polygon, ...] refuges: Medians and islands narrower than ``REFUGE_WIDTH``.
+    :ivar Dict[str, Crossing] crossings: Marked crossings by ID.
+    :ivar Dict[str, Polygon] junctions: Junction polygons by ID.
     :ivar int unconnected_crossings: Crosswalk chains without a sidewalk at both ends.
     """
 
     def __init__(self, service: MapService) -> None:
+        """
+        Derive sidewalks, crossings, refuges, and spatial indexes from a loaded map.
+
+        :param MapService service: Loaded map service supplying geometry, descriptors, and spatial indexes.
+        :returns: ``None``.
+        :rtype: None
+        :raises RuntimeError: If required map data is unavailable or no valid candidate is found within the attempt limit.
+        """
         if service.routing_graph is None or service.lane_index is None:
             raise RuntimeError("WalkNetwork needs a map loaded with load_only=False")
         self.service = service
@@ -463,18 +668,23 @@ class WalkNetwork:
                                              for lane_id in self._road_lanes]) if self._road_lanes else np.zeros(0)
         self._ring_lengths = np.cumsum([self.sidewalks[key].length for key in self._sidewalk_ids]) \
             if self._sidewalk_ids else np.zeros(0)
-        self._diagonals: dict[str, list] = {}
-        self._checks: dict = {}
+        self._diagonals: Dict[str, List] = {}
+        self._checks: Dict = {}
         self.edge_gates = self._edge_gates()
         self._gate_tree = STRtree(list(self.edge_gates))
 
     # ----- construction -----
 
-    def _edge_gates(self) -> tuple[LineString, ...]:
-        """Lines continuing every lane that ends at the edge of the map (``EDGE_GATE_LENGTH``): without a
+    def _edge_gates(self) -> Tuple[LineString, ...]:
+        """
+        Lines continuing every lane that ends at the edge of the map (``EDGE_GATE_LENGTH``): without a
         successor (or predecessor), at the road surface's boundary and within ``EDGE_HULL_REACH`` of the
         surface's convex hull. Lanes that end inside the map (at a curb, a driveway, a junction's edge)
-        are not gates."""
+        are not gates.
+
+        :returns: The edge gates values described above.
+        :rtype: Tuple[LineString, ...]
+        """
         boundary = self.surface.boundary
         hull = self.surface.convex_hull.boundary
         gates = []
@@ -495,8 +705,17 @@ class WalkNetwork:
                                              b[1] + dy / norm * EDGE_GATE_LENGTH)]))
         return tuple(gates)
 
-    def _check_gates(self, name: str, coords: Sequence[tuple[float, float]], ends: bool = True) -> None:
-        """Reject a sidewalk stretch or roadside walk that goes round a road end at the map edge."""
+    def _check_gates(self, name: str, coords: Sequence[Tuple[float, float]], ends: bool = True) -> None:
+        """
+        Reject a sidewalk stretch or roadside walk that goes round a road end at the map edge.
+
+        :param str name: Element or agent name used for lookup and diagnostics.
+        :param Sequence[Tuple[float, float]] coords: Ordered map coordinates in metres.
+        :param bool ends: Whether to check only the geometry endpoints against map-edge gates.
+        :returns: ``None`` if the operation succeeds.
+        :rtype: None
+        :raises InvalidRoute: If route geometry, topology, point placement, or map constraints fail the checks performed here.
+        """
         if not self.edge_gates:
             return
         geometry = LineString(coords) if len(coords) > 1 else Point(coords[0])
@@ -510,8 +729,13 @@ class WalkNetwork:
                    for index in self._gate_tree.query(point.buffer(EDGE_GATE_CLEARANCE))):
                 raise InvalidRoute(f"{name} starts or ends on a road end at the map edge")
 
-    def _rings(self) -> list[LineString]:
-        """Candidate sidewalk rings: the surface's boundary offset outward, outside refuges."""
+    def _rings(self) -> List[LineString]:
+        """
+        Candidate sidewalk rings: the surface's boundary offset outward, outside refuges.
+
+        :returns: The rings values described above.
+        :rtype: List[LineString]
+        """
         grown = self.surface.buffer(SIDEWALK_OFFSET)
         lines = []
         for part in _parts(grown):
@@ -526,13 +750,26 @@ class WalkNetwork:
                 lines.append(line)
         return lines
 
-    def _crossings(self, crosswalks: dict[str, Polygon]) -> tuple[dict[str, Crossing], int]:
-        """Join crosswalks end to end and land each chain on a sidewalk at both ends."""
+    def _crossings(self, crosswalks: Dict[str, Polygon]) -> Tuple[Dict[str, Crossing], int]:
+        """
+        Join crosswalks end to end and land each chain on a sidewalk at both ends.
+
+        :param Dict[str, Polygon] crosswalks: Crosswalk polygons keyed by map ID.
+        :returns: The crossings values described above.
+        :rtype: Tuple[Dict[str, Crossing], int]
+        """
         ids = sorted(crosswalks)
         axes = {key: _min_rect_axis(crosswalks[key]) for key in ids}
         parent = {key: key for key in ids}
 
         def root(key: str) -> str:
+            """
+            Find and compress the representative of a crosswalk chain.
+
+            :param str key: Lookup key whose representative is requested.
+            :returns: The requested string representation.
+            :rtype: str
+            """
             while parent[key] != key:
                 key = parent[key]
             return key
@@ -547,7 +784,7 @@ class WalkNetwork:
                 # Misalignment where they meet: each facing end's offset from the other's axis line.
                 if gap <= CHAIN_GAP and max(_sideways(a, q), _sideways(b, p)) <= CHAIN_OFFSET:
                     parent[root(first)] = root(second)
-        chains: dict[str, list[str]] = {}
+        chains: Dict[str, List[str]] = {}
         for key in ids:
             chains.setdefault(root(key), []).append(key)
         result, unconnected = {}, 0
@@ -577,11 +814,16 @@ class WalkNetwork:
                                            min(axes[key][1] for key in members), (first, second), junction)
         return result, unconnected
 
-    def _landing(self, end: Point, outward: tuple[float, float]) -> CurbPoint | None:
+    def _landing(self, end: Point, outward: Tuple[float, float]) -> CurbPoint | None:
         """
         Where the axis, extended outward from ``end``, meets the nearest
         sidewalk; at a corner, where the axis runs past the sidewalk's bend,
         the sidewalk point nearest the end within ``LANDING_SNAP``.
+
+        :param Point end: Ending lane, endpoint, or path position for this operation.
+        :param Tuple[float, float] outward: Unit direction extending a crossing axis toward a sidewalk.
+        :returns: The landing values described above.
+        :rtype: CurbPoint | None
         """
         ux, uy = outward
         probe = LineString([(end.x - LANDING_INWARD * ux, end.y - LANDING_INWARD * uy),
@@ -603,7 +845,12 @@ class WalkNetwork:
         return None if best is None else self.nearest(best[2], best[1])
 
     def _prune_sidewalks(self) -> None:
-        """Drop small rings that no crossing reaches."""
+        """
+        Drop small rings that no crossing reaches.
+
+        :returns: ``None`` if the operation succeeds.
+        :rtype: None
+        """
         reached = {landing.sidewalk for crossing in self.crossings.values() for landing in crossing.landings}
         keep = {key for key, line in self.sidewalks.items()
                 if key in reached or Polygon(line.coords).buffer(SIDEWALK_OFFSET).area >= MIN_BLOCK_AREA}
@@ -616,11 +863,22 @@ class WalkNetwork:
     def ring_length(self, sidewalk: str) -> float:
         """
         :raises KeyError: If the network has no such sidewalk.
+
+        :param str sidewalk: Sidewalk ring ID; ``None`` allows selection among all rings.
+        :returns: The computed distance, duration, or scalar value described above.
+        :rtype: float
         """
         return self.sidewalks[sidewalk].length
 
     def wrapped(self, sidewalk: str, s: float) -> CurbPoint:
-        """The curb point at ``s`` metres along a ring, wrapped into ``[0, length)``."""
+        """
+        The curb point at ``s`` metres along a ring, wrapped into ``[0, length)``.
+
+        :param str sidewalk: Sidewalk ring ID; ``None`` allows selection among all rings.
+        :param float s: Position along the lane, element, or path, in metres.
+        :returns: The curb point at ``s`` metres along a ring, wrapped into ``[0, length)``.
+        :rtype: CurbPoint
+        """
         return CurbPoint(sidewalk, s % self.ring_length(sidewalk))
 
     def point(self, curb: CurbPoint) -> Point:
@@ -628,6 +886,9 @@ class WalkNetwork:
         The map point of a curb point.
 
         :raises InvalidRoute: If the sidewalk is unknown or ``s`` is outside the ring.
+        :param CurbPoint curb: Position on a sidewalk ring.
+        :returns: The map position as a Shapely point.
+        :rtype: Point
         """
         line = self.sidewalks.get(curb.sidewalk)
         if line is None:
@@ -637,7 +898,14 @@ class WalkNetwork:
         return line.interpolate(curb.s)
 
     def nearest(self, point: Point, sidewalk: str | None = None) -> CurbPoint:
-        """The curb point nearest ``point``, on ``sidewalk`` if given."""
+        """
+        The curb point nearest ``point``, on ``sidewalk`` if given.
+
+        :param Point point: Map point or speed point used by this operation.
+        :param str | None sidewalk: Sidewalk ring ID; ``None`` allows selection among all rings.
+        :returns: The curb point nearest ``point``, on ``sidewalk`` if given.
+        :rtype: CurbPoint
+        """
         if sidewalk is None:
             index = self._sidewalk_tree.query_nearest(point)
             sidewalk = self._sidewalk_ids[int(min(index))]
@@ -645,19 +913,30 @@ class WalkNetwork:
         return CurbPoint(sidewalk, line.project(point) % line.length)
 
     def gap(self, a: CurbPoint, b: CurbPoint) -> float:
-        """Metres along the sidewalk between two points the shorter way; infinite on different rings."""
+        """
+        Metres along the sidewalk between two points the shorter way; infinite on different rings.
+
+        :param CurbPoint a: First position, coordinate, or direction being compared.
+        :param CurbPoint b: Second position, coordinate, or direction being compared.
+        :returns: The computed distance, duration, or scalar value described above.
+        :rtype: float
+        """
         if a.sidewalk != b.sidewalk:
             return float("inf")
         length = self.ring_length(a.sidewalk)
         forward = (b.s - a.s) % length
         return min(forward, length - forward)
 
-    def along(self, a: CurbPoint, b: CurbPoint) -> list[tuple[float, float]]:
+    def along(self, a: CurbPoint, b: CurbPoint) -> List[Tuple[float, float]]:
         """
         The sidewalk's vertices from ``a`` to ``b`` the shorter way round,
         ``a`` and ``b`` included; one point if they coincide.
 
         :raises InvalidRoute: If they lie on different sidewalks.
+        :param CurbPoint a: First position, coordinate, or direction being compared.
+        :param CurbPoint b: Second position, coordinate, or direction being compared.
+        :returns: The sidewalk's vertices from ``a`` to ``b`` the shorter way round, ``a`` and ``b`` included; one point if they coincide.
+        :rtype: List[Tuple[float, float]]
         """
         if a.sidewalk != b.sidewalk:
             raise InvalidRoute(f"sidewalks {a.sidewalk!r} and {b.sidewalk!r} are not joined")
@@ -673,26 +952,50 @@ class WalkNetwork:
     # ----- road queries -----
 
     def road_near(self, geometry: BaseGeometry, reach: float = 0.0) -> BaseGeometry:
-        """What a crossing may pass over around ``geometry`` (the road, refuges and
-        crosswalks), from the pieces within ``reach``."""
+        """
+        What a crossing may pass over around ``geometry`` (the road, refuges and
+        crosswalks), from the pieces within ``reach``.
+
+        :param BaseGeometry geometry: Geometry to query or decompose.
+        :param float reach: Maximum query or sampling distance, in metres.
+        :returns: The road near values described above.
+        :rtype: BaseGeometry
+        """
         return _near(self._road_tree, self._road_pieces, geometry, reach)
 
     def surface_near(self, geometry: BaseGeometry, reach: float = 0.0) -> BaseGeometry:
-        """The road surface around ``geometry``, from the lane pieces within ``reach``."""
+        """
+        The road surface around ``geometry``, from the lane pieces within ``reach``.
+
+        :param BaseGeometry geometry: Geometry to query or decompose.
+        :param float reach: Maximum query or sampling distance, in metres.
+        :returns: The road surface around ``geometry``, from the lane pieces within ``reach``.
+        :rtype: BaseGeometry
+        """
         return _near(self._surface_tree, self._surface_pieces, geometry, reach)
 
     def curb_distance(self, line: LineString) -> float:
-        """Metres along ``line`` from its start to where it first enters the road; its length if never."""
+        """
+        Metres along ``line`` from its start to where it first enters the road; its length if never.
+
+        :param LineString line: Line geometry in map metres.
+        :returns: The computed distance, duration, or scalar value described above.
+        :rtype: float
+        """
         road = self.surface_near(line)
         entered = [min(line.project(Point(xy)) for xy in part.coords) for part in _parts(line.intersection(road))
                    if part.length > 0]
         return min(entered) if entered else line.length
 
-    def island_spans(self, line: LineString) -> list[tuple[float, float]]:
+    def island_spans(self, line: LineString) -> List[Tuple[float, float]]:
         """
         (start, end) metres along a crossing between two stretches of road:
         refuges, and medians and islands a crosswalk cuts through. A walker
         crossing in two stages waits there.
+
+        :param LineString line: Line geometry in map metres.
+        :returns: The island spans values described above.
+        :rtype: List[Tuple[float, float]]
         """
         spans = []
         for part in _parts(line.difference(self.surface_near(line))):
@@ -712,6 +1015,11 @@ class WalkNetwork:
         into the road, a walk ``ROADSIDE_OFFSET`` inside the curb, and a step back.
 
         :raises InvalidRoute: If a point is off the network or a roadside walk has no road beside it.
+        :param ExcursionKind kind: Traffic type name or excursion category selecting the applicable rules or prior.
+        :param CurbPoint entry: Excursion entry position on a sidewalk.
+        :param CurbPoint exit: Excursion exit position on a sidewalk.
+        :returns: The path of an excursion: a straight crossing, or for ``ROADSIDE`` a step into the road, a walk ``ROADSIDE_OFFSET`` inside the curb, and a step back.
+        :rtype: LineString
         """
         a, b = self.point(entry), self.point(exit)
         if kind is not ExcursionKind.ROADSIDE:
@@ -736,6 +1044,11 @@ class WalkNetwork:
         is an excursion of ``kind`` (``docs/pedestrian-agents.md``).
 
         :raises InvalidRoute: With the reason it is not.
+        :param ExcursionKind kind: Traffic type name or excursion category selecting the applicable rules or prior.
+        :param CurbPoint entry: Excursion entry position on a sidewalk.
+        :param CurbPoint exit: Excursion exit position on a sidewalk.
+        :returns: ``None`` if the excursion satisfies its kind-specific map constraints.
+        :rtype: None
         """
         key = (kind, entry, exit)
         if key not in self._checks:
@@ -751,6 +1064,16 @@ class WalkNetwork:
             raise InvalidRoute(self._checks[key])
 
     def _check_excursion(self, kind: ExcursionKind, entry: CurbPoint, exit: CurbPoint) -> None:
+        """
+        Validate the geometry and kind-specific constraints of one excursion.
+
+        :param ExcursionKind kind: Traffic type name or excursion category selecting the applicable rules or prior.
+        :param CurbPoint entry: Excursion entry position on a sidewalk.
+        :param CurbPoint exit: Excursion exit position on a sidewalk.
+        :returns: ``None`` if the operation succeeds.
+        :rtype: None
+        :raises InvalidRoute: If route geometry, topology, point placement, or map constraints fail the checks performed here.
+        """
         line = self.excursion_line(kind, entry, exit)
         if kind is ExcursionKind.ROADSIDE:
             self._check_roadside(entry, exit, line)
@@ -772,7 +1095,18 @@ class WalkNetwork:
         }[kind]
         check(entry, exit, line, on_road)
 
-    def _check_crosswalk(self, entry: CurbPoint, exit: CurbPoint, line: LineString, on_road) -> None:
+    def _check_crosswalk(self, entry: CurbPoint, exit: CurbPoint, line: LineString, on_road: BaseGeometry) -> None:
+        """
+        Require the crossing to connect matching landings and stay inside a marked crosswalk.
+
+        :param CurbPoint entry: Excursion entry position on a sidewalk.
+        :param CurbPoint exit: Excursion exit position on a sidewalk.
+        :param LineString line: Line geometry in map metres.
+        :param BaseGeometry on_road: Part of the crossing geometry lying on road or refuge surfaces.
+        :returns: ``None`` if the operation succeeds.
+        :rtype: None
+        :raises InvalidRoute: If route geometry, topology, point placement, or map constraints fail the checks performed here.
+        """
         a, b = self.point(entry), self.point(exit)
         for crossing in self._crossings_near(line, 0.0):
             for first, second in ((0, 1), (1, 0)):
@@ -786,7 +1120,18 @@ class WalkNetwork:
                     return
         raise InvalidRoute("the crossing does not run inside a crosswalk")
 
-    def _check_near_crosswalk(self, entry: CurbPoint, exit: CurbPoint, line: LineString, on_road) -> None:
+    def _check_near_crosswalk(self, entry: CurbPoint, exit: CurbPoint, line: LineString, on_road: BaseGeometry) -> None:
+        """
+        Require the crossing to run beside and roughly parallel to a marked crosswalk.
+
+        :param CurbPoint entry: Excursion entry position on a sidewalk.
+        :param CurbPoint exit: Excursion exit position on a sidewalk.
+        :param LineString line: Line geometry in map metres.
+        :param BaseGeometry on_road: Part of the crossing geometry lying on road or refuge surfaces.
+        :returns: ``None`` if the operation succeeds.
+        :rtype: None
+        :raises InvalidRoute: If route geometry, topology, point placement, or map constraints fail the checks performed here.
+        """
         middle = on_road.interpolate(0.5, normalized=True) if on_road.length else line.interpolate(0.5, normalized=True)
         for crossing in self._crossings_near(line, NEAR_RANGE[1] + 10):
             if _undirected_angle(_heading(line), _heading(crossing.axis)) > NEAR_ANGLE:
@@ -798,7 +1143,18 @@ class WalkNetwork:
                 return
         raise InvalidRoute("the crossing is not beside a crosswalk")
 
-    def _check_mid_block(self, entry: CurbPoint, exit: CurbPoint, line: LineString, on_road) -> None:
+    def _check_mid_block(self, entry: CurbPoint, exit: CurbPoint, line: LineString, on_road: BaseGeometry) -> None:
+        """
+        Require clearance from crosswalks and junctions and an approximately road-normal crossing.
+
+        :param CurbPoint entry: Excursion entry position on a sidewalk.
+        :param CurbPoint exit: Excursion exit position on a sidewalk.
+        :param LineString line: Line geometry in map metres.
+        :param BaseGeometry on_road: Part of the crossing geometry lying on road or refuge surfaces.
+        :returns: ``None`` if the operation succeeds.
+        :rtype: None
+        :raises InvalidRoute: If route geometry, topology, point placement, or map constraints fail the checks performed here.
+        """
         if len(self._crossing_tree.query(on_road, predicate="dwithin", distance=MID_BLOCK_CROSSWALK_CLEARANCE)):
             raise InvalidRoute(f"a mid-block crossing keeps more than {MID_BLOCK_CROSSWALK_CLEARANCE} m from crosswalks")
         if len(self._junction_tree.query(on_road, predicate="dwithin", distance=MID_BLOCK_JUNCTION_CLEARANCE)):
@@ -807,7 +1163,18 @@ class WalkNetwork:
         if _undirected_angle(_heading(line), heading) < pi / 2 - MID_BLOCK_ANGLE - 1e-9:
             raise InvalidRoute("a mid-block crossing keeps within 45 degrees of the road's normal")
 
-    def _check_diagonal(self, entry: CurbPoint, exit: CurbPoint, line: LineString, on_road) -> None:
+    def _check_diagonal(self, entry: CurbPoint, exit: CurbPoint, line: LineString, on_road: BaseGeometry) -> None:
+        """
+        Require a diagonal crossing through a junction with limited marked-crosswalk overlap.
+
+        :param CurbPoint entry: Excursion entry position on a sidewalk.
+        :param CurbPoint exit: Excursion exit position on a sidewalk.
+        :param LineString line: Line geometry in map metres.
+        :param BaseGeometry on_road: Part of the crossing geometry lying on road or refuge surfaces.
+        :returns: ``None`` if the operation succeeds.
+        :rtype: None
+        :raises InvalidRoute: If route geometry, topology, point placement, or map constraints fail the checks performed here.
+        """
         a, b = self.point(entry), self.point(exit)
         for index in self._junction_tree.query(on_road, predicate="intersects"):
             junction_id = self._junction_ids[int(index)]
@@ -826,6 +1193,16 @@ class WalkNetwork:
         raise InvalidRoute("the crossing does not cut diagonally through a junction")
 
     def _check_roadside(self, entry: CurbPoint, exit: CurbPoint, line: LineString) -> None:
+        """
+        Require a roadside walk to stay on the road and outside junctions within length bounds.
+
+        :param CurbPoint entry: Excursion entry position on a sidewalk.
+        :param CurbPoint exit: Excursion exit position on a sidewalk.
+        :param LineString line: Line geometry in map metres.
+        :returns: ``None`` if the operation succeeds.
+        :rtype: None
+        :raises InvalidRoute: If route geometry, topology, point placement, or map constraints fail the checks performed here.
+        """
         gap = self.gap(entry, exit)
         if not ROADSIDE_RANGE[0] <= gap <= ROADSIDE_RANGE[1]:
             raise InvalidRoute(f"a roadside walk runs {ROADSIDE_RANGE[0]}-{ROADSIDE_RANGE[1]} m along one sidewalk")
@@ -836,19 +1213,30 @@ class WalkNetwork:
         if len(self._junction_tree.query(inner, predicate="intersects")):
             raise InvalidRoute("a roadside walk stays out of junctions")
 
-    def _crossings_near(self, geometry: BaseGeometry, reach: float) -> list[Crossing]:
+    def _crossings_near(self, geometry: BaseGeometry, reach: float) -> List[Crossing]:
+        """
+        Find marked crossings near a geometry in stable spatial-index order.
+
+        :param BaseGeometry geometry: Geometry to query or decompose.
+        :param float reach: Maximum query or sampling distance, in metres.
+        :returns: The crossings near values described above.
+        :rtype: List[Crossing]
+        """
         found = self._crossing_tree.query(geometry, predicate="dwithin", distance=reach) if reach \
             else self._crossing_tree.query(geometry.buffer(LANDING_REACH), predicate="intersects")
         return [self.crossings[self._crossing_ids[int(index)]] for index in sorted(found)]
 
     # ----- walks -----
 
-    def elements(self, route: WalkRoute) -> tuple[WalkElement, ...]:
+    def elements(self, route: WalkRoute) -> Tuple[WalkElement, ...]:
         """
         The walk's elements with their raw geometry, in walking order.
 
         :raises InvalidRoute: If a point is off the network, two consecutive
             points lie on different sidewalks, or a turn back is out of range.
+        :param WalkRoute route: Route to inspect, validate, or convert.
+        :returns: The walk's elements with their raw geometry, in walking order.
+        :rtype: Tuple[WalkElement, ...]
         """
         key = ("elements", route)
         if key not in self._checks:
@@ -864,7 +1252,15 @@ class WalkNetwork:
             raise InvalidRoute(str(value))
         return value
 
-    def _elements(self, route: WalkRoute) -> tuple[WalkElement, ...]:
+    def _elements(self, route: WalkRoute) -> Tuple[WalkElement, ...]:
+        """
+        Construct ordered sidewalk and excursion elements, checking turn backs and map-edge gates.
+
+        :param WalkRoute route: Route to inspect, validate, or convert.
+        :returns: The elements values described above.
+        :rtype: Tuple[WalkElement, ...]
+        :raises InvalidRoute: If route geometry, topology, point placement, or map constraints fail the checks performed here.
+        """
         elements, here = [], route.start
         self.point(here)
         for index, excursion in enumerate(route.excursions):
@@ -888,6 +1284,15 @@ class WalkNetwork:
         return tuple(elements)
 
     def _sidewalk_element(self, name: str, a: CurbPoint, b: CurbPoint) -> WalkElement:
+        """
+        Construct a sidewalk element along the shorter ring arc, rejecting map-edge gates.
+
+        :param str name: Element or agent name used for lookup and diagnostics.
+        :param CurbPoint a: First position, coordinate, or direction being compared.
+        :param CurbPoint b: Second position, coordinate, or direction being compared.
+        :returns: The sidewalk element values described above.
+        :rtype: WalkElement
+        """
         self.point(b)
         coords = self.along(a, b)
         self._check_gates(name, coords)
@@ -899,6 +1304,9 @@ class WalkNetwork:
         sidewalk, every excursion of its kind, and turn backs within range.
 
         :raises InvalidRoute: With the first problem found.
+        :param WalkRoute route: Route to inspect, validate, or convert.
+        :returns: ``None`` if all applicable validation checks pass.
+        :rtype: None
         """
         for excursion in route.excursions:
             self.check_excursion(excursion.kind, excursion.entry, excursion.exit)
@@ -910,15 +1318,22 @@ class WalkNetwork:
         Distances along the walk's elements (``WalkFrame``).
 
         :raises InvalidRoute: As ``elements``.
+        :param WalkRoute route: Route to inspect, validate, or convert.
+        :returns: The frame values described above.
+        :rtype: WalkFrame
         """
         return WalkFrame(self.elements(route))
 
-    def length(self, route: WalkRoute, *, lane_change_s: tuple[float, ...] = ()) -> float:
+    def length(self, route: WalkRoute, *, lane_change_s: Tuple[float, ...] = ()) -> float:
         """
         Walked metres along the walk's raw elements; ``lane_change_s`` is ignored,
         so code shared with lane routes can measure walks.
 
         :raises InvalidRoute: As ``elements``.
+        :param WalkRoute route: Route to inspect, validate, or convert.
+        :param Tuple[float, ...] lane_change_s: Lane-change start positions on source lanes, in metres; ``None`` uses default placement.
+        :returns: Total driven or walked length, in metres.
+        :rtype: float
         """
         return self.frame(route).total
 
@@ -937,6 +1352,13 @@ class WalkNetwork:
         excursions runs ``min_walk`` to twice ``max_approach`` metres.
 
         :returns: A valid walk, or None if this attempt failed.
+        :param Random rng: Random number generator used for sampling and selection.
+        :param Sequence[ExcursionKind] kinds: Allowed connector kinds or ordered excursion kinds for this operation.
+        :param float max_link: Maximum sidewalk distance between connected excursions, in metres.
+        :param float max_approach: Maximum sidewalk distance from an endpoint to the adjacent excursion, in metres.
+        :param float turn_back_probability: Probability that the final excursion contains a turning point.
+        :param float min_walk: Minimum length of a sidewalk-only walk, in metres.
+        :rtype: WalkRoute | None
         """
         excursions, near = [], None
         for kind in kinds:
@@ -972,8 +1394,13 @@ class WalkNetwork:
 
     # ----- proposals -----
 
-    def kinds(self) -> frozenset[ExcursionKind]:
-        """The excursion kinds this map has places for."""
+    def kinds(self) -> FrozenSet[ExcursionKind]:
+        """
+        The excursion kinds this map has places for.
+
+        :returns: The excursion kinds this map has places for.
+        :rtype: FrozenSet[ExcursionKind]
+        """
         kinds = set()
         if self.sidewalks:
             kinds.add(ExcursionKind.ROADSIDE)
@@ -986,7 +1413,14 @@ class WalkNetwork:
         return frozenset(kinds)
 
     def random_point(self, rng: Random) -> CurbPoint:
-        """A curb point uniformly along all sidewalks."""
+        """
+        A curb point uniformly along all sidewalks.
+
+        :param Random rng: Random number generator used for sampling and selection.
+        :returns: A curb point uniformly along all sidewalks.
+        :rtype: CurbPoint
+        :raises RuntimeError: If required map data is unavailable or no valid candidate is found within the attempt limit.
+        """
         if not self._sidewalk_ids:
             raise RuntimeError("the map has no sidewalks")
         distance = rng.uniform(0, float(self._ring_lengths[-1]))
@@ -996,13 +1430,18 @@ class WalkNetwork:
         return self.wrapped(sidewalk, distance - before)
 
     def propose(self, kind: ExcursionKind, rng: Random, near: CurbPoint | None = None,
-                reach: float = 40.0) -> tuple[CurbPoint, CurbPoint] | None:
+                reach: float = 40.0) -> Tuple[CurbPoint, CurbPoint] | None:
         """
         Draw an entry and exit for an excursion of ``kind``, entering within
         ``reach`` metres along the sidewalk of ``near`` if given. One draw:
         the caller checks it (``check_excursion``) and retries.
 
         :returns: (entry, exit), or None if nothing of the kind lies within reach.
+        :param ExcursionKind kind: Traffic type name or excursion category selecting the applicable rules or prior.
+        :param Random rng: Random number generator used for sampling and selection.
+        :param CurbPoint | None near: Optional sidewalk anchor for the excursion entry.
+        :param float reach: Maximum query or sampling distance, in metres.
+        :rtype: Tuple[CurbPoint, CurbPoint] | None
         """
         draw = {
             ExcursionKind.CROSSWALK: self._propose_crosswalk,
@@ -1016,18 +1455,43 @@ class WalkNetwork:
         except InvalidRoute:
             return None
 
-    def _landings_within(self, near: CurbPoint | None, reach: float) -> list[tuple[Crossing, int]]:
+    def _landings_within(self, near: CurbPoint | None, reach: float) -> List[Tuple[Crossing, int]]:
+        """
+        List crossing landings within the requested sidewalk distance of an optional anchor.
+
+        :param CurbPoint | None near: Optional sidewalk anchor for the excursion entry.
+        :param float reach: Maximum query or sampling distance, in metres.
+        :returns: The landings within values described above.
+        :rtype: List[Tuple[Crossing, int]]
+        """
         return [(self.crossings[key], index) for key in self._crossing_ids for index in (0, 1)
                 if near is None or self.gap(self.crossings[key].landings[index], near) <= reach]
 
     def _beside(self, crossing: Crossing, index: int, lateral: float) -> CurbPoint:
-        """The point on landing ``index``'s sidewalk ``lateral`` metres left of the axis."""
+        """
+        The point on landing ``index``'s sidewalk ``lateral`` metres left of the axis.
+
+        :param Crossing crossing: Marked crossing supplying its axis and sidewalk landings.
+        :param int index: Index of the element, transition, or point being processed.
+        :param float lateral: Signed lateral displacement from the crossing axis, in metres.
+        :returns: The point on landing ``index``'s sidewalk ``lateral`` metres left of the axis.
+        :rtype: CurbPoint
+        """
         (ux, uy), base = crossing.direction, self.point(crossing.landings[index])
         target = Point(base.x - uy * lateral, base.y + ux * lateral)
         sidewalk = crossing.landings[index].sidewalk
         return self.nearest(target, sidewalk)
 
-    def _propose_crosswalk(self, rng: Random, near: CurbPoint | None, reach: float):
+    def _propose_crosswalk(self, rng: Random, near: CurbPoint | None, reach: float) -> Tuple[CurbPoint, CurbPoint] | None:
+        """
+        Sample an entry and exit within a marked crossing usable from the optional anchor.
+
+        :param Random rng: Random number generator used for sampling and selection.
+        :param CurbPoint | None near: Optional sidewalk anchor for the excursion entry.
+        :param float reach: Maximum query or sampling distance, in metres.
+        :returns: The sampled entry and exit, or ``None`` if no proposal is available.
+        :rtype: Tuple[CurbPoint, CurbPoint] | None
+        """
         options = self._landings_within(near, reach)
         if not options:
             return None
@@ -1037,7 +1501,16 @@ class WalkNetwork:
         end = min(max(start + rng.gauss(0, crossing.width / 6), -half), half)
         return self._beside(crossing, index, start), self._beside(crossing, 1 - index, end)
 
-    def _propose_near_crosswalk(self, rng: Random, near: CurbPoint | None, reach: float):
+    def _propose_near_crosswalk(self, rng: Random, near: CurbPoint | None, reach: float) -> Tuple[CurbPoint, CurbPoint] | None:
+        """
+        Sample a crossing beside a marked crosswalk near the optional anchor.
+
+        :param Random rng: Random number generator used for sampling and selection.
+        :param CurbPoint | None near: Optional sidewalk anchor for the excursion entry.
+        :param float reach: Maximum query or sampling distance, in metres.
+        :returns: The sampled entry and exit, or ``None`` if no proposal is available.
+        :rtype: Tuple[CurbPoint, CurbPoint] | None
+        """
         options = self._landings_within(near, reach + NEAR_RANGE[1])
         if not options:
             return None
@@ -1050,7 +1523,16 @@ class WalkNetwork:
             return None
         return entry, exit
 
-    def _propose_mid_block(self, rng: Random, near: CurbPoint | None, reach: float):
+    def _propose_mid_block(self, rng: Random, near: CurbPoint | None, reach: float) -> Tuple[CurbPoint, CurbPoint] | None:
+        """
+        Sample a road-normal crossing from an anchored sidewalk or a random road-lane position.
+
+        :param Random rng: Random number generator used for sampling and selection.
+        :param CurbPoint | None near: Optional sidewalk anchor for the excursion entry.
+        :param float reach: Maximum query or sampling distance, in metres.
+        :returns: The sampled entry and exit, or ``None`` if no proposal is available.
+        :rtype: Tuple[CurbPoint, CurbPoint] | None
+        """
         angle = rng.gauss(0, MID_BLOCK_ANGLE_SIGMA)
         while abs(angle) > MID_BLOCK_ANGLE:
             angle = rng.gauss(0, MID_BLOCK_ANGLE_SIGMA)
@@ -1079,13 +1561,25 @@ class WalkNetwork:
         return (first, second) if rng.random() < 0.5 else (second, first)
 
     def _road_heading(self, point: Point) -> float:
-        """The heading of the lane nearest ``point``, there."""
+        """
+        The heading of the lane nearest ``point``, there.
+
+        :param Point point: Map point or speed point used by this operation.
+        :returns: The heading of the lane nearest ``point``, there.
+        :rtype: float
+        """
         lane_id = self.service.get_nearest_lane(point)
         line = self.service.get_lane_central_curve_by_id(lane_id)
         return self.service.get_lane_coord_and_heading(lane_id, line.project(point))[1]
 
     def _toward_road(self, curb: CurbPoint) -> float | None:
-        """The heading from a sidewalk point toward the road beside it, or None."""
+        """
+        The heading from a sidewalk point toward the road beside it, or None.
+
+        :param CurbPoint curb: Position on a sidewalk ring.
+        :returns: The heading from a sidewalk point toward the road beside it, or None.
+        :rtype: float | None
+        """
         line = self.sidewalks[curb.sidewalk]
         length = line.length
         a, b = line.interpolate((curb.s - 1) % length), line.interpolate((curb.s + 1) % length)
@@ -1100,7 +1594,15 @@ class WalkNetwork:
         return None
 
     def _cast(self, origin: Point, heading: float, length: float = 80.0) -> CurbPoint | None:
-        """The first sidewalk point at least ``MIN_CROSSING`` from ``origin`` along ``heading``."""
+        """
+        The first sidewalk point at least ``MIN_CROSSING`` from ``origin`` along ``heading``.
+
+        :param Point origin: Origin of the ray, in map coordinates.
+        :param float heading: Heading in radians.
+        :param float length: Length of the path, lane, or body, in metres.
+        :returns: The first sidewalk point at least ``MIN_CROSSING`` from ``origin`` along ``heading``.
+        :rtype: CurbPoint | None
+        """
         ray = LineString([origin, (origin.x + length * cos(heading), origin.y + length * sin(heading))])
         best = None
         for index in self._sidewalk_tree.query(ray, predicate="intersects"):
@@ -1111,8 +1613,14 @@ class WalkNetwork:
                     best = (gap, sidewalk_id, hit)
         return None if best is None else self.nearest(best[2], best[1])
 
-    def _diagonal_pairs(self, junction_id: str) -> list[tuple[CurbPoint, CurbPoint]]:
-        """Landing pairs of one junction's crossings that make diagonal crossings, both ways."""
+    def _diagonal_pairs(self, junction_id: str) -> List[Tuple[CurbPoint, CurbPoint]]:
+        """
+        Landing pairs of one junction's crossings that make diagonal crossings, both ways.
+
+        :param str junction_id: Junction ID whose crossings or geometry are queried.
+        :returns: The diagonal pairs values described above.
+        :rtype: List[Tuple[CurbPoint, CurbPoint]]
+        """
         if junction_id not in self._diagonals:
             corners = [crossing.landings[index] for crossing in self.crossings.values()
                        if crossing.junction == junction_id for index in (0, 1)]
@@ -1128,7 +1636,16 @@ class WalkNetwork:
             self._diagonals[junction_id] = pairs
         return self._diagonals[junction_id]
 
-    def _propose_diagonal(self, rng: Random, near: CurbPoint | None, reach: float):
+    def _propose_diagonal(self, rng: Random, near: CurbPoint | None, reach: float) -> Tuple[CurbPoint, CurbPoint] | None:
+        """
+        Sample a feasible diagonal landing pair and jitter both positions along their sidewalks.
+
+        :param Random rng: Random number generator used for sampling and selection.
+        :param CurbPoint | None near: Optional sidewalk anchor for the excursion entry.
+        :param float reach: Maximum query or sampling distance, in metres.
+        :returns: The sampled entry and exit, or ``None`` if no proposal is available.
+        :rtype: Tuple[CurbPoint, CurbPoint] | None
+        """
         options = [pair for junction_id in self._junction_ids for pair in self._diagonal_pairs(junction_id)
                    if near is None or self.gap(pair[0], near) <= reach]
         if not options:
@@ -1138,7 +1655,16 @@ class WalkNetwork:
         return (self.wrapped(entry.sidewalk, entry.s + rng.uniform(-1.5, 1.5)),
                 self.wrapped(exit.sidewalk, exit.s + rng.uniform(-1.5, 1.5)))
 
-    def _propose_roadside(self, rng: Random, near: CurbPoint | None, reach: float):
+    def _propose_roadside(self, rng: Random, near: CurbPoint | None, reach: float) -> Tuple[CurbPoint, CurbPoint]:
+        """
+        Sample a roadside excursion from a random or anchored sidewalk position.
+
+        :param Random rng: Random number generator used for sampling and selection.
+        :param CurbPoint | None near: Optional sidewalk anchor for the excursion entry.
+        :param float reach: Maximum query or sampling distance, in metres.
+        :returns: The sampled entry and exit, or ``None`` if no proposal is available.
+        :rtype: Tuple[CurbPoint, CurbPoint]
+        """
         entry = self.random_point(rng) if near is None else self.wrapped(
             near.sidewalk, near.s + rng.uniform(-reach, reach))
         step = rng.uniform(*ROADSIDE_RANGE) * rng.choice((-1, 1))
@@ -1146,11 +1672,28 @@ class WalkNetwork:
 
 
 def _element(name: str, line: LineString) -> WalkElement:
+    """
+    Build a named walk element from the two-dimensional vertices of a line.
+
+    :param str name: Element or agent name used for lookup and diagnostics.
+    :param LineString line: Line geometry in map metres.
+    :returns: The element values described above.
+    :rtype: WalkElement
+    """
     return WalkElement(name, tuple(tuple(xy[:2]) for xy in line.coords), line.length)
 
 
-def _near(tree: STRtree, pieces: list, geometry: BaseGeometry, reach: float) -> BaseGeometry:
-    """The union of the pieces within ``reach`` of ``geometry``, small gaps closed."""
+def _near(tree: STRtree, pieces: List, geometry: BaseGeometry, reach: float) -> BaseGeometry:
+    """
+    The union of the pieces within ``reach`` of ``geometry``, small gaps closed.
+
+    :param STRtree tree: Spatial index over the supplied geometry components.
+    :param List pieces: Geometry components used by the spatial index.
+    :param BaseGeometry geometry: Geometry to query or decompose.
+    :param float reach: Maximum query or sampling distance, in metres.
+    :returns: The union of the pieces within ``reach`` of ``geometry``, small gaps closed.
+    :rtype: BaseGeometry
+    """
     found = tree.query(geometry, predicate="dwithin", distance=reach + 2 * SURFACE_CLOSING)
     if not len(found):
         return Polygon()
@@ -1158,8 +1701,15 @@ def _near(tree: STRtree, pieces: list, geometry: BaseGeometry, reach: float) -> 
         -SURFACE_CLOSING)
 
 
-def _sideways(axis: LineString, point: tuple[float, float]) -> float:
-    """Distance of ``point`` from the infinite line through ``axis``."""
+def _sideways(axis: LineString, point: Tuple[float, float]) -> float:
+    """
+    Distance of ``point`` from the infinite line through ``axis``.
+
+    :param LineString axis: Reference crossing axis.
+    :param Tuple[float, float] point: Map point or speed point used by this operation.
+    :returns: The computed distance, duration, or scalar value described above.
+    :rtype: float
+    """
     (x0, y0), (x1, y1) = axis.coords[0], axis.coords[-1]
     length = hypot(x1 - x0, y1 - y0)
     ux, uy = (x1 - x0) / length, (y1 - y0) / length
@@ -1167,7 +1717,13 @@ def _sideways(axis: LineString, point: tuple[float, float]) -> float:
 
 
 def _points(geometry: BaseGeometry) -> Iterator[Point]:
-    """The points of an intersection result; lines contribute their vertices."""
+    """
+    The points of an intersection result; lines contribute their vertices.
+
+    :param BaseGeometry geometry: Geometry to query or decompose.
+    :returns: Intersection points; line components contribute their vertices.
+    :rtype: Iterator[Point]
+    """
     for part in _parts(geometry):
         if isinstance(part, Point):
             yield part
@@ -1175,8 +1731,16 @@ def _points(geometry: BaseGeometry) -> Iterator[Point]:
             yield from (Point(xy) for xy in part.coords)
 
 
-def _ring_stretch(line: LineString, start: float, end: float) -> list[tuple[float, float]]:
-    """Vertices of a closed ring from ``start`` to ``end`` metres, which may wrap past its start."""
+def _ring_stretch(line: LineString, start: float, end: float) -> List[Tuple[float, float]]:
+    """
+    Vertices of a closed ring from ``start`` to ``end`` metres, which may wrap past its start.
+
+    :param LineString line: Line geometry in map metres.
+    :param float start: Starting lane, endpoint, or path position for this operation.
+    :param float end: Ending lane, endpoint, or path position for this operation.
+    :returns: The ring stretch values described above.
+    :rtype: List[Tuple[float, float]]
+    """
     length = line.length
     span = end - start
     start %= length
@@ -1195,6 +1759,7 @@ def walk_network(service: MapService) -> WalkNetwork:
 
     :param MapService service: A map loaded with ``load_only=False``.
     :rtype: WalkNetwork
+    :returns: The walk network of a loaded map, built once per map.
     """
     network = _NETWORKS.get(service)
     if network is None:
