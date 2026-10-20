@@ -8,6 +8,7 @@ crosses each gene with its own rate and returns two children.
 
 from dataclasses import replace
 from random import Random
+from typing import Tuple, List
 
 from ...scenario.pedestrian import PedestrianAgent
 from ...scenario.walkways import MIN_WALK, WalkNetwork, WalkRoute
@@ -17,21 +18,44 @@ from .common import PedestrianOperatorConfig, acceptable, on_route, retyped
 from .mutation import _same_stops
 
 
-def _shape(route: WalkRoute) -> tuple[int, bool]:
-    """What crossover keeps of the lead's walk: its number of excursions, and whether it turns back."""
+def _shape(route: WalkRoute) -> Tuple[int, bool]:
+    """
+    What crossover keeps of the lead's walk: its number of excursions, and whether it turns back.
+
+    :param WalkRoute route: Walk whose shape is inspected.
+    :returns: The excursion count and whether the last excursion has a turning point.
+    :rtype: Tuple[int, bool]
+    """
     return len(route.excursions), bool(route.excursions) and route.excursions[-1].turn_back is not None
 
 
-def _sidewalks(route: WalkRoute) -> list[str]:
-    """The sidewalk of each sidewalk element ``w<i>``, in walking order."""
+def _sidewalks(route: WalkRoute) -> List[str]:
+    """
+    Return the sidewalk of each sidewalk element ``w<i>``, in walking order.
+
+    :param WalkRoute route: Walk whose sidewalk sequence is extracted.
+    :returns: The starting sidewalk followed by each excursion's arrival sidewalk.
+    :rtype: List[str]
+    """
     return [route.start.sidewalk] + [excursion.arrival.sidewalk for excursion in route.excursions]
 
 
-def _links_within_generation(route: WalkRoute, network: WalkNetwork, config: PedestrianOperatorConfig) -> bool:
-    """Whether every sidewalk stretch of the walk is as long as generation allows:
-    start and end within ``config.max_approach`` of the first entry and last
-    arrival (a walk without excursions ``MIN_WALK`` to twice that), consecutive
-    excursions within ``config.max_link``."""
+def _links_within_generation(route: WalkRoute, network: WalkNetwork,
+                             config: PedestrianOperatorConfig) -> bool:
+    """
+    Check whether every sidewalk stretch satisfies generation distance bounds.
+
+    With excursions, the start and end must lie within ``config.max_approach``
+    of the first entry and last arrival, and consecutive excursions must be
+    within ``config.max_link``. Without excursions, the endpoint gap must lie
+    between ``MIN_WALK`` and ``max(MIN_WALK, 2 * config.max_approach)``.
+
+    :param WalkRoute route: Walk whose sidewalk stretches are checked.
+    :param WalkNetwork network: Walk network used to measure gaps.
+    :param PedestrianOperatorConfig config: Configuration defining approach and excursion-link bounds.
+    :returns: ``True`` if every sidewalk stretch satisfies the generation bounds.
+    :rtype: bool
+    """
     excursions = route.excursions
     if not excursions:
         return MIN_WALK <= network.gap(route.start, route.end) <= max(MIN_WALK, 2 * config.max_approach)
@@ -44,25 +68,30 @@ def _links_within_generation(route: WalkRoute, network: WalkNetwork, config: Ped
 def cx_shared_sidewalk(first: PedestrianAgent, second: PedestrianAgent, network: WalkNetwork,
                        rng: Random, config: PedestrianOperatorConfig = PedestrianOperatorConfig()) -> PedestrianAgent | None:
     """
-    Join ``first``'s walk up to a sidewalk both walks use with ``second``'s
-    walk from it: ``first``'s start and excursions before it, then along that
-    sidewalk to ``second``'s next excursion, its later excursions and its end.
-    The pedestrian analogue of ``route_operators.cx_shared_lane``.
+    Join ``first``'s walk prefix to ``second``'s walk suffix at a shared sidewalk.
 
-    Every sidewalk stretch of the child stays within generation's bounds
-    (``config.max_approach``, ``config.max_link``): unbounded joins walked
-    along whole blocks, +20 m per join on borregas_ave (mean walk 58 -> 78 m
-    in 30 generations).
+    Keep ``first``'s start and excursions before the join, followed by
+    ``second``'s remaining excursions and end. This is the pedestrian analogue
+    of ``route_operators.cx_shared_lane``.
 
-    The child keeps ``first``'s number of excursions and whether it turns back
-    (``_shape``): joins at any shared sidewalk spread counts apart (san_mateo,
-    20 neutral generations: walks with one excursion fell from 67% to 30%), as
-    unrestricted speed-profile splices once thinned point counts, and copied
-    turn backs, whose shorter walks pass the length bound more often (4% -> 7%
-    in 15 generations).
+    Every sidewalk stretch stays within generation's bounds
+    (``config.max_approach``, ``config.max_link``). Unbounded joins previously
+    added 20 m per join on borregas_ave (mean walk 58 -> 78 m in 30 generations).
 
-    :returns: The child, or None if the walks share no sidewalk where they join
-        into a walk of ``first``'s shape.
+    The child preserves ``first``'s excursion count and final turn-back status
+    (``_shape``). Unrestricted joins previously spread excursion counts apart
+    (san_mateo, 20 neutral generations: one-excursion walks fell from 67% to 30%)
+    and increased turn backs, whose shorter walks passed length bounds more
+    often (4% -> 7% in 15 generations).
+
+    :param PedestrianAgent first: Parent providing the walk prefix and preserved shape.
+    :param PedestrianAgent second: Parent providing the walk suffix.
+    :param WalkNetwork network: Walk network used to check sidewalk gaps and apply the child walk.
+    :param Random rng: Random number generator used to select a candidate walk.
+    :param PedestrianOperatorConfig config: Configuration defining approach and excursion-link bounds.
+    :returns: The child, or ``None`` if no distinct walk preserves ``first``'s shape
+        within the generation bounds, or the selected walk cannot be applied.
+    :rtype: PedestrianAgent | None
     """
     mine, theirs = _sidewalks(first.route), _sidewalks(second.route)
     shape = _shape(first.route)
@@ -86,14 +115,20 @@ def cx_shared_sidewalk(first: PedestrianAgent, second: PedestrianAgent, network:
 
 def cx_route_swap(first: PedestrianAgent, second: PedestrianAgent, network: WalkNetwork) -> PedestrianAgent | None:
     """
-    Give ``first`` the walk of ``second`` if it has the same shape (as many
-    excursions, turning back or not). ``cx_pedestrian`` only uses it when walk
-    recombination fails, which it does more often for walks with none or two
-    excursions: unrestricted swaps then turned them into the common
-    one-excursion walks (san_mateo, 15 neutral generations: 33% -> 21%).
+    Give ``first`` the walk of ``second`` if both walks have the same excursion
+    count and final turn-back status.
 
-    :returns: The child, or None if the walks are equal, differ in shape, or
-        the walk does not fit.
+    Used by ``cx_pedestrian`` when walk recombination fails, which happens more
+    often for walks with zero or two excursions. Unrestricted swaps previously
+    replaced these with common one-excursion walks (san_mateo, 15 neutral
+    generations: their combined share fell from 33% to 21%).
+
+    :param PedestrianAgent first: Parent receiving the other parent's walk.
+    :param PedestrianAgent second: Parent providing the replacement walk.
+    :param WalkNetwork network: Walk network used to apply the replacement walk.
+    :returns: The child, or ``None`` if the walks are equal, differ in shape,
+        or the replacement walk cannot be applied.
+    :rtype: PedestrianAgent | None
     """
     if first.route == second.route or _shape(first.route) != _shape(second.route):
         return None
@@ -102,9 +137,12 @@ def cx_route_swap(first: PedestrianAgent, second: PedestrianAgent, network: Walk
 
 def cx_walker_type(first: PedestrianAgent, second: PedestrianAgent) -> PedestrianAgent | None:
     """
-    Give ``first`` the walker type of ``second``, with speeds moved to that type's prior (``retyped``).
+    Give ``first`` the walker type of ``second``, mapping speeds to that type's prior through ``retyped``.
 
-    :returns: The child, or None if the types are equal.
+    :param PedestrianAgent first: Parent whose walker type and target speeds are updated.
+    :param PedestrianAgent second: Parent providing the walker type.
+    :returns: The child, or ``None`` if the walker types are equal.
+    :rtype: PedestrianAgent | None
     """
     return None if first.walker_type is second.walker_type else retyped(first, second.walker_type)
 
@@ -113,27 +151,44 @@ def cx_walk_style(first: PedestrianAgent, second: PedestrianAgent) -> Pedestrian
     """
     Give ``first`` the walk style of ``second``.
 
-    :returns: The child, or None if the styles are equal.
+    :param PedestrianAgent first: Parent receiving the walk style.
+    :param PedestrianAgent second: Parent providing the walk style.
+    :returns: The child, or ``None`` if the walk styles are equal.
+    :rtype: PedestrianAgent | None
     """
     return None if first.walk_style == second.walk_style else replace(first, walk_style=second.walk_style)
 
 
 def cx_pedestrian(first: PedestrianAgent, second: PedestrianAgent, network: WalkNetwork, rng: Random,
                   config: PedestrianOperatorConfig = PedestrianOperatorConfig(),
-                  ) -> tuple[PedestrianAgent, PedestrianAgent]:
+                  ) -> Tuple[PedestrianAgent, PedestrianAgent]:
     """
     Return two children: one led by ``first``, one led by ``second``.
 
-    Each gene of the lead is crossed with the other parent only with its own
-    ``config.crossover_rates`` chance, through an operator drawn by
-    ``config.crossover_weights``. Every step keeps the child acceptable. When
-    the walk gene is drawn and recombination fails, the lead takes the other
-    parent's whole walk with probability ``config.route_swap_rate``. A child
-    where no gene was crossed is its lead unchanged.
+    Each gene is crossed independently with its own ``config.crossover_rates``
+    probability, using an operator drawn by ``config.crossover_weights``.
+    Every step keeps the child acceptable. When the walk gene is selected and
+    recombination fails, a whole-walk swap is attempted with probability
+    ``config.route_swap_rate``. A child with no successful crossover is its
+    lead unchanged.
 
-    :rtype: tuple[PedestrianAgent, PedestrianAgent]
+    :param PedestrianAgent first: Lead parent of the first child and donor for the second.
+    :param PedestrianAgent second: Lead parent of the second child and donor for the first.
+    :param WalkNetwork network: Walk network used to construct and validate the children.
+    :param Random rng: Random number generator used for gene selection, operator selection, and crossover.
+    :param PedestrianOperatorConfig config: Configuration controlling crossover rates, operator weights, and acceptance.
+    :returns: Two acceptable children, led by ``first`` and ``second``, respectively.
+    :rtype: Tuple[PedestrianAgent, PedestrianAgent]
     """
     def child_of(lead: PedestrianAgent, other: PedestrianAgent) -> PedestrianAgent:
+        """
+        Build an acceptable child by crossing selected genes of ``lead`` with ``other``.
+
+        :param PedestrianAgent lead: Parent providing the child's initial genes.
+        :param PedestrianAgent other: Parent providing genes selected for crossover.
+        :returns: The resulting child, or ``lead`` unchanged if no crossover succeeds.
+        :rtype: PedestrianAgent
+        """
         operators = {
             "shared_sidewalk": lambda child: cx_shared_sidewalk(child, other, network, rng, config),
             "walker_type": lambda child: cx_walker_type(child, other),

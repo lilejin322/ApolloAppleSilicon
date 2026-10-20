@@ -10,7 +10,7 @@ favoured and the generation mixes are kept.
 
 from dataclasses import replace
 from random import Random
-
+from typing import Tuple
 from shapely.geometry import LineString
 
 from ...scenario.pedestrian import (
@@ -20,7 +20,7 @@ from ...scenario.pedestrian import (
 from ...scenario.realism import draw_type, style_step
 from ...scenario.replay import MAX_SPEED_POINTS, SpeedPoint, ordered_points
 from ...scenario.walkways import (
-    MAX_EXCURSIONS, MIN_TURN_BACK, MIN_WALK, TURN_BACK_SHARE, Excursion, ExcursionKind, WalkNetwork,
+    MAX_EXCURSIONS, MIN_TURN_BACK, MIN_WALK, TURN_BACK_SHARE, Excursion, ExcursionKind, WalkNetwork, WalkRoute,
 )
 from ..common import gauss_step, vary
 from ..profile_operators import SPEED_POINT_ACTIONS, mut_speed, mut_speed_point, mut_start_t, with_profile
@@ -32,7 +32,18 @@ COUNT_ACTIONS = ("add", "remove")
 
 def _with_excursion(agent: PedestrianAgent, index: int, excursion: Excursion | None, network: WalkNetwork,
                     rng: Random, config: PedestrianOperatorConfig) -> PedestrianAgent | None:
-    """``agent`` with excursion ``index`` replaced (or removed if None), its end rehomed."""
+    """
+    Replace or remove an excursion, adjusting the walk's endpoints when needed.
+
+    :param PedestrianAgent agent: Agent whose excursion is changed.
+    :param int index: Index of the excursion to replace or remove.
+    :param Excursion | None excursion: Replacement excursion, or ``None`` to remove it.
+    :param WalkNetwork network: Walk network used to adjust endpoints and apply the walk.
+    :param Random rng: Random number generator used to redraw endpoints.
+    :param PedestrianOperatorConfig config: Configuration defining the maximum approach distance.
+    :returns: The updated agent, or ``None`` if the modified walk cannot be applied.
+    :rtype: PedestrianAgent | None
+    """
     excursions = list(agent.route.excursions)
     if excursion is None:
         del excursions[index]
@@ -45,18 +56,23 @@ def _with_excursion(agent: PedestrianAgent, index: int, excursion: Excursion | N
 def mut_shift(agent: PedestrianAgent, network: WalkNetwork, rng: Random,
               config: PedestrianOperatorConfig = PedestrianOperatorConfig()) -> PedestrianAgent | None:
     """
-    Move one point of the walk along its sidewalk by a normal step: the start
-    or end (``config.sigma_s``), or an excursion's entry or exit
-    (``config.sigma_curb``), which must keep its excursion's kind.
+    Move one walk point along its sidewalk by a normal step.
 
-    A start or end stays within ``config.max_approach`` of the entry or arrival
-    it is drawn around at generation (a walk without excursions: its end
-    ``MIN_WALK`` to twice that from its start); a step of any point that takes
-    it beyond is rejected. The
-    walk lengths then keep their generation distribution instead of diffusing
-    outward (san_mateo, 20 neutral generations: median 52 -> 78 m).
+    Start and end steps use ``config.sigma_s``; excursion entry and exit steps
+    use ``config.sigma_curb`` and must preserve the excursion's kind.
 
-    :returns: The mutant, or None if the moved walk is invalid or out of range.
+    Endpoints must satisfy ``_within_approach``: with excursions, they stay
+    within ``config.max_approach`` of the first entry and last arrival.
+    Without excursions, their gap stays within generation's bounds.
+    Steps outside these bounds are rejected to prevent walk lengths from
+    drifting outward (san_mateo, 20 neutral generations: median 52 -> 78 m).
+
+    :param PedestrianAgent agent: Agent whose walk point is mutated.
+    :param WalkNetwork network: Walk network used to wrap positions, check bounds, and apply the walk.
+    :param Random rng: Random number generator used to select a point and sample its step.
+    :param PedestrianOperatorConfig config: Configuration defining step sizes and endpoint distance bounds.
+    :returns: The mutant, or ``None`` if the modified walk is invalid or out of range.
+    :rtype: PedestrianAgent | None
     """
     route = agent.route
     choices = ["start", "end"] + [(index, side) for index in range(len(route.excursions)) for side in ("entry", "exit")]
@@ -79,8 +95,21 @@ def mut_shift(agent: PedestrianAgent, network: WalkNetwork, rng: Random,
     return on_route(agent, candidate, network)
 
 
-def _within_approach(route, network: WalkNetwork, config: PedestrianOperatorConfig) -> bool:
-    """Whether the walk's start and end lie where generation draws them."""
+def _within_approach(route: WalkRoute, network: WalkNetwork,
+                     config: PedestrianOperatorConfig) -> bool:
+    """
+    Check whether the walk's endpoints satisfy generation distance bounds.
+
+    With excursions, endpoints must lie within ``config.max_approach`` of the
+    first entry and last arrival. Without excursions, their gap must lie between
+    ``MIN_WALK`` and ``max(MIN_WALK, 2 * config.max_approach)``.
+
+    :param WalkRoute route: Walk whose endpoints are checked.
+    :param WalkNetwork network: Walk network used to measure endpoint gaps.
+    :param PedestrianOperatorConfig config: Configuration defining the maximum approach distance.
+    :returns: ``True`` if both endpoints satisfy the generation bounds.
+    :rtype: bool
+    """
     if not route.excursions:
         return MIN_WALK <= network.gap(route.start, route.end) <= max(MIN_WALK, 2 * config.max_approach)
     return (network.gap(route.start, route.excursions[0].entry) <= config.max_approach
@@ -90,10 +119,16 @@ def _within_approach(route, network: WalkNetwork, config: PedestrianOperatorConf
 def mut_redraw(agent: PedestrianAgent, network: WalkNetwork, rng: Random,
                config: PedestrianOperatorConfig = PedestrianOperatorConfig()) -> PedestrianAgent | None:
     """
-    Redraw one excursion of the same kind, entering within ``config.redraw_reach``
-    of its old entry: another crosswalk at the corner, another spot mid-block.
+    Redraw one excursion of the same kind, with its new entry within
+    ``config.redraw_reach`` of the old entry along the sidewalk.
 
-    :returns: The mutant, or None if the walk has no excursion or nothing fits.
+    :param PedestrianAgent agent: Agent whose excursion is redrawn.
+    :param WalkNetwork network: Walk network used to propose an excursion and apply the modified walk.
+    :param Random rng: Random number generator used to select and redraw an excursion.
+    :param PedestrianOperatorConfig config: Configuration defining redraw reach and endpoint adjustment bounds.
+    :returns: The mutant, or ``None`` if there is no excursion, no replacement fits,
+        or the modified walk cannot be applied.
+    :rtype: PedestrianAgent | None
     """
     if not agent.route.excursions:
         return None
@@ -109,13 +144,20 @@ def mut_kind(agent: PedestrianAgent, network: WalkNetwork, rng: Random,
              config: PedestrianOperatorConfig = PedestrianOperatorConfig(),
              drawn: ExcursionKind | None = None) -> PedestrianAgent | None:
     """
-    Redraw one excursion's kind from ``config.kind_weights`` and draw an
-    excursion of that kind entering within ``config.redraw_reach`` of the old
-    entry. A mutation event draws the kind once (``drawn``); a draw of the
-    current kind is a no-op.
+    Change one excursion's kind and redraw its entry and exit.
 
-    :returns: The mutant, or None if the walk has no excursion, the draw is the
-        current kind, or nothing of the kind fits.
+    Draw the kind from ``config.kind_weights`` and propose an excursion entering
+    within ``config.redraw_reach`` of the old entry. A mutation event draws the
+    kind once (``drawn``); drawing the selected excursion's current kind is a no-op.
+
+    :param PedestrianAgent agent: Agent whose excursion kind is mutated.
+    :param WalkNetwork network: Walk network used to propose an excursion and apply the modified walk.
+    :param Random rng: Random number generator used to select an excursion, sample a kind, and propose endpoints.
+    :param PedestrianOperatorConfig config: Configuration defining kind weights, redraw reach, and endpoint adjustment bounds.
+    :param ExcursionKind | None drawn: Kind already drawn for this mutation event, or ``None`` to sample one.
+    :returns: The mutant, or ``None`` if there is no excursion, no kind is available,
+        the selected kind is unchanged, no proposal fits, or the modified walk cannot be applied.
+    :rtype: PedestrianAgent | None
     """
     if not agent.route.excursions:
         return None
@@ -138,22 +180,34 @@ def mut_count(agent: PedestrianAgent, network: WalkNetwork, rng: Random,
               config: PedestrianOperatorConfig = PedestrianOperatorConfig(), action: str | None = None,
               drawn: ExcursionKind | None = None, accept: float | None = None) -> PedestrianAgent | None:
     """
-    Add an excursion after the last, entering within ``config.max_link`` of the
-    walk's end (anywhere, for a walk without excursions), or remove the last
-    one, the walk then ending near its entry.
-    ``action`` (one of ``COUNT_ACTIONS``) and the added kind ``drawn`` are drawn
-    once per mutation event.
+    Add an excursion after the last, or remove the last excursion.
 
-    The change is a Metropolis step under ``config.count_weights``: going from
-    ``n`` to ``m`` excursions is accepted with probability
-    ``min(1, weight(m) / weight(n))``. Accepting every add and remove drove the
-    counts towards a uniform mix (san_mateo, 15 generations of mutation:
-    one-excursion walks 67% -> 47%). The Metropolis uniform ``accept`` is drawn
-    once per mutation event too: drawn per retry, a rejected step was retried
-    until accepted, which made leaving the common one-excursion walks about
-    twice as likely as returning (shalun: 66% -> 56% in 17 generations).
+    An added excursion enters within ``config.max_link`` of the walk's end.
+    For a walk without excursions, it is proposed anywhere and the start is
+    redrawn near its entry. The end is redrawn near the added excursion's exit
+    or the removed excursion's entry.
 
-    :returns: The mutant, or None if the action does not apply, is rejected, or nothing fits.
+    The count change is a Metropolis step under ``config.count_weights``:
+    moving from ``n`` to ``m`` excursions is accepted with probability
+    ``min(1, weight(m) / weight(n))`` when the current weight is positive.
+    Target counts outside the allowed range or with nonpositive weight are rejected.
+
+    Draw ``action``, the added kind ``drawn``, and the uniform ``accept`` once
+    per mutation event and reuse them across retries. Redrawing acceptance on
+    retries previously increased departures from common one-excursion walks
+    (shalun: 66% -> 56% in 17 generations).
+
+    :param PedestrianAgent agent: Agent whose excursion count is mutated.
+    :param WalkNetwork network: Walk network used to propose excursions and apply the modified walk.
+    :param Random rng: Random number generator used for unspecified event draws, excursion proposals, and endpoint sampling.
+    :param PedestrianOperatorConfig config: Configuration defining count and kind weights, link reach, and endpoint bounds.
+    :param str | None action: Action from ``COUNT_ACTIONS``, or ``None`` to sample one.
+    :param ExcursionKind | None drawn: Kind for an added excursion, or ``None`` to sample one; unused for removal.
+    :param float | None accept: Uniform draw in [0, 1) for Metropolis acceptance, or ``None`` to sample one when needed.
+    :returns: The mutant, or ``None`` if the action cannot apply, the count change
+        is rejected, no proposal fits, or the modified walk cannot be applied.
+    :rtype: PedestrianAgent | None
+    :raises ValueError: If ``action`` is not in ``COUNT_ACTIONS``.
     """
     action = rng.choice(COUNT_ACTIONS) if action is None else action
     if action not in COUNT_ACTIONS:
@@ -200,37 +254,50 @@ STOP_ACTIONS = ("toggle", "dwell")
 """``mut_walk_stop``'s actions, drawn with equal chance once per mutation event."""
 
 _WAITS = ("curb", "island", "hesitation")
-
+"""Wait categories available for pedestrian mutation."""
 
 def _wait_chance(kind: str) -> float:
+    """
+    Return the occurrence probability for a pedestrian wait category.
+
+    :param str kind: Wait category: ``curb``, ``island``, or ``hesitation``.
+    :returns: The category's occurrence probability.
+    :rtype: float
+    :raises KeyError: If ``kind`` is not a supported wait category.
+    """
     return {"curb": CURB_WAIT_PROBABILITY, "island": ISLAND_WAIT_PROBABILITY,
             "hesitation": HESITATION_PROBABILITY}[kind]
 
 
 def mut_walk_stop(agent: PedestrianAgent, network: WalkNetwork, rng: Random,
                   config: PedestrianOperatorConfig = PedestrianOperatorConfig(),
-                  action: str | None = None, choice: tuple[float, str, float] | None = None) -> PedestrianAgent | None:
+                  action: str | None = None, choice: Tuple[float, str, float] | None = None) -> PedestrianAgent | None:
     """
-    Add or remove one wait of the kinds generation draws, or step a wait's dwell.
+    Add or remove a wait of a kind used at generation, or adjust a stop's dwell.
 
-    ``"toggle"``: pick an excursion and a wait kind (at the curb, on a median
-    or island it crosses, a hesitation mid-road). If the excursion has such a
-    wait (a stop and the resume point ``RESUME_GAP`` after it), remove both;
-    else add one where generation puts it. Adding is accepted with
-    probability ``min(1, q / (1 - q))`` and removing with ``min(1, (1 - q) / q)``,
-    ``q`` the kind's chance at generation, so each excursion keeps waits at
-    the generation rates. ``"dwell"``: step one stop's dwell (``config.sigma_t``).
-    ``choice`` (a uniform picking the excursion, the wait kind, a uniform for
-    the acceptance) is drawn once per mutation event with the action: drawn per
-    retry, whichever of adding or removing succeeds more often would win.
+    ``"toggle"`` selects an excursion and a wait kind: curb, island, or
+    hesitation. An existing wait and its resume point ``RESUME_GAP`` later
+    are removed together; otherwise, a wait is added where generation puts it.
+    Adding is accepted with probability ``min(1, q / (1 - q))`` and removing
+    with ``min(1, (1 - q) / q)``, where ``q`` is the kind's generation probability.
 
-    The shared ``profile_operators.mut_stop`` chose among the actions that
-    apply; walkers' profiles (start, curb wait, resume) seldom have an inner
-    moving point to stop at, so it mostly removed waits (borregas: 0.62 ->
-    0.30 waits per walker in 30 generations), and resumed at up to the type's
-    top speed (3.5 m/s for adults).
+    ``"dwell"`` adjusts one stop's dwell by a normal step using ``config.sigma_t``.
+    Draw the action and ``choice`` once per mutation event and reuse them across
+    retries to avoid favouring whichever toggle direction succeeds more often.
 
-    :returns: The mutant, or None if nothing applies or the step is rejected.
+    The shared ``profile_operators.mut_stop`` previously removed waits more often
+    than it added them (borregas: 0.62 -> 0.30 waits per walker in 30 generations)
+    and resumed at speeds up to the walker type's maximum.
+
+    :param PedestrianAgent agent: Agent whose waits or stop dwell are mutated.
+    :param WalkNetwork network: Walk network used to locate waits and construct the trajectory.
+    :param Random rng: Random number generator used for unspecified event draws and wait mutation.
+    :param PedestrianOperatorConfig config: Configuration controlling dwell steps and stop duration bounds.
+    :param str | None action: Mutation action, ``"toggle"`` or ``"dwell"``, or ``None`` to sample one.
+    :param Tuple[float, str, float] | None choice: Cached excursion-selection uniform,
+        wait kind, and acceptance uniform, or ``None`` to draw them.
+    :returns: The mutant, or ``None`` if no change applies or the step is rejected.
+    :rtype: PedestrianAgent | None
     """
     action = rng.choice(STOP_ACTIONS) if action is None else action
     if action not in STOP_ACTIONS:
@@ -259,6 +326,13 @@ def mut_walk_stop(agent: PedestrianAgent, network: WalkNetwork, rng: Random,
     islands = network.island_spans(line)
 
     def in_kind(s: float) -> bool:
+        """
+        Check whether a path position belongs to the selected wait category.
+
+        :param float s: Distance along the path, in metres.
+        :returns: ``True`` if the position falls within the selected curb, island, or hesitation region.
+        :rtype: bool
+        """
         if kind == "curb":
             return s <= curb + GUTTER_RANGE[1] + 1e-6
         if kind == "island":
@@ -315,20 +389,27 @@ def mut_turn_back(agent: PedestrianAgent, network: WalkNetwork, rng: Random,
                   config: PedestrianOperatorConfig = PedestrianOperatorConfig(),
                   action: str | None = None, draw: float | None = None) -> PedestrianAgent | None:
     """
-    Step the last excursion's turning point by ``config.sigma_turn_back``
-    (``"step"``; a no-op for a walker that does not turn back), or redraw
-    whether the walker turns back (``"redraw"``): with
-    ``config.turn_back_probability`` at a point drawn as at generation, else
-    not at all. The action is drawn once per mutation event with equal chance,
-    so walkers start and stop turning back at rates that keep that probability:
-    stepping instead of redrawing whenever possible kept twice as many.
+    Step the last excursion's turning point or redraw whether it turns back.
 
-    ``draw`` (uniform in [0, 1)) decides a redraw and is drawn once per mutation
-    event: drawn per retry, a redraw that left the walk as it was (most of
-    them) was retried until a turning point came up, which doubled the share
-    of walkers who turn back in 30 generations (borregas 4.8% -> 8.5%).
+    ``"step"`` moves an existing turning point by a normal step using
+    ``config.sigma_turn_back``; it does nothing if no turning point exists.
+    ``"redraw"`` draws a turning point as at generation with probability
+    ``config.turn_back_probability``, otherwise removing any existing one.
 
-    :returns: The mutant, or None if the walk has no excursion or nothing changes.
+    Draw the action with equal probability once per mutation event, and reuse
+    the redraw uniform ``draw`` across retries. Redrawing this uniform on each
+    retry previously increased the share of walkers turning back
+    (borregas: 4.8% -> 8.5% in 30 generations).
+
+    :param PedestrianAgent agent: Agent whose last excursion's turn-back behaviour is mutated.
+    :param WalkNetwork network: Walk network used to apply the modified walk.
+    :param Random rng: Random number generator used for unspecified event draws and turning-point sampling.
+    :param PedestrianOperatorConfig config: Configuration defining turning-point step size and turn-back probability.
+    :param str | None action: Action from ``TURN_BACK_ACTIONS``, or ``None`` to sample one.
+    :param float | None draw: Uniform draw in [0, 1) deciding whether a redraw
+        produces a turning point, or ``None`` to sample one.
+    :returns: The mutant, or ``None`` if the walk has no excursion or no change applies.
+    :rtype: PedestrianAgent | None
     """
     if not agent.route.excursions:
         return None
@@ -361,11 +442,19 @@ def mut_walker_type(agent: PedestrianAgent, rng: Random,
                     config: PedestrianOperatorConfig = PedestrianOperatorConfig(),
                     drawn: WalkerType | None = None) -> PedestrianAgent | None:
     """
-    Resample the walker type from ``config.walker_type_weights``, speeds clamped
-    to its maximum. A mutation event draws once (``drawn``); a draw of the current
-    type is a no-op, since redrawing until it changes would flatten the mix.
+    Resample the walker type from ``config.walker_type_weights``, mapping
+    positive target speeds to the new type's prior through ``retyped`` and
+    capping them at its maximum. Stop points stay unchanged.
 
-    :returns: The mutant, or None if the draw is the current type.
+    Draw once per mutation event and pass the result as ``drawn``. Drawing the
+    current type is a no-op; redrawing until it changes would flatten the mix.
+
+    :param PedestrianAgent agent: Agent whose walker type and target speeds are mutated.
+    :param Random rng: Random number generator used when ``drawn`` is not provided.
+    :param PedestrianOperatorConfig config: Configuration defining walker-type sampling weights.
+    :param WalkerType | None drawn: Type already drawn for this mutation event, or ``None`` to sample one.
+    :returns: The mutant, or ``None`` if the drawn type is unchanged.
+    :rtype: PedestrianAgent | None
     """
     walker_type = drawn if drawn is not None else WalkerType[draw_type(rng, config.walker_type_weights)]
     return None if walker_type is agent.walker_type else retyped(agent, walker_type)
@@ -373,24 +462,46 @@ def mut_walker_type(agent: PedestrianAgent, rng: Random,
 
 def mut_walk_style(agent: PedestrianAgent, rng: Random) -> PedestrianAgent:
     """
-    Step the walk style by a reflected normal step within [0, 1]
-    (``realism.style_step``), which keeps its uniform prior.
+    Move the walk style by a reflected normal step within [0, 1]
+    through ``realism.style_step``, preserving its uniform prior.
 
+    :param PedestrianAgent agent: Agent whose walk style is mutated.
+    :param Random rng: Random number generator used to sample the style step.
+    :returns: The agent with the updated walk style.
     :rtype: PedestrianAgent
     """
     return replace(agent, walk_style=style_step(rng, agent.walk_style))
 
 
 def _draw_kind(network: WalkNetwork, rng: Random, config: PedestrianOperatorConfig) -> ExcursionKind | None:
+    """
+    Draw an excursion kind from positive configured weights available on the network.
+
+    :param WalkNetwork network: Walk network defining the available excursion kinds.
+    :param Random rng: Random number generator used for weighted sampling.
+    :param PedestrianOperatorConfig config: Configuration defining excursion-kind weights.
+    :returns: The drawn kind, or ``None`` if no available kind has positive weight.
+    :rtype: ExcursionKind | None
+    """
     available = {kind.name for kind in network.kinds()}
     weights = {name: weight for name, weight in config.kind_weights.items() if name in available and weight > 0}
     return ExcursionKind[draw_type(rng, weights)] if weights else None
 
 
 def _same_stops(parent: PedestrianAgent, child: PedestrianAgent | None) -> PedestrianAgent | None:
-    """``child`` if it has as many stops as ``parent`` and still starts moving, else None: waits change only
-    through ``mut_walk_stop``, which keeps their generation rates (speed-point
-    adds, removes and moves lost 0.09 waits per application on borregas)."""
+    """
+    Keep a child only if it preserves the parent's stop count and does not
+    replace a moving start with a stop.
+
+    Wait counts change only through ``mut_walk_stop``, preserving generation
+    rates. Speed-point additions, removals, and moves previously lost 0.09
+    waits per application on borregas.
+
+    :param PedestrianAgent parent: Agent providing the required stop count and initial movement condition.
+    :param PedestrianAgent | None child: Proposed child to check, or ``None`` if no child was produced.
+    :returns: The child if both conditions hold, otherwise ``None``.
+    :rtype: PedestrianAgent | None
+    """
     if child is None:
         return None
     count = lambda agent: sum(point.speed == 0 for point in agent.speed_profile)
@@ -404,13 +515,17 @@ def _same_stops(parent: PedestrianAgent, child: PedestrianAgent | None) -> Pedes
 def mut_pedestrian(agent: PedestrianAgent, network: WalkNetwork, rng: Random,
                    config: PedestrianOperatorConfig = PedestrianOperatorConfig()) -> PedestrianAgent:
     """
-    Return a mutant: each gene mutates only with its own
-    ``config.mutation_rates`` chance, through an operator drawn by
-    ``config.mutation_weights``.
+    Mutate each gene independently with its own ``config.mutation_rates``
+    probability, using an operator drawn by ``config.mutation_weights``.
 
-    Every step keeps the mutant acceptable. When no gene mutated, ``agent``
-    is returned unchanged.
+    Every step keeps the mutant acceptable. If no mutation succeeds, return
+    ``agent`` unchanged.
 
+    :param PedestrianAgent agent: Agent whose genes are mutated.
+    :param WalkNetwork network: Walk network used to construct and validate the mutant.
+    :param Random rng: Random number generator used for gene selection, operator selection, and mutation.
+    :param PedestrianOperatorConfig config: Configuration controlling mutation rates, operator weights, and acceptance.
+    :returns: An acceptable mutant, or ``agent`` unchanged if no mutation succeeds.
     :rtype: PedestrianAgent
     """
     # One draw of each per mutation event, kept over retries.
