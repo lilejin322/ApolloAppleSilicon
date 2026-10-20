@@ -10,6 +10,7 @@ Pure lane-route changes are shared with NPCs through ``route_operators``.
 
 from dataclasses import replace
 from random import Random
+from typing import Callable, Dict
 
 from ...scenario import ADAgent, RouteSpace
 from .. import route_operators
@@ -137,16 +138,16 @@ def mut_ad_agent(agent: ADAgent, space: RouteSpace, rng: Random,
     :returns: An accepted mutant, or the unchanged original if it remains acceptable.
     :rtype: ADAgent
     """
-    acceptance = rng.random()  # lane-change acceptance draw for this mutation event, kept over retries
-    direction = rng.choice(("extend", "truncate"))  # extend/truncate direction for this event, kept over retries
-    operators = {
+    acceptance: float = rng.random()  # lane-change acceptance draw for this mutation event, kept over retries
+    direction: str = rng.choice(("extend", "truncate"))  # extend/truncate direction for this event, kept over retries
+    operators: Dict[str, Callable[[], ADAgent | None]] = {
         "reroute": lambda: mut_reroute(agent, space, rng, config),
         "extend_or_truncate": lambda: mut_extend_or_truncate(agent, space, rng, config, direction),
         "lane_change": lambda: mut_lane_change(agent, space, rng, config, acceptance),
         "s": lambda: mut_s(agent, space, rng, config),
         "start_t": lambda: mut_start_t(agent, rng, config),
     }
-    mutant = apply_weighted(
+    mutant: ADAgent | None = apply_weighted(
         operators, config.mutation_weights, rng, config.attempts,
         lambda candidate: candidate != agent and acceptable(space, candidate, config),
     )

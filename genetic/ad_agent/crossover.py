@@ -11,7 +11,7 @@ Pure lane-route recombination is shared with NPCs through ``route_operators``.
 
 from dataclasses import replace
 from random import Random
-from typing import Tuple
+from typing import Callable, Dict, Tuple
 
 from ...scenario import ADAgent, RouteSpace
 from .. import route_operators
@@ -103,12 +103,12 @@ def cx_ad_agent(first: ADAgent, second: ADAgent, space: RouteSpace, rng: Random,
         :raises ValueError: If no candidate is accepted and ``lead`` is unacceptable.
         :rtype: ADAgent
         """
-        operators = {
+        operators: Dict[str, Callable[[], ADAgent | None]] = {
             "shared_lane": lambda: cx_shared_lane(lead, other, space, rng),
             "bridge": lambda: cx_bridge(lead, other, space, rng, config),
             "start_time": lambda: cx_start_time(lead, other),
         }
-        child = apply_weighted(
+        child: ADAgent | None = apply_weighted(
             operators, config.crossover_weights, rng, config.attempts,
             lambda candidate: candidate not in (first, second) and acceptable(space, candidate, config),
         )
