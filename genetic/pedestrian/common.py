@@ -15,11 +15,12 @@ from typing import ClassVar, Mapping, Tuple
 from ...scenario.pedestrian import WALKER_SPECS, PedestrianAgent, WalkerType
 from ...scenario.realism import EXCURSION_COUNT_MIX, EXCURSION_MIX, WALKER_MIX, mapped_speed
 from ...scenario.routing import InvalidRoute
+from ...scenario.replay import ReplayTrajectory, SpeedPoint
 from ...scenario.walkways import CurbPoint, WalkNetwork, WalkRoute
 from ...utils import require_nonnegative
 from ..common import ReplayOperatorConfig
 
-GENES = ("route", "walker_type", "speed_profile", "start_t")
+GENES: Tuple[str, ...] = ("route", "walker_type", "speed_profile", "start_t")
 """Pedestrian genes, in the order each call varies them: the walk first, and the
 speed profile after the walker type whose limits it must respect."""
 
@@ -185,7 +186,7 @@ def acceptable(network: WalkNetwork, agent: PedestrianAgent, config: PedestrianO
     if agent.start_t > config.max_start_t:
         return False
     try:
-        trajectory = agent.trajectory(network)
+        trajectory: ReplayTrajectory = agent.trajectory(network)
     except InvalidRoute:
         return False
     return (config.min_length <= trajectory.path.length <= config.max_length
@@ -227,8 +228,11 @@ def retyped(agent: PedestrianAgent, walker_type: WalkerType) -> PedestrianAgent:
     """
     if walker_type is agent.walker_type:
         return agent
+    old: str
+    new: str
+    top: float
     old, new, top = agent.walker_type.name, walker_type.name, WALKER_SPECS[walker_type].max_speed
-    profile = tuple(replace(point, speed=min(mapped_speed(old, new, point.speed), top)) if point.speed > 0 else point
+    profile: Tuple[SpeedPoint, ...] = tuple(replace(point, speed=min(mapped_speed(old, new, point.speed), top)) if point.speed > 0 else point
                     for point in agent.speed_profile)
     return replace(agent, walker_type=walker_type, speed_profile=profile)
 
@@ -253,7 +257,11 @@ def rehomed(route: WalkRoute, network: WalkNetwork, rng: Random, config: Pedestr
     """
     if not route.excursions:
         return route
+    arrival: CurbPoint
+    first: CurbPoint
     arrival, first = route.excursions[-1].arrival, route.excursions[0].entry
+    end: CurbPoint
+    begin: CurbPoint
     end, begin = route.end, route.start
     if network.gap(end, arrival) > config.max_approach:
         end = _around(network, arrival, rng, config.max_approach)

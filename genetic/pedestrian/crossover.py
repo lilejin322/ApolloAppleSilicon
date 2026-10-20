@@ -8,10 +8,10 @@ crosses each gene with its own rate and returns two children.
 
 from dataclasses import replace
 from random import Random
-from typing import Tuple, List
+from typing import Callable, Dict, List, Tuple
 
 from ...scenario.pedestrian import PedestrianAgent
-from ...scenario.walkways import MIN_WALK, WalkNetwork, WalkRoute
+from ...scenario.walkways import MIN_WALK, WalkNetwork, WalkRoute, Excursion
 from ..common import vary
 from ..profile_operators import cx_speed_profile, cx_start_time
 from .common import PedestrianOperatorConfig, acceptable, on_route, retyped
@@ -56,10 +56,10 @@ def _links_within_generation(route: WalkRoute, network: WalkNetwork,
     :returns: ``True`` if every sidewalk stretch satisfies the generation bounds.
     :rtype: bool
     """
-    excursions = route.excursions
+    excursions: Tuple[Excursion, ...] = route.excursions
     if not excursions:
         return MIN_WALK <= network.gap(route.start, route.end) <= max(MIN_WALK, 2 * config.max_approach)
-    links = [network.gap(a.arrival, b.entry) for a, b in zip(excursions, excursions[1:])]
+    links: List[float] = [network.gap(a.arrival, b.entry) for a, b in zip(excursions, excursions[1:])]
     return (network.gap(route.start, excursions[0].entry) <= config.max_approach
             and network.gap(route.end, excursions[-1].arrival) <= config.max_approach
             and all(link <= config.max_link for link in links))
@@ -93,17 +93,21 @@ def cx_shared_sidewalk(first: PedestrianAgent, second: PedestrianAgent, network:
         within the generation bounds, or the selected walk cannot be applied.
     :rtype: PedestrianAgent | None
     """
+    mine: List[str]
+    theirs: List[str]
     mine, theirs = _sidewalks(first.route), _sidewalks(second.route)
-    shape = _shape(first.route)
-    options = []
+    shape: Tuple[int, bool] = _shape(first.route)
+    options: List[WalkRoute] = []
     for i, sidewalk in enumerate(mine):
         for j, other in enumerate(theirs):
             if sidewalk != other:
                 continue
+            head: Tuple[Excursion, ...]
+            tail: Tuple[Excursion, ...]
             head, tail = first.route.excursions[:i], second.route.excursions[j:]
             if len(head) + len(tail) != shape[0] or (tail and any(e.turn_back is not None for e in head)):
                 continue
-            route = WalkRoute(first.route.start, head + tail, second.route.end)
+            route: WalkRoute = WalkRoute(first.route.start, head + tail, second.route.end)
             if not _links_within_generation(route, network, config):
                 continue
             if _shape(route) == shape and route not in (first.route, second.route):
@@ -189,7 +193,7 @@ def cx_pedestrian(first: PedestrianAgent, second: PedestrianAgent, network: Walk
         :returns: The resulting child, or ``lead`` unchanged if no crossover succeeds.
         :rtype: PedestrianAgent
         """
-        operators = {
+        operators: Dict[str, Callable[[PedestrianAgent], PedestrianAgent | None]] = {
             "shared_sidewalk": lambda child: cx_shared_sidewalk(child, other, network, rng, config),
             "walker_type": lambda child: cx_walker_type(child, other),
             # The partner's speeds are first mapped onto the child's type (``retyped``):

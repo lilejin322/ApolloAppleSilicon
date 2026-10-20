@@ -13,28 +13,29 @@ the usual earliest-change entries for AD proposals.
 from dataclasses import replace
 from math import inf, isfinite
 from random import Random
-from typing import Iterable, Tuple, List
+from typing import Dict, Iterable, Iterator, List, Sequence, Tuple, TypeAlias
+from networkx import DiGraph
 
-from ..scenario.routing import InvalidRoute, LaneRoute, RouteSpace, Transition, lane_changes
+from ..scenario.routing import InvalidRoute, LaneRoute, RouteSpace, Transition, lane_changes, RouteLeg
 from .common import OperatorConfig, gauss_step
 
-BRIDGE_LENGTH_SLACK = 0.1
+BRIDGE_LENGTH_SLACK: float = 0.1
 """Share of the longer parent by which a bridged child's target length may leave the parents' range."""
-BRIDGE_BOUND_SLACK = 0.25
+BRIDGE_BOUND_SLACK: float = 0.25
 """With ``bridge_within_parents``: share of the longer parent by which a bridged child's
 length may leave the parents' range. 0.1 shrank sunnyvale_loop bicycles (median 173 ->
 143 m in 30 generations); unbounded, shalun bicycles grew 150 -> 190 m."""
-BRIDGE_TRIALS = 6
+BRIDGE_TRIALS: int = 6
 """Lane pairs tried per bridge, nearest estimated length first."""
 
-__all__ = [
+__all__: List[str] = [
     "cx_shared_lane", "cx_bridge", "mut_reroute", "mut_extend_or_truncate", "mut_lane_change", "mut_s",
 ]
 
-_EXTRA_LANES = 2
+_EXTRA_LANES: int = 2
 """Lanes an extension may add beyond its draw to end on a lane where routes may end."""
 
-Path = Tuple[Tuple[str, ...], Tuple[Transition, ...]]
+Path: TypeAlias = Tuple[Tuple[str, ...], Tuple[Transition, ...]]
 """Lanes and the transitions between them, as yielded by ``RouteSpace.lane_paths``."""
 
 
@@ -57,15 +58,23 @@ def cx_shared_lane(first: LaneRoute, second: LaneRoute, space: RouteSpace, rng: 
         repeated lanes or the joined route cannot be constructed.
     :rtype: LaneRoute | None
     """
+    a: LaneRoute
+    b: LaneRoute
     a, b = first, second
-    positions = {lane: index for index, lane in enumerate(b.lanes)}
-    options = [(i, positions[lane]) for i, lane in enumerate(a.lanes)
+    positions: Dict[str, int] = {lane: index for index, lane in enumerate(b.lanes)}
+    options: List[Tuple[int, int]] = [(i, positions[lane]) for i, lane in enumerate(a.lanes)
                if lane in positions and _disjoint(a.lanes[:i], b.lanes[positions[lane]:])]
     if not options:
         return None
+    head: List[float]
+    tail: List[float]
     head, tail = _cumulative(space, a, None), _cumulative(space, b, None)
+    low: float
+    high: float
     low, high = sorted((head[-1], tail[-1]))
-    target = rng.uniform(low, high)
+    target: float = rng.uniform(low, high)
+    i: int
+    j: int
     i, j = min(options, key=lambda option: (abs(head[option[0]] + tail[-1] - tail[option[1]] - target), rng.random()))
     return _route(a.lanes[:i] + b.lanes[j:], a.transitions[:i] + b.transitions[j:], a.start_s, b.end_s)
 
@@ -100,33 +109,41 @@ def cx_bridge(first: LaneRoute, second: LaneRoute, space: RouteSpace, rng: Rando
         constructed, measured, and kept within the enabled parental length bounds.
     :rtype: LaneRoute | None
     """
+    a: LaneRoute
+    b: LaneRoute
     a, b = first, second
-    targets = {lane: index for index, lane in enumerate(b.lanes)}
-    entries = _entries(space, a, lane_change_s)
-    costs = {}
+    targets: Dict[str, int] = {lane: index for index, lane in enumerate(b.lanes)}
+    entries: List[float] = _entries(space, a, lane_change_s)
+    costs: Dict[Tuple[int, int], float] = {}
     for i, source in enumerate(a.lanes):
         for lane, cost in space.reachable(source, config.max_length, entry_s=entries[i]).items():
             if lane in targets:
                 costs[i, targets[lane]] = cost
     if not costs:
         return None
+    head: List[float]
+    tail: List[float]
     head, tail = _cumulative(space, a, lane_change_s), _cumulative(space, b, None)
+    low: float
+    high: float
     low, high = sorted((head[-1], tail[-1]))
-    spread = BRIDGE_LENGTH_SLACK * high
-    bound = BRIDGE_BOUND_SLACK * high
-    target = rng.uniform(max(low - spread, 0.0), high + spread)
-    estimates = {(i, j): head[i] + cost + tail[-1] - tail[j] for (i, j), cost in costs.items()}
-    pairs = sorted(estimates, key=lambda pair: (abs(estimates[pair] - target), rng.random()))
+    spread: float = BRIDGE_LENGTH_SLACK * high
+    bound: float = BRIDGE_BOUND_SLACK * high
+    target: float = rng.uniform(max(low - spread, 0.0), high + spread)
+    estimates: Dict[Tuple[int, int], float] = {(i, j): head[i] + cost + tail[-1] - tail[j] for (i, j), cost in costs.items()}
+    pairs: List[Tuple[int, int]] = sorted(estimates, key=lambda pair: (abs(estimates[pair] - target), rng.random()))
+    best: LaneRoute | None
+    best_gap: float
     best, best_gap = None, inf
     for i, j in pairs[:BRIDGE_TRIALS]:
-        paths = _paths(space, config, a.lanes[i], b.lanes[j], entries[i], a.lanes[:i], b.lanes[j + 1:])
+        paths: List[Path] = _paths(space, config, a.lanes[i], b.lanes[j], entries[i], a.lanes[:i], b.lanes[j + 1:])
         if not paths:
             continue
-        child = _splice(a, i, rng.choice(_fewest_extra_changes(paths, 0)), b, j)
+        child: LaneRoute | None = _splice(a, i, rng.choice(_fewest_extra_changes(paths, 0)), b, j)
         if child is None:
             continue
         try:
-            gap = abs(space.length(child) - target)
+            gap: float = abs(space.length(child) - target)
         except InvalidRoute:
             continue
         if config.bridge_within_parents and not max(low - bound, 0.0) <= space.length(child) <= high + bound:
@@ -159,14 +176,14 @@ def mut_reroute(route: LaneRoute, space: RouteSpace, rng: Random,
         or the selected replacement cannot be spliced into the route.
     :rtype: LaneRoute | None
     """
-    lanes = route.lanes
+    lanes: Tuple[str, ...] = route.lanes
     if len(lanes) < 2:
         return None
-    i = rng.randrange(len(lanes) - 1)
-    j = rng.randrange(i + 1, len(lanes))
-    current = lanes[i:j + 1]
+    i: int = rng.randrange(len(lanes) - 1)
+    j: int = rng.randrange(i + 1, len(lanes))
+    current: Tuple[str, ...] = lanes[i:j + 1]
     # One extra candidate, since the current stretch may be among them.
-    paths = [path for path in _paths(space, config, lanes[i], lanes[j], _entries(space, route, lane_change_s)[i],
+    paths: List[Path] = [path for path in _paths(space, config, lanes[i], lanes[j], _entries(space, route, lane_change_s)[i],
                                      lanes[:i], lanes[j + 1:], k=config.bridge_candidates + 1)
              if path[0] != current]
     if not paths:
@@ -174,23 +191,23 @@ def mut_reroute(route: LaneRoute, space: RouteSpace, rng: Random,
     # Keep the stretch's number of lane changes: lane changes are
     # mut_lane_change's gene, and alternatives between two lanes of one road
     # usually zigzag (out and back), which piled up lane changes over generations.
-    current_changes = lane_changes(route.transitions[i:j])
+    current_changes: int = lane_changes(route.transitions[i:j])
     paths = [path for path in paths if lane_changes(path[1]) == current_changes]
     if not paths:
         return None
     if isfinite(config.max_detour):
-        legs = space.legs(route, lane_change_s=lane_change_s)
-        stretch = (sum(leg.end_s - leg.start_s for leg in legs[i:j + 1])
+        legs: List[RouteLeg] = space.legs(route, lane_change_s=lane_change_s)
+        stretch: float = (sum(leg.end_s - leg.start_s for leg in legs[i:j + 1])
                    + current_changes * space.rules.min_lane_change_distance)
-        base = space.length(route, lane_change_s=lane_change_s) - stretch
-        lengths = []
+        base: float = space.length(route, lane_change_s=lane_change_s) - stretch
+        lengths: List[float] = []
         for path in paths:
-            child = _splice(route, i, path, route, j)
+            child: LaneRoute | None = _splice(route, i, path, route, j)
             try:
                 lengths.append(space.length(child) - base if child is not None else inf)
             except InvalidRoute:
                 lengths.append(inf)
-        shortest = min([stretch, *lengths])
+        shortest: float = min([stretch, *lengths])
         paths = [path for path, length in zip(paths, lengths) if length <= (1 + config.max_detour) * shortest + 1e-6]
         if not paths:
             return None
@@ -224,9 +241,11 @@ def mut_extend_or_truncate(route: LaneRoute, space: RouteSpace, rng: Random,
     :rtype: LaneRoute | None
     :raises ValueError: If ``direction`` is unsupported or route construction rejects the proposal.
     """
+    lanes: List[str]
+    transitions: List[Transition]
     lanes, transitions = list(route.lanes), list(route.transitions)
-    graph = space.graph
-    actions = []
+    graph: DiGraph = space.graph
+    actions: List[str] = []
     if len(lanes) > 1:
         actions += ["truncate_end", "truncate_start"]
     if any(lane not in lanes for lane in graph.successors(lanes[-1])):
@@ -241,14 +260,16 @@ def mut_extend_or_truncate(route: LaneRoute, space: RouteSpace, rng: Random,
     if not actions:
         return None
 
+    start_s: float | None
+    end_s: float | None
     start_s, end_s = route.start_s, route.end_s
-    action = rng.choice(actions)
+    action: str = rng.choice(actions)
     # Truncations drop as many lanes as extensions add (1-3 at the end, 1-2 at
     # the start). Keeping a uniformly random prefix dropped half the route on
     # average: most such children fell below min_length and were rejected,
     # while extensions were accepted, so routes grew over generations.
     if action == "truncate_end":
-        k = _truncation_index(space, rng, lanes[:-1], from_end=True, most=3)
+        k: int | None = _truncation_index(space, rng, lanes[:-1], from_end=True, most=3)
         if k is None:
             return None
         lanes, transitions = lanes[:k + 1], transitions[:k]
@@ -261,14 +282,14 @@ def mut_extend_or_truncate(route: LaneRoute, space: RouteSpace, rng: Random,
         lanes, transitions = lanes[k:], transitions[k:]
         start_s = space.random_endpoint(lanes[0], rng)
     elif action == "extend_end":
-        count = rng.randint(1, 3)
-        added = 0
+        count: int = rng.randint(1, 3)
+        added: int = 0
         # With endpoint restrictions, a few more lanes may be added to reach one an end may lie on.
         while added < count or (added < count + _EXTRA_LANES and not space.endpoint_ranges(lanes[-1])):
-            options = sorted(lane for lane in graph.successors(lanes[-1]) if lane not in lanes)
+            options: List[str] = sorted(lane for lane in graph.successors(lanes[-1]) if lane not in lanes)
             if not options:
                 break
-            lane = rng.choice(options)
+            lane: str = rng.choice(options)
             transitions.append(space.transition(lanes[-1], lane))
             lanes.append(lane)
             added += 1
@@ -324,24 +345,24 @@ def mut_lane_change(route: LaneRoute, space: RouteSpace, rng: Random,
         fails, no continuation endpoint is available, or added lane changes are rejected.
     :rtype: LaneRoute | None
     """
-    lanes = route.lanes
-    inserts = [(i, neighbor) for i, lane in enumerate(lanes)
+    lanes: Tuple[str, ...] = route.lanes
+    inserts: List[Tuple[int, str]] = [(i, neighbor) for i, lane in enumerate(lanes)
                for neighbor in sorted(space.graph.successors(lane))
                if neighbor not in lanes and space.transition(lane, neighbor) is not Transition.FORWARD]
-    removals = route.lane_change_indices
-    actions = (["insert"] if inserts else []) + (["remove"] if removals else [])
+    removals: Tuple[int, ...] = route.lane_change_indices
+    actions: List[str] = (["insert"] if inserts else []) + (["remove"] if removals else [])
     if not actions:
         return None
     if acceptance is None:
         acceptance = rng.random()
     if rng.choice(actions) == "insert":
-        child = _insert_lane_change(route, space, rng, config, *rng.choice(inserts),
+        child: LaneRoute | None = _insert_lane_change(route, space, rng, config, *rng.choice(inserts),
                                     lane_change_s=lane_change_s)
     else:
         child = _remove_lane_change(route, space, rng, config, rng.choice(removals),
                                     lane_change_s=lane_change_s)
     if child is not None:
-        added = child.lane_changes - route.lane_changes
+        added: int = child.lane_changes - route.lane_changes
         if added > 0 and acceptance >= config.lane_change_odds ** added:
             return None
     return child
@@ -368,22 +389,28 @@ def _insert_lane_change(route: LaneRoute, space: RouteSpace, rng: Random, config
         distance, no continuation endpoint is available, or construction repeats a lane.
     :rtype: LaneRoute | None
     """
+    lanes: Tuple[str, ...]
+    transitions: Tuple[Transition, ...]
     lanes, transitions = route.lanes, route.transitions
-    step = space.transition(lanes[i], neighbor)
-    entry = _entries(space, route, lane_change_s)[i]
+    step: Transition = space.transition(lanes[i], neighbor)
+    entry: float = _entries(space, route, lane_change_s)[i]
     if entry + space.rules.min_lane_change_distance > space.lane_length(lanes[i]):
         return None
     if i < len(lanes) - 1:
-        j = rng.randrange(i + 1, len(lanes))
-        paths = _paths(space, config, neighbor, lanes[j], space.entry_after_change(lanes[i], entry, neighbor),
+        j: int = rng.randrange(i + 1, len(lanes))
+        paths: List[Path] = _paths(space, config, neighbor, lanes[j], space.entry_after_change(lanes[i], entry, neighbor),
                        lanes[:i + 1], lanes[j + 1:])
         if paths:
+            path: Tuple[str, ...]
+            steps: Tuple[Transition, ...]
             path, steps = rng.choice(paths)
             return _route(lanes[:i + 1] + path + lanes[j + 1:],
                           transitions[:i] + (step,) + steps + transitions[j:], route.start_s, route.end_s)
     # No way back: stay on the neighbouring side and drive on forward about as
     # far as the route did (ending right on the neighbour truncated it).
-    remaining = _cumulative(space, route, lane_change_s)[-1] - _cumulative(space, route, lane_change_s)[i]
+    remaining: float = _cumulative(space, route, lane_change_s)[-1] - _cumulative(space, route, lane_change_s)[i]
+    tail: Tuple[str, ...]
+    end_s: float | None
     tail, steps, end_s = _drive_on(space, rng, lanes[:i + 1] + (neighbor,), remaining)
     if end_s is None:
         return None
@@ -409,24 +436,30 @@ def _remove_lane_change(route: LaneRoute, space: RouteSpace, rng: Random, config
         or the selected splice repeats a lane.
     :rtype: LaneRoute | None
     """
+    lanes: Tuple[str, ...]
+    transitions: Tuple[Transition, ...]
     lanes, transitions = route.lanes, route.transitions
-    j = rng.randrange(i + 1, len(lanes))
-    current = lane_changes(transitions[i:j])
-    paths = [path for path in _paths(space, config, lanes[i], lanes[j], _entries(space, route, lane_change_s)[i],
+    j: int = rng.randrange(i + 1, len(lanes))
+    current: int = lane_changes(transitions[i:j])
+    paths: List[Path] = [path for path in _paths(space, config, lanes[i], lanes[j], _entries(space, route, lane_change_s)[i],
                                      lanes[:i], lanes[j + 1:])
              if lane_changes(path[1]) < current]
     if paths:
         return _splice(route, i, rng.choice(paths), route, j)
     # No way around it: drive on forward from before the lane change about as
     # far as the route did (ending before it truncated the route).
-    remaining = _cumulative(space, route, lane_change_s)[-1] - _cumulative(space, route, lane_change_s)[i]
+    remaining: float = _cumulative(space, route, lane_change_s)[-1] - _cumulative(space, route, lane_change_s)[i]
+    tail: Tuple[str, ...]
+    steps: Tuple[Transition, ...]
+    end_s: float | None
     tail, steps, end_s = _drive_on(space, rng, lanes[:i + 1], remaining)
     if end_s is None:
         return None
     return _route(tail, transitions[:i] + steps, route.start_s, end_s)
 
 
-def _drive_on(space: RouteSpace, rng: Random, lanes, remaining: float):
+def _drive_on(space: RouteSpace, rng: Random, lanes: Sequence[str], remaining: float,
+              ) -> Tuple[Tuple[str, ...], Tuple[Transition, ...], float | None]:
     """
     Continue a lane sequence through forward successors for approximately the requested distance.
 
@@ -442,17 +475,18 @@ def _drive_on(space: RouteSpace, rng: Random, lanes, remaining: float):
         and final lane position in metres, or ``None`` for that position if no endpoint is allowed.
     :rtype: Tuple[Tuple[str, ...], Tuple[Transition, ...], float | None]
     """
+    steps: List[Transition]
     lanes, steps = list(lanes), []
     while remaining > space.lane_length(lanes[-1]):
-        options = sorted(lane for lane in space.graph.successors(lanes[-1])
+        options: List[str] = sorted(lane for lane in space.graph.successors(lanes[-1])
                          if lane not in lanes and space.transition(lanes[-1], lane) is Transition.FORWARD)
         if not options:
             break
         remaining -= space.lane_length(lanes[-1])
         lanes.append(rng.choice(options))
         steps.append(Transition.FORWARD)
-    s = min(max(remaining, 0.0), space.lane_length(lanes[-1]))
-    end_s = space.nearest_endpoint(lanes[-1], s) if space.restricts_endpoints else s
+    s: float = min(max(remaining, 0.0), space.lane_length(lanes[-1]))
+    end_s: float | None = space.nearest_endpoint(lanes[-1], s) if space.restricts_endpoints else s
     return tuple(lanes), tuple(steps), end_s
 
 
@@ -471,8 +505,10 @@ def mut_s(route: LaneRoute, space: RouteSpace, rng: Random,
     :returns: The mutant, or ``None`` if a moved endpoint's lane has no allowed position.
     :rtype: LaneRoute | None
     """
+    start_s: float | None
+    end_s: float | None
     start_s, end_s = route.start_s, route.end_s
-    which = rng.choice(("start", "end", "both"))
+    which: str = rng.choice(("start", "end", "both"))
     if which in ("start", "both"):
         start_s = gauss_step(rng, start_s, config.sigma_s, space.lane_length(route.lanes[0]))
         if space.restricts_endpoints:
@@ -486,7 +522,7 @@ def mut_s(route: LaneRoute, space: RouteSpace, rng: Random,
     return replace(route, start_s=start_s, end_s=end_s)
 
 
-def _truncation_index(space: RouteSpace, rng: Random, lanes, *, from_end: bool, most: int) -> int | None:
+def _truncation_index(space: RouteSpace, rng: Random, lanes: Sequence[str], *, from_end: bool, most: int) -> int | None:
     """
     Select an allowed endpoint lane near the truncated end of a lane sequence.
 
@@ -502,12 +538,12 @@ def _truncation_index(space: RouteSpace, rng: Random, lanes, *, from_end: bool, 
     :returns: An index into ``lanes``, or ``None`` if no lane permits an endpoint.
     :rtype: int | None
     """
-    allowed = [index for index, lane in enumerate(lanes)
+    allowed: List[int] = [index for index, lane in enumerate(lanes)
                if not space.restricts_endpoints or space.endpoint_ranges(lane)]
     if not allowed:
         return None
-    reach = range(max(len(lanes) - most, 0), len(lanes)) if from_end else range(min(most, len(lanes)))
-    near = [index for index in allowed if index in reach]
+    reach: range = range(max(len(lanes) - most, 0), len(lanes)) if from_end else range(min(most, len(lanes)))
+    near: List[int] = [index for index in allowed if index in reach]
     if near:
         return rng.choice(near)
     return max(allowed) if from_end else min(allowed)
@@ -526,7 +562,8 @@ def _disjoint(lanes: Iterable[str], *others: Iterable[str]) -> bool:
     return all(lanes.isdisjoint(other) for other in others)
 
 
-def _route(lanes, transitions, start_s: float, end_s: float) -> LaneRoute | None:
+def _route(lanes: Iterable[str], transitions: Iterable[Transition],
+           start_s: float, end_s: float) -> LaneRoute | None:
     """
     Construct a lane route after rejecting repeated lane IDs.
 
@@ -579,7 +616,7 @@ def _paths(space: RouteSpace, config: OperatorConfig, source: str, target: str, 
     :returns: Retained paths, each containing lane IDs and their connecting transitions.
     :rtype: List[Path]
     """
-    candidates = space.lane_paths(source, target, config.bridge_candidates if k is None else k,
+    candidates: Iterator[Path] = space.lane_paths(source, target, config.bridge_candidates if k is None else k,
                                   max_cost=config.max_length, entry_s=entry_s)
     return [(lanes, steps) for lanes, steps in candidates if _disjoint(lanes, *avoid)]
 
@@ -601,11 +638,13 @@ def _cumulative(space: RouteSpace, route: LaneRoute, lane_change_s: Tuple[float,
     :rtype: List[float]
     """
     try:
-        stretches = [leg.end_s - leg.start_s for leg in space.legs(route, lane_change_s=lane_change_s)]
+        stretches: List[float] = [leg.end_s - leg.start_s for leg in space.legs(route, lane_change_s=lane_change_s)]
     except InvalidRoute:
         stretches = [space.service.get_lane_by_id(lane).length for lane in route.lanes]
         stretches[-1] = route.end_s
         stretches[0] -= route.start_s
+    marks: List[float]
+    distance: float
     marks, distance = [], 0.0
     for index, stretch in enumerate(stretches):
         marks.append(distance)
@@ -625,7 +664,7 @@ def _fewest_extra_changes(paths: List[Path], changes: int) -> List[Path]:
         an empty input yields an empty list.
     :rtype: List[Path]
     """
-    gaps = [abs(lane_changes(steps) - changes) for _, steps in paths]
+    gaps: List[int] = [abs(lane_changes(steps) - changes) for _, steps in paths]
     return [path for path, gap in zip(paths, gaps) if gap == min(gaps)]
 
 
@@ -645,6 +684,8 @@ def _splice(head: LaneRoute, i: int, path: Path, tail: LaneRoute, j: int) -> Lan
     :rtype: LaneRoute | None
     :raises ValueError: If the combined route fails structural or endpoint-finiteness validation.
     """
+    lanes: Tuple[str, ...]
+    steps: Tuple[Transition, ...]
     lanes, steps = path
     return _route(head.lanes[:i] + lanes + tail.lanes[j + 1:], head.transitions[:i] + steps + tail.transitions[j:],
                   head.start_s, tail.end_s)

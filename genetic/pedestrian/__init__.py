@@ -10,6 +10,8 @@ start-time operators are shared with NPC vehicles and bicycles
 (``genetic.profile_operators``).
 """
 
+from typing import List
+
 from .common import GENES, PedestrianOperatorConfig, acceptable
 from .crossover import cx_pedestrian, cx_route_swap, cx_shared_sidewalk, cx_walk_style, cx_walker_type
 from .mutation import (
@@ -17,7 +19,7 @@ from .mutation import (
     mut_walk_stop, mut_walk_style, mut_walker_type,
 )
 
-__all__ = [
+__all__: List[str] = [
     "COUNT_ACTIONS", "GENES", "STOP_ACTIONS", "TURN_BACK_ACTIONS", "PedestrianOperatorConfig", "acceptable",
     "cx_pedestrian", "cx_route_swap", "cx_shared_sidewalk", "cx_walk_style", "cx_walker_type",
     "mut_count", "mut_kind", "mut_pedestrian", "mut_redraw", "mut_shift", "mut_turn_back", "mut_walk_stop", "mut_walk_style",

@@ -13,9 +13,9 @@ Pedestrian wrappers supply compatible walk-network distance and point mapping.
 
 from dataclasses import replace
 from random import Random
-from typing import Sequence, TypeVar, List, Tuple
+from typing import Dict, List, Sequence, Set, Tuple, TypeVar
 
-from ..scenario import InvalidRoute, RouteSpace, SpeedPoint
+from ..scenario import InvalidRoute, RouteSpace, SpeedPoint, RiderType, VehicleType, WalkerType
 from ..scenario.replay import MAX_SPEED_POINTS, point_reference
 from ..scenario.realism import draw_speed, speed_step, style_step
 from .common import ReplayOperatorConfig, gauss_step
@@ -23,7 +23,7 @@ from .common import ReplayOperatorConfig, gauss_step
 Replayed = TypeVar("Replayed")
 """An NPCVehicleAgent, BicycleAgent or PedestrianAgent."""
 
-__all__ = [
+__all__: List[str] = [
     "clamp_speeds", "cx_drive_style", "cx_speed_profile", "mut_drive_style", "cx_start_time", "mut_speed", "mut_speed_point", "mut_start_t", "mut_stop",
     "with_profile",
 ]
@@ -54,7 +54,7 @@ def kind_of(agent: Replayed) -> str:
     :raises TypeError: If the agent has no non-``None`` vehicle, rider, or walker type.
     """
     for attribute in ("vehicle_type", "rider_type", "walker_type"):
-        kind = getattr(agent, attribute, None)
+        kind: VehicleType | RiderType | WalkerType | None = getattr(agent, attribute, None)
         if kind is not None:
             return kind.name
     raise TypeError(f"{type(agent).__name__} has no vehicle, rider or walker type")
@@ -105,7 +105,7 @@ def cx_speed_profile(first: Replayed, second: Replayed, rng: Random, space: Rout
     :rtype: Replayed | None
     """
     if space is None:
-        order = {lane_id: index for index, lane_id in enumerate(first.route.lanes)}
+        order: Dict[str, int] = {lane_id: index for index, lane_id in enumerate(first.route.lanes)}
 
         def key(point: SpeedPoint) -> Tuple[int, float]:
             """
@@ -118,29 +118,33 @@ def cx_speed_profile(first: Replayed, second: Replayed, rng: Random, space: Rout
             """
             return order[point.lane_id], point.s
 
-        theirs = [point for point in second.speed_profile if point.lane_id in order]
-        cuts = sorted({key(point) for point in first.speed_profile} | {key(point) for point in theirs})
-        cut = rng.choice(cuts)
-        profile = (tuple(point for point in first.speed_profile if key(point) < cut)
-                   + clamp_speeds([point for point in theirs if key(point) >= cut], first.spec.max_speed))
+        matching: List[SpeedPoint] = [point for point in second.speed_profile if point.lane_id in order]
+        cuts: List[Tuple[int, float]] = sorted({key(point) for point in first.speed_profile} | {key(point) for point in matching})
+        lane_cut: Tuple[int, float] = rng.choice(cuts)
+        profile: Tuple[SpeedPoint, ...] = (tuple(point for point in first.speed_profile if key(point) < lane_cut)
+                   + clamp_speeds([point for point in matching if key(point) >= lane_cut], first.spec.max_speed))
         return None if profile == first.speed_profile else with_profile(first, profile)
     second_space = second_space or space
     try:
-        total = space.length(first.route, lane_change_s=first.lane_change_s)
-        other_total = second_space.length(second.route, lane_change_s=second.lane_change_s)
-        mine = [(first.route_distance(space, point.lane_id, point.s), point) for point in first.speed_profile]
-        theirs = []
-        on_route = set(first.route.lanes)
+        total: float = space.length(first.route, lane_change_s=first.lane_change_s)
+        other_total: float = second_space.length(second.route, lane_change_s=second.lane_change_s)
+        mine: List[Tuple[float, SpeedPoint]] = [(first.route_distance(space, point.lane_id, point.s), point) for point in first.speed_profile]
+        theirs: List[Tuple[float, SpeedPoint]] = []
+        on_route: Set[str] = set(first.route.lanes)
         for point in second.speed_profile:
             if point.lane_id in on_route:
-                distance = first.route_distance(space, point.lane_id, point.s)
+                distance: float = first.route_distance(space, point.lane_id, point.s)
                 theirs.append((distance, point))
             else:
-                share = second.route_distance(second_space, point.lane_id, point.s) / other_total if other_total > 0 else 0.0
+                share: float = second.route_distance(second_space, point.lane_id, point.s) / other_total if other_total > 0 else 0.0
+                lane_id: str
+                s: float
                 lane_id, s = first.route_point(space, share * total)
-                speed = point.speed
+                speed: float = point.speed
                 if speed > 0:
                     # Keep the point's cruise factor: its speed relative to the lane it moves to.
+                    kind: str
+                    top: float
                     kind, top = kind_of(first), first.spec.max_speed
                     speed *= (point_reference(space, lane_id, kind, top)
                               / point_reference(second_space, point.lane_id, kind_of(second), second.spec.max_speed))
@@ -148,22 +152,22 @@ def cx_speed_profile(first: Replayed, second: Replayed, rng: Random, space: Rout
                 theirs.append((first.route_distance(space, lane_id, s), replace(point, lane_id=lane_id, s=s, speed=speed)))
     except (InvalidRoute, KeyError):
         return None
-    cut = rng.choice(sorted({d for d, _ in mine} | {d for d, _ in theirs}))
-    placed = [(d, p) for d, p in mine if d < cut] + [(d, p) for d, p in sorted(theirs, key=lambda item: item[0]) if d >= cut]
-    spare = [(d, p) for d, p in mine if d >= cut] + [(d, p) for d, p in theirs if d < cut]
+    cut: float = rng.choice(sorted({d for d, _ in mine} | {d for d, _ in theirs}))
+    placed: List[Tuple[float, SpeedPoint]] = [(d, p) for d, p in mine if d < cut] + [(d, p) for d, p in sorted(theirs, key=lambda item: item[0]) if d >= cut]
+    spare: List[Tuple[float, SpeedPoint]] = [(d, p) for d, p in mine if d >= cut] + [(d, p) for d, p in theirs if d < cut]
     # The child keeps the lead parent's number of points: splices ran up to
     # eight points and were cut to four, so counts fell over generations
     # (-0.14 points per child). Excess points go at random (any of them: keeping
     # the first would leave a 1-point parent unchanged), missing ones come at
     # random from the parents' unused points.
-    target = len(first.speed_profile)
-    kept = _distinct(placed)
+    target: int = len(first.speed_profile)
+    kept: List[Tuple[float, SpeedPoint]] = _distinct(placed)
     while len(kept) > target:
         del kept[rng.randrange(len(kept))]
     while kept and kept[-1][1].speed == 0:  # a trailing stop is dropped below
         kept.pop()
     while len(kept) < target and spare:
-        candidate = spare.pop(rng.randrange(len(spare)))
+        candidate: Tuple[float, SpeedPoint] = spare.pop(rng.randrange(len(spare)))
         kept = _distinct(kept + [candidate])
         while kept and kept[-1][1].speed == 0:
             kept.pop()
@@ -178,7 +182,7 @@ def cx_speed_profile(first: Replayed, second: Replayed, rng: Random, space: Rout
     return with_profile(first, profile)
 
 
-def _distinct(placed: List) -> List:
+def _distinct(placed: List[Tuple[float, SpeedPoint]]) -> List[Tuple[float, SpeedPoint]]:
     """
     Sort distance/point pairs in driving order and discard near-duplicate distances.
 
@@ -186,11 +190,11 @@ def _distinct(placed: List) -> List:
     metres of the last retained distance as duplicates. Equal-distance pairs
     retain their input order before filtering.
 
-    :param List placed: Pairs of driven distance in metres and the corresponding speed point.
+    :param List[Tuple[float, SpeedPoint]] placed: Pairs of driven distance in metres and the corresponding speed point.
     :returns: A new list of retained distance/point pairs in ascending distance order.
-    :rtype: List
+    :rtype: List[Tuple[float, SpeedPoint]]
     """
-    kept = []
+    kept: List[Tuple[float, SpeedPoint]] = []
     for distance, point in sorted(placed, key=lambda item: item[0]):
         if kept and distance <= kept[-1][0] + 1e-6:
             continue
@@ -229,17 +233,17 @@ def mut_speed(agent: Replayed, rng: Random, config: ReplayOperatorConfig,
     :rtype: Replayed | None
     :raises TypeError: If lane-aware mutation cannot determine the agent's realism type.
     """
-    profile = agent.speed_profile
-    moving = [index for index, point in enumerate(profile) if point.speed > 0]
+    profile: Tuple[SpeedPoint, ...] = agent.speed_profile
+    moving: List[int] = [index for index, point in enumerate(profile) if point.speed > 0]
     if not moving:
         return None
-    index = rng.choice(moving)
-    max_speed = agent.spec.max_speed
-    low = min(config.min_speed, max_speed)
+    index: int = rng.choice(moving)
+    max_speed: float = agent.spec.max_speed
+    low: float = min(config.min_speed, max_speed)
     if space is not None:
-        kind = kind_of(agent)
-        reference = point_reference(space, profile[index].lane_id, kind, max_speed)
-        speed = speed_step(rng, kind, profile[index].speed, reference, low, max_speed, config.sigma_speed)
+        kind: str = kind_of(agent)
+        reference: float = point_reference(space, profile[index].lane_id, kind, max_speed)
+        speed: float | None = speed_step(rng, kind, profile[index].speed, reference, low, max_speed, config.sigma_speed)
         if speed is None:
             return None
     else:
@@ -247,7 +251,7 @@ def mut_speed(agent: Replayed, rng: Random, config: ReplayOperatorConfig,
     return with_profile(agent, profile[:index] + (replace(profile[index], speed=speed),) + profile[index + 1:])
 
 
-SPEED_POINT_ACTIONS = ("add", "remove", "move")
+SPEED_POINT_ACTIONS: Tuple[str, ...] = ("add", "remove", "move")
 """``mut_speed_point``'s actions, drawn with equal chance once per mutation event."""
 
 
@@ -281,31 +285,33 @@ def mut_speed_point(agent: Replayed, rng: Random, config: ReplayOperatorConfig,
         after the initial distance mapping.
     :raises TypeError: If lane-aware addition cannot determine the agent's realism type.
     """
-    profile = list(agent.speed_profile)
+    profile: List[SpeedPoint] = list(agent.speed_profile)
     action = rng.choice(SPEED_POINT_ACTIONS) if action is None else action
     if action not in SPEED_POINT_ACTIONS:
         raise ValueError(f"action must be one of {SPEED_POINT_ACTIONS}, got {action!r}")
     if (action == "add" and len(profile) >= MAX_SPEED_POINTS) or (action == "remove" and len(profile) <= 1):
         action = "move"
-    max_speed = agent.spec.max_speed
+    max_speed: float = agent.spec.max_speed
     if action == "remove":
         del profile[rng.randrange(len(profile))]
         return with_profile(agent, profile)
     try:
-        marks = [agent.route_distance(space, point.lane_id, point.s) for point in profile] if space else None
+        marks: List[float] | None = [agent.route_distance(space, point.lane_id, point.s) for point in profile] if space else None
     except InvalidRoute:
         return None
     if action == "add":
-        speed = rng.uniform(min(config.min_speed, max_speed), max_speed)
+        speed: float = rng.uniform(min(config.min_speed, max_speed), max_speed)
         if marks is not None:
-            distance = rng.uniform(0, space.length(agent.route, lane_change_s=agent.lane_change_s))
+            distance: float = rng.uniform(0, space.length(agent.route, lane_change_s=agent.lane_change_s))
             if any(abs(distance - mark) < 1e-6 for mark in marks):
                 return None
+            lane_id: str
+            s: float
             lane_id, s = agent.route_point(space, distance)
-            kind = kind_of(agent)
+            kind: str = kind_of(agent)
             speed = draw_speed(rng, kind, point_reference(space, lane_id, kind, max_speed),
                                min(config.min_speed, max_speed), max_speed)
-            index = sum(mark < distance for mark in marks)
+            index: int = sum(mark < distance for mark in marks)
         else:
             index = rng.randrange(len(profile))
             lane_id, s = profile[index].lane_id, profile[index].s + abs(rng.gauss(0, config.sigma_s))
@@ -313,11 +319,11 @@ def mut_speed_point(agent: Replayed, rng: Random, config: ReplayOperatorConfig,
         profile.insert(index, SpeedPoint(lane_id, s, speed))
         return with_profile(agent, profile)
     index = rng.randrange(len(profile))
-    step = rng.gauss(0, config.sigma_s)
+    step: float = rng.gauss(0, config.sigma_s)
     if marks is not None:
         distance = marks[index] + step
-        low = marks[index - 1] if index else -1.0
-        high = marks[index + 1] if index < len(marks) - 1 else float("inf")
+        low: float = marks[index - 1] if index else -1.0
+        high: float = marks[index + 1] if index < len(marks) - 1 else float("inf")
         if not (low < distance < high and distance >= 0):
             return None
         lane_id, s = agent.route_point(space, distance)
@@ -347,20 +353,20 @@ def mut_stop(agent: Replayed, rng: Random, config: ReplayOperatorConfig) -> Repl
         stop, or the replacement profile is malformed.
     :rtype: Replayed | None
     """
-    profile = agent.speed_profile
-    stoppable = [index for index, point in enumerate(profile[:-1]) if point.speed > 0 and index > 0]
-    stops = [index for index, point in enumerate(profile) if point.speed == 0]
-    actions = (["stop"] if stoppable else []) + (["go", "dwell"] if stops else [])
+    profile: Tuple[SpeedPoint, ...] = agent.speed_profile
+    stoppable: List[int] = [index for index, point in enumerate(profile[:-1]) if point.speed > 0 and index > 0]
+    stops: List[int] = [index for index, point in enumerate(profile) if point.speed == 0]
+    actions: List[str] = (["stop"] if stoppable else []) + (["go", "dwell"] if stops else [])
     if not actions:
         return None
-    action = rng.choice(actions)
+    action: str = rng.choice(actions)
     if action == "stop":
-        index = rng.choice(stoppable)
-        point = replace(profile[index], speed=0.0, dwell=rng.uniform(0, config.max_dwell))
+        index: int = rng.choice(stoppable)
+        point: SpeedPoint = replace(profile[index], speed=0.0, dwell=rng.uniform(0, config.max_dwell))
     else:
         index = rng.choice(stops)
         if action == "go":
-            max_speed = agent.spec.max_speed
+            max_speed: float = agent.spec.max_speed
             point = replace(profile[index], speed=rng.uniform(min(config.min_speed, max_speed), max_speed),
                             dwell=0.0)
         else:

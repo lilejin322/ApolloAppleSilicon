@@ -14,11 +14,11 @@ from dataclasses import dataclass, field
 from math import isfinite
 from random import Random
 from types import MappingProxyType
-from typing import Callable, ClassVar, Mapping, Sequence, TypeVar, Tuple
+from typing import Callable, ClassVar, Dict, List, Mapping, Sequence, Set, Tuple, TypeVar
 
 from ..utils import require_nonnegative
 
-logger = logging.getLogger(__name__)
+logger: logging.Logger = logging.getLogger(__name__)
 
 Agent = TypeVar("Agent")
 
@@ -109,7 +109,7 @@ class OperatorConfig:
         if self.bridge_candidates < 1:
             raise ValueError("bridge_candidates must be at least 1")
         for weights, names in ((self.crossover_weights, self.CROSSOVERS), (self.mutation_weights, self.MUTATIONS)):
-            unknown = set(weights) - set(names)
+            unknown: Set[str] = set(weights) - set(names)
             if unknown:
                 raise ValueError(f"unknown operators {sorted(unknown)}; expected some of {names}")
             if not all(isfinite(weight) and weight >= 0 for weight in weights.values()):
@@ -151,12 +151,12 @@ def apply_weighted(
     :returns: The first accepted child, or ``None`` if no eligible operator succeeds.
     :rtype: Agent | None
     """
-    remaining = {name: weight for name, weight in weights.items() if weight > 0 and name in operators}
+    remaining: Dict[str, float] = {name: weight for name, weight in weights.items() if weight > 0 and name in operators}
     while remaining:
-        names = sorted(remaining)
-        name = rng.choices(names, weights=[remaining[n] for n in names])[0]
+        names: List[str] = sorted(remaining)
+        name: str = rng.choices(names, weights=[remaining[n] for n in names])[0]
         for _ in range(attempts):
-            child = operators[name]()
+            child: Agent | None = operators[name]()
             if child is not None and accept(child):
                 logger.debug("%s produced %s", name, "->".join(child.route.lanes))
                 return child
@@ -245,7 +245,7 @@ class ReplayOperatorConfig(OperatorConfig):
         """
         super().__post_init__()
         for rates in (self.crossover_rates, self.mutation_rates):
-            unknown = set(rates) - set(self.GENES)
+            unknown: Set[str] = set(rates) - set(self.GENES)
             if unknown:
                 raise ValueError(f"unknown genes {sorted(unknown)}; expected some of {self.GENES}")
             if not all(isfinite(rate) and 0 <= rate <= 1 for rate in rates.values()):
@@ -292,22 +292,24 @@ def vary(lead: Agent, order: Sequence[str], operators: Mapping[str, Callable[[Ag
     :raises ValueError: If the final child fails the acceptance check.
     :raises KeyError: If an operator name is missing from ``genes`` when operators are grouped.
     """
-    child = lead
+    child: Agent = lead
     for gene in order:
         if rng.random() >= rates.get(gene, 0.0):
             continue
-        current = child
+        current: Agent = child
 
         def changes(candidate: Agent) -> bool:
             return candidate != current and accept(candidate)
 
-        step = apply_weighted(
+        step: Agent | None = apply_weighted(
             {name: (lambda op=op: op(current)) for name, op in operators.items() if genes[name] == gene},
             weights, rng, attempts, changes)
         if step is None and gene in fallbacks:
+            chance: float
+            fallback: Callable[[Agent], Agent | None]
             chance, fallback = fallbacks[gene]
             if rng.random() < chance:
-                name = f"{gene} fallback"
+                name: str = f"{gene} fallback"
                 step = apply_weighted({name: lambda: fallback(current)}, {name: 1.0}, rng, attempts, changes)
         if step is not None:
             child = step

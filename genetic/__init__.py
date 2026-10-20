@@ -10,6 +10,8 @@ share names, so they are imported from their subpackage; only the entry
 points are exported here. Scenario-level operators will wrap these.
 """
 
+from typing import List
+
 from . import ad_agent, bicycle, npc_agent, pedestrian, profile_operators, route_operators
 from .ad_agent import ADOperatorConfig, cx_ad_agent, mut_ad_agent
 from .bicycle import BicycleOperatorConfig, cx_bicycle, mut_bicycle
@@ -17,7 +19,7 @@ from .common import OperatorConfig, ReplayOperatorConfig
 from .npc_agent import NPCOperatorConfig, cx_npc_agent, mut_npc_agent
 from .pedestrian import PedestrianOperatorConfig, cx_pedestrian, mut_pedestrian
 
-__all__ = [
+__all__: List[str] = [
     "ADOperatorConfig", "BicycleOperatorConfig", "NPCOperatorConfig", "OperatorConfig", "ReplayOperatorConfig",
     "ad_agent", "bicycle", "cx_ad_agent", "cx_bicycle", "cx_npc_agent", "mut_ad_agent", "mut_bicycle",
     "mut_npc_agent", "npc_agent", "profile_operators", "route_operators",

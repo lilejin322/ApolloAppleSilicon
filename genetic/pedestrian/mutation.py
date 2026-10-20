@@ -10,7 +10,7 @@ favoured and the generation mixes are kept.
 
 from dataclasses import replace
 from random import Random
-from typing import Tuple
+from typing import Callable, Dict, List, Set, Tuple
 from shapely.geometry import LineString
 
 from ...scenario.pedestrian import (
@@ -20,13 +20,14 @@ from ...scenario.pedestrian import (
 from ...scenario.realism import draw_type, style_step
 from ...scenario.replay import MAX_SPEED_POINTS, SpeedPoint, ordered_points
 from ...scenario.walkways import (
-    MAX_EXCURSIONS, MIN_TURN_BACK, MIN_WALK, TURN_BACK_SHARE, Excursion, ExcursionKind, WalkNetwork, WalkRoute,
+    MAX_EXCURSIONS, MIN_TURN_BACK, MIN_WALK, TURN_BACK_SHARE, Excursion, ExcursionKind, WalkNetwork,
+    WalkRoute, CurbPoint, WalkElement, WalkFrame,
 )
 from ..common import gauss_step, vary
 from ..profile_operators import SPEED_POINT_ACTIONS, mut_speed, mut_speed_point, mut_start_t, with_profile
 from .common import PedestrianOperatorConfig, acceptable, on_route, rehomed, retyped
 
-COUNT_ACTIONS = ("add", "remove")
+COUNT_ACTIONS: Tuple[str, ...] = ("add", "remove")
 """``mut_count``'s actions, drawn with equal chance once per mutation event."""
 
 
@@ -44,12 +45,12 @@ def _with_excursion(agent: PedestrianAgent, index: int, excursion: Excursion | N
     :returns: The updated agent, or ``None`` if the modified walk cannot be applied.
     :rtype: PedestrianAgent | None
     """
-    excursions = list(agent.route.excursions)
+    excursions: List[Excursion] = list(agent.route.excursions)
     if excursion is None:
         del excursions[index]
     else:
         excursions[index] = excursion
-    route = rehomed(replace(agent.route, excursions=tuple(excursions)), network, rng, config, start=True)
+    route: WalkRoute = rehomed(replace(agent.route, excursions=tuple(excursions)), network, rng, config, start=True)
     return on_route(agent, route, network)
 
 
@@ -74,21 +75,23 @@ def mut_shift(agent: PedestrianAgent, network: WalkNetwork, rng: Random,
     :returns: The mutant, or ``None`` if the modified walk is invalid or out of range.
     :rtype: PedestrianAgent | None
     """
-    route = agent.route
-    choices = ["start", "end"] + [(index, side) for index in range(len(route.excursions)) for side in ("entry", "exit")]
-    choice = rng.choice(choices)
+    route: WalkRoute = agent.route
+    choices: List[str | Tuple[int, str]] = ["start", "end"] + [(index, side) for index in range(len(route.excursions)) for side in ("entry", "exit")]
+    choice: str | Tuple[int, str] = rng.choice(choices)
     if choice in ("start", "end"):
-        point = getattr(route, choice)
-        moved = network.wrapped(point.sidewalk, point.s + rng.gauss(0, config.sigma_s))
-        candidate = replace(route, **{choice: moved})
+        point: CurbPoint = getattr(route, choice)
+        moved: CurbPoint = network.wrapped(point.sidewalk, point.s + rng.gauss(0, config.sigma_s))
+        candidate: WalkRoute = replace(route, **{choice: moved})
         if not _within_approach(candidate, network, config):
             return None
         return on_route(agent, candidate, network)
+    index: int
+    side: str
     index, side = choice
-    excursion = route.excursions[index]
+    excursion: Excursion = route.excursions[index]
     point = getattr(excursion, side)
     moved = network.wrapped(point.sidewalk, point.s + rng.gauss(0, config.sigma_curb))
-    excursions = route.excursions[:index] + (replace(excursion, **{side: moved}),) + route.excursions[index + 1:]
+    excursions: Tuple[Excursion, ...] = route.excursions[:index] + (replace(excursion, **{side: moved}),) + route.excursions[index + 1:]
     candidate = replace(route, excursions=excursions)
     if not _within_approach(candidate, network, config):
         return None
@@ -132,9 +135,9 @@ def mut_redraw(agent: PedestrianAgent, network: WalkNetwork, rng: Random,
     """
     if not agent.route.excursions:
         return None
-    index = rng.randrange(len(agent.route.excursions))
-    excursion = agent.route.excursions[index]
-    pair = network.propose(excursion.kind, rng, excursion.entry, config.redraw_reach)
+    index: int = rng.randrange(len(agent.route.excursions))
+    excursion: Excursion = agent.route.excursions[index]
+    pair: Tuple[CurbPoint, CurbPoint] | None = network.propose(excursion.kind, rng, excursion.entry, config.redraw_reach)
     if pair is None:
         return None
     return _with_excursion(agent, index, replace(excursion, entry=pair[0], exit=pair[1]), network, rng, config)
@@ -165,11 +168,11 @@ def mut_kind(agent: PedestrianAgent, network: WalkNetwork, rng: Random,
         drawn = _draw_kind(network, rng, config)
         if drawn is None:
             return None
-    index = rng.randrange(len(agent.route.excursions))
-    excursion = agent.route.excursions[index]
+    index: int = rng.randrange(len(agent.route.excursions))
+    excursion: Excursion = agent.route.excursions[index]
     if drawn is excursion.kind:
         return None
-    pair = network.propose(drawn, rng, excursion.entry, config.redraw_reach)
+    pair: Tuple[CurbPoint, CurbPoint] | None = network.propose(drawn, rng, excursion.entry, config.redraw_reach)
     if pair is None:
         return None
     return _with_excursion(agent, index, replace(excursion, kind=drawn, entry=pair[0], exit=pair[1]), network, rng,
@@ -212,10 +215,10 @@ def mut_count(agent: PedestrianAgent, network: WalkNetwork, rng: Random,
     action = rng.choice(COUNT_ACTIONS) if action is None else action
     if action not in COUNT_ACTIONS:
         raise ValueError(f"action must be one of {COUNT_ACTIONS}, got {action!r}")
-    route = agent.route
-    count = len(route.excursions)
-    target = count + (1 if action == "add" else -1)
-    weight = {int(key): value for key, value in config.count_weights.items()}
+    route: WalkRoute = agent.route
+    count: int = len(route.excursions)
+    target: int = count + (1 if action == "add" else -1)
+    weight: Dict[int, float] = {int(key): value for key, value in config.count_weights.items()}
     if not 0 <= target <= MAX_EXCURSIONS or weight.get(target, 0.0) <= 0:
         return None
     if weight.get(count, 0.0) > 0 and (rng.random() if accept is None else accept) >= weight[target] / weight[count]:
@@ -223,8 +226,8 @@ def mut_count(agent: PedestrianAgent, network: WalkNetwork, rng: Random,
     if action == "remove":
         if not route.excursions:
             return None
-        last = route.excursions[-1]
-        end = network.wrapped(last.entry.sidewalk, last.entry.s + rng.uniform(-config.max_approach, config.max_approach))
+        last: Excursion = route.excursions[-1]
+        end: CurbPoint = network.wrapped(last.entry.sidewalk, last.entry.s + rng.uniform(-config.max_approach, config.max_approach))
         return on_route(agent, replace(route, excursions=route.excursions[:-1], end=end), network)
     if len(route.excursions) >= MAX_EXCURSIONS or (route.excursions and route.excursions[-1].turn_back is not None):
         return None
@@ -236,24 +239,24 @@ def mut_count(agent: PedestrianAgent, network: WalkNetwork, rng: Random,
         # the walk then starting near the entry as at generation. Anchored to the
         # walk's end, adds failed where no crossing was near, and such walks piled up
         # (san_mateo, 15 generations of mutation: 14% -> 23%).
-        pair = network.propose(drawn, rng)
+        pair: Tuple[CurbPoint, CurbPoint] | None = network.propose(drawn, rng)
         if pair is None:
             return None
-        start = network.wrapped(pair[0].sidewalk, pair[0].s + rng.uniform(-config.max_approach, config.max_approach))
+        start: CurbPoint = network.wrapped(pair[0].sidewalk, pair[0].s + rng.uniform(-config.max_approach, config.max_approach))
     else:
         pair = network.propose(drawn, rng, route.end, config.max_link)
         if pair is None or pair[0].sidewalk != route.end.sidewalk:
             return None
         start = route.start
     end = network.wrapped(pair[1].sidewalk, pair[1].s + rng.uniform(-config.max_approach, config.max_approach))
-    added = replace(route, start=start, excursions=route.excursions + (Excursion(drawn, *pair),), end=end)
+    added: WalkRoute = replace(route, start=start, excursions=route.excursions + (Excursion(drawn, *pair),), end=end)
     return on_route(agent, added, network)
 
 
-STOP_ACTIONS = ("toggle", "dwell")
+STOP_ACTIONS: Tuple[str, ...] = ("toggle", "dwell")
 """``mut_walk_stop``'s actions, drawn with equal chance once per mutation event."""
 
-_WAITS = ("curb", "island", "hesitation")
+_WAITS: Tuple[str, ...] = ("curb", "island", "hesitation")
 """Wait categories available for pedestrian mutation."""
 
 def _wait_chance(kind: str) -> float:
@@ -302,28 +305,31 @@ def mut_walk_stop(agent: PedestrianAgent, network: WalkNetwork, rng: Random,
     action = rng.choice(STOP_ACTIONS) if action is None else action
     if action not in STOP_ACTIONS:
         raise ValueError(f"action must be one of {STOP_ACTIONS}, got {action!r}")
-    profile = agent.speed_profile
+    profile: Tuple[SpeedPoint, ...] = agent.speed_profile
     if action == "dwell":
-        stops = [index for index, point in enumerate(profile) if point.speed == 0]
+        stops: List[int] = [index for index, point in enumerate(profile) if point.speed == 0]
         if not stops:
             return None
-        index = rng.choice(stops)
-        point = replace(profile[index], dwell=gauss_step(rng, profile[index].dwell, config.sigma_t, config.max_dwell))
+        index: int = rng.choice(stops)
+        point: SpeedPoint = replace(profile[index], dwell=gauss_step(rng, profile[index].dwell, config.sigma_t, config.max_dwell))
         return with_profile(agent, profile[:index] + (point,) + profile[index + 1:])
-    route = agent.route
+    route: WalkRoute = agent.route
     if not route.excursions:
         return None
     if choice is None:
         choice = (rng.random(), rng.choice(_WAITS), rng.random())
+    pick: float
+    kind: str
+    accept: float
     pick, kind, accept = choice
     index = min(int(pick * len(route.excursions)), len(route.excursions) - 1)
-    name = f"x{index}"
-    frame = network.frame(route)
-    element = frame.elements[frame.index[name]]
-    line = LineString(element.coords)
-    curb = min(network.curb_distance(line), element.length)
-    room = element.length - RESUME_GAP - 0.1
-    islands = network.island_spans(line)
+    name: str = f"x{index}"
+    frame: WalkFrame = network.frame(route)
+    element: WalkElement = frame.elements[frame.index[name]]
+    line: LineString = LineString(element.coords)
+    curb: float = min(network.curb_distance(line), element.length)
+    room: float = element.length - RESUME_GAP - 0.1
+    islands: List[Tuple[float, float]] = network.island_spans(line)
 
     def in_kind(s: float) -> bool:
         """
@@ -339,26 +345,28 @@ def mut_walk_stop(agent: PedestrianAgent, network: WalkNetwork, rng: Random,
             return any(low - 1e-6 <= s <= high + 1e-6 for low, high in islands)
         return curb + GUTTER_RANGE[1] < s and not any(low - 1e-6 <= s <= high + 1e-6 for low, high in islands)
 
-    present = [i for i, point in enumerate(profile) if point.speed == 0 and point.lane_id == name and in_kind(point.s)]
-    q = _wait_chance(kind)
+    present: List[int] = [i for i, point in enumerate(profile) if point.speed == 0 and point.lane_id == name and in_kind(point.s)]
+    q: float = _wait_chance(kind)
     if present:
         if accept >= min(1.0, (1 - q) / q):
             return None
-        i = present[0]
-        drop = {i} | ({i + 1} if i + 1 < len(profile) and profile[i + 1].lane_id == name
+        i: int = present[0]
+        drop: Set[int] = {i} | ({i + 1} if i + 1 < len(profile) and profile[i + 1].lane_id == name
                       and profile[i + 1].speed > 0 and abs(profile[i + 1].s - profile[i].s - RESUME_GAP) < 1e-6 else set())
-        kept = tuple(point for j, point in enumerate(profile) if j not in drop)
+        kept: Tuple[SpeedPoint, ...] = tuple(point for j, point in enumerate(profile) if j not in drop)
         if not kept or kept[-1].speed == 0:
             return None
         return with_profile(agent, kept)
     if accept >= min(1.0, q / (1 - q)) or len(profile) + 2 > MAX_SPEED_POINTS:
         return None
     if kind == "curb":
-        at = curb + rng.uniform(*GUTTER_RANGE) if rng.random() < GUTTER_SHARE else max(curb - CURB_STAND_BACK, 0.0)
-        dwell = rng.uniform(0, MAX_CURB_WAIT)
+        at: float = curb + rng.uniform(*GUTTER_RANGE) if rng.random() < GUTTER_SHARE else max(curb - CURB_STAND_BACK, 0.0)
+        dwell: float = rng.uniform(0, MAX_CURB_WAIT)
     elif kind == "island":
         if not islands:
             return None
+        low: float
+        high: float
         low, high = rng.choice(islands)
         at, dwell = (low + high) / 2, rng.uniform(*ISLAND_WAIT)
     else:
@@ -367,21 +375,21 @@ def mut_walk_stop(agent: PedestrianAgent, network: WalkNetwork, rng: Random,
         at, dwell = rng.uniform(curb + 1, room - 1), rng.uniform(*HESITATION)
     if not 0 < at <= room:
         return None
-    position = frame.distance(name, at)
+    position: float = frame.distance(name, at)
     if any(abs(frame.distance(point.lane_id, point.s) - position) < STOP_SPACING + RESUME_GAP for point in profile):
         return None
-    moving = [point.speed for point in profile if point.speed > 0]
-    after = [point for point in profile if frame.distance(point.lane_id, point.s) > position and point.speed > 0]
-    resume = after[0].speed if after else moving[-1]
-    added = [SpeedPoint(name, at, 0.0, dwell), SpeedPoint(name, at + RESUME_GAP, resume)]
-    placed = [(frame.distance(point.lane_id, point.s), rank, point) for rank, point in enumerate(list(profile) + added)]
-    result = ordered_points(placed, profile[0])
+    moving: List[float] = [point.speed for point in profile if point.speed > 0]
+    after: List[SpeedPoint] = [point for point in profile if frame.distance(point.lane_id, point.s) > position and point.speed > 0]
+    resume: float = after[0].speed if after else moving[-1]
+    added: List[SpeedPoint] = [SpeedPoint(name, at, 0.0, dwell), SpeedPoint(name, at + RESUME_GAP, resume)]
+    placed: List[Tuple[float, int, SpeedPoint]] = [(frame.distance(point.lane_id, point.s), rank, point) for rank, point in enumerate(list(profile) + added)]
+    result: Tuple[SpeedPoint, ...] = ordered_points(placed, profile[0])
     if len(result) != len(profile) + 2:
         return None
     return with_profile(agent, result)
 
 
-TURN_BACK_ACTIONS = ("step", "redraw")
+TURN_BACK_ACTIONS: Tuple[str, ...] = ("step", "redraw")
 """``mut_turn_back``'s actions, drawn with equal chance once per mutation event."""
 
 
@@ -416,15 +424,15 @@ def mut_turn_back(agent: PedestrianAgent, network: WalkNetwork, rng: Random,
     action = rng.choice(TURN_BACK_ACTIONS) if action is None else action
     if action not in TURN_BACK_ACTIONS:
         raise ValueError(f"action must be one of {TURN_BACK_ACTIONS}, got {action!r}")
-    last = agent.route.excursions[-1]
-    length = network.excursion_line(last.kind, last.entry, last.exit).length
-    high = length - MIN_TURN_BACK
+    last: Excursion = agent.route.excursions[-1]
+    length: float = network.excursion_line(last.kind, last.entry, last.exit).length
+    high: float = length - MIN_TURN_BACK
     if high < MIN_TURN_BACK:
         return None
     if action == "step":
         if last.turn_back is None:
             return None
-        turn_back = min(max(last.turn_back + rng.gauss(0, config.sigma_turn_back), MIN_TURN_BACK), high)
+        turn_back: float | None = min(max(last.turn_back + rng.gauss(0, config.sigma_turn_back), MIN_TURN_BACK), high)
     elif (rng.random() if draw is None else draw) < config.turn_back_probability:
         turn_back = rng.uniform(MIN_TURN_BACK, min(max(TURN_BACK_SHARE * length, MIN_TURN_BACK), high))
     else:
@@ -456,7 +464,7 @@ def mut_walker_type(agent: PedestrianAgent, rng: Random,
     :returns: The mutant, or ``None`` if the drawn type is unchanged.
     :rtype: PedestrianAgent | None
     """
-    walker_type = drawn if drawn is not None else WalkerType[draw_type(rng, config.walker_type_weights)]
+    walker_type: WalkerType = drawn if drawn is not None else WalkerType[draw_type(rng, config.walker_type_weights)]
     return None if walker_type is agent.walker_type else retyped(agent, walker_type)
 
 
@@ -483,8 +491,8 @@ def _draw_kind(network: WalkNetwork, rng: Random, config: PedestrianOperatorConf
     :returns: The drawn kind, or ``None`` if no available kind has positive weight.
     :rtype: ExcursionKind | None
     """
-    available = {kind.name for kind in network.kinds()}
-    weights = {name: weight for name, weight in config.kind_weights.items() if name in available and weight > 0}
+    available: Set[str] = {kind.name for kind in network.kinds()}
+    weights: Dict[str, float] = {name: weight for name, weight in config.kind_weights.items() if name in available and weight > 0}
     return ExcursionKind[draw_type(rng, weights)] if weights else None
 
 
@@ -504,7 +512,7 @@ def _same_stops(parent: PedestrianAgent, child: PedestrianAgent | None) -> Pedes
     """
     if child is None:
         return None
-    count = lambda agent: sum(point.speed == 0 for point in agent.speed_profile)
+    count: Callable[[PedestrianAgent], int] = lambda agent: sum(point.speed == 0 for point in agent.speed_profile)
     if child.speed_profile[0].speed == 0 and parent.speed_profile[0].speed > 0:
         # Removing the walking speed before a curb wait left profiles that start
         # with the wait (shalun: 19% of adults after 30 generations).
@@ -529,17 +537,17 @@ def mut_pedestrian(agent: PedestrianAgent, network: WalkNetwork, rng: Random,
     :rtype: PedestrianAgent
     """
     # One draw of each per mutation event, kept over retries.
-    kind = _draw_kind(network, rng, config)
-    added = _draw_kind(network, rng, config)
-    count_action = rng.choice(COUNT_ACTIONS)
-    count_accept = rng.random()
-    turn_back_action = rng.choice(TURN_BACK_ACTIONS)
-    turn_back_draw = rng.random()
-    point_action = rng.choice(SPEED_POINT_ACTIONS)
-    stop_action = rng.choice(STOP_ACTIONS)
-    stop_choice = (rng.random(), rng.choice(_WAITS), rng.random())
-    walker_type = WalkerType[draw_type(rng, config.walker_type_weights)]
-    operators = {
+    kind: ExcursionKind | None = _draw_kind(network, rng, config)
+    added: ExcursionKind | None = _draw_kind(network, rng, config)
+    count_action: str = rng.choice(COUNT_ACTIONS)
+    count_accept: float = rng.random()
+    turn_back_action: str = rng.choice(TURN_BACK_ACTIONS)
+    turn_back_draw: float = rng.random()
+    point_action: str = rng.choice(SPEED_POINT_ACTIONS)
+    stop_action: str = rng.choice(STOP_ACTIONS)
+    stop_choice: Tuple[float, str, float] = (rng.random(), rng.choice(_WAITS), rng.random())
+    walker_type: WalkerType = WalkerType[draw_type(rng, config.walker_type_weights)]
+    operators: Dict[str, Callable[[PedestrianAgent], PedestrianAgent | None]] = {
         "shift": lambda child: mut_shift(child, network, rng, config),
         "redraw": lambda child: mut_redraw(child, network, rng, config),
         "kind": lambda child: None if kind is None else mut_kind(child, network, rng, config, kind),
