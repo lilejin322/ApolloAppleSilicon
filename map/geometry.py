@@ -5,11 +5,10 @@ Author: Lejin Li, Kyushu University & National Institute of Informatics, Japan
 Contact: li.lejin.147@s.kyushu-u.ac.jp
 """
 
+import numpy as np
 from bisect import bisect_right
 from itertools import accumulate
 from math import atan2, ceil, hypot, pi
-
-import numpy as np
 from google.protobuf.message import Message
 from shapely import STRtree
 from shapely.geometry import LineString, MultiLineString, Point, Polygon
@@ -265,6 +264,10 @@ def turn_curvatures(line: LineString) -> List[Tuple[float, float, float]]:
     are omitted.
 
     :param LineString line: A line without zero-length segments.
+    :returns: Turning intervals as ``(low, high, curvature)`` tuples, where
+        ``low`` and ``high`` are distances along the line in metres and
+        ``curvature`` is the absolute heading change per metre. Returns an
+        empty list if the line has no turns.
     :rtype: list[tuple[float, float, float]]
     """
     profile = CenterlineProfile(line)
@@ -284,6 +287,11 @@ def replay_line(points: Iterable[Tuple[float, ...]]) -> Optional[LineString]:
     The line a vehicle replays through ``points``: vertex noise within
     ``REPLAY_TOLERANCE`` dropped. None if fewer than two distinct points remain.
 
+    :param Iterable[Tuple[float, ...]] points: Ordered points with at least two coordinates each. Only
+        the first two coordinates (X and Y) are used; consecutive duplicate XY coordinates are removed.
+    :returns: A line through the input XY coordinates, simplified within
+        ``REPLAY_TOLERANCE``, or ``None`` if fewer than two coordinates remain
+        after removing consecutive duplicates.
     :rtype: LineString | None
     """
     coords: List[Tuple[float, float]] = []
@@ -317,9 +325,17 @@ def smooth_polyline(points: Iterable[Tuple[float, ...]], sigma: float = SMOOTHIN
     segments before filtering, then any residual end offset is faded out over
     ``3 * sigma``.
 
+    :param Iterable[Tuple[float, ...]] points: Ordered polyline vertices, each
+        containing at least X and Y in metres. Additional coordinates are
+        ignored, and consecutive duplicate XY coordinates are removed.
+    :param float sigma: Gaussian smoothing standard deviation in metres
+        along the polyline. Nonpositive values disable smoothing but retain
+        resampling.
+    :param float step: Maximum resampling interval in metres along the input
+        polyline. Must be positive.
     :returns: The smoothed vertices, shape (n, 2), and for each the distance
         along the input polyline it was resampled at.
-    :rtype: tuple[numpy.ndarray, numpy.ndarray]
+    :rtype: Tuple[np.ndarray, np.ndarray]
     """
     raw = np.array([(point[0], point[1]) for point in points], dtype=float)
     if len(raw) > 1:
@@ -365,6 +381,13 @@ def max_replay_curvature(points: Iterable[Tuple[float, ...]]) -> float:
     The largest curvature a vehicle replaying ``points`` would drive, in 1/m:
     noise dropped as in ``replay_line``, corners rounded by ``smooth_polyline``.
 
+    :param Iterable[Tuple[float, ...]] points: Ordered polyline vertices, each
+        containing at least X and Y in metres. Additional coordinates are
+        ignored, and consecutive duplicate XY coordinates are removed.
+    :returns: Maximum absolute curvature of the simplified and smoothed
+        replay path, in inverse metres. Returns ``0.0`` if no usable line
+        remains, fewer than three smoothed vertices remain, or there are
+        no turns.
     :rtype: float
     """
     line = replay_line(points)
