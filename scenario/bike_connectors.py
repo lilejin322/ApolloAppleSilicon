@@ -68,18 +68,19 @@ def bike_connectors(service: MapService, *, min_turn_radius: float,
                     max_length: float = 100.0,
                     road_lanes: Mapping[str, LineString] | None = None) -> Tuple[VirtualLane, ...]:
     """
-    Return the connectors between the map's bike lanes, sorted by ID.
+    Return virtual bicycle connectors from bike-lane dead ends, sorted by ID.
 
     :param MapService service: A map with its routing graph built; it is only read.
     :param float min_turn_radius: Connectors tighter than this, in metres, are
         dropped; corners at pivots are turned at rest and not measured.
-    :param Iterable[ConnectorKind] kinds: The kinds of connector to generate.
+    :param Iterable[ConnectorKind] kinds: The connector kinds to generate.
     :param float max_length: Longest connector in metres.
-    :param Mapping[str, LineString] | None road_lanes: Road lanes a dead end may continue onto, by ID, with the
-        line a rider follows on each (its start is the connector's end).
-    :raises RuntimeError: If the map was loaded without its routing graph.
+    :param Mapping[str, LineString] | None road_lanes: Optional road lanes a
+        bike-lane dead end may continue onto, keyed by lane ID, with the line
+        a rider follows on each; the line's start is the connector's end.
+    :returns: Generated virtual bicycle connectors sorted by lane ID.
     :rtype: Tuple[VirtualLane, ...]
-    :returns: The bike connectors values described above.
+    :raises RuntimeError: If the map was loaded without its routing graph.
     """
     if service.routing_graph is None:
         raise RuntimeError("bike_connectors needs a map loaded with load_only=False")
@@ -94,8 +95,8 @@ def bike_connectors(service: MapService, *, min_turn_radius: float,
         """
         List forward successor lanes in stable order.
 
-        :param str lane_id: Map, virtual-lane, or walk-element ID, as applicable.
-        :returns: Forward-connected lane IDs in stable order.
+        :param str lane_id: Map lane ID.
+        :returns: Forward-connected map lane IDs in stable order.
         :rtype: List[str]
         """
         return sorted(target for target in graph.successors(lane_id)
@@ -105,7 +106,7 @@ def bike_connectors(service: MapService, *, min_turn_radius: float,
         """
         List city-driving lanes beside a bike lane.
 
-        :param str lane_id: Map, virtual-lane, or walk-element ID, as applicable.
+        :param str lane_id: Bike-lane ID.
         :returns: IDs of adjacent city-driving lanes.
         :rtype: List[str]
         """
@@ -199,12 +200,13 @@ def _connect(end: str, end_pose: Pose, start: str, start_pose: Pose,
     """
     The connectors of the allowed kinds from ``end`` to ``start``, before length and radius checks.
 
-    :param str end: Ending lane, endpoint, or path position for this operation.
+    :param str end: Source lane ID whose end is connected.
     :param Pose end_pose: Position and heading at the source lane end.
-    :param str start: Starting lane, endpoint, or path position for this operation.
+    :param str start: Destination lane ID whose start is connected.
     :param Pose start_pose: Position and heading at the destination lane start.
-    :param FrozenSet[ConnectorKind] kinds: Allowed connector kinds or ordered excursion kinds for this operation.
-    :returns: The connectors of the allowed kinds from ``end`` to ``start``, before length and radius checks.
+    :param FrozenSet[ConnectorKind] kinds: Connector kinds allowed for this lane pair.
+    :returns: Generated connectors of the allowed kinds before length and
+        turning-radius checks.
     :rtype: Iterator[VirtualLane]
     """
     (p0, h0), (p3, h3) = end_pose, start_pose
@@ -268,7 +270,8 @@ def _corner(p0: Tuple[float, float], h0: float, p3: Tuple[float, float], h3: flo
     :param float h0: Departure heading, in radians.
     :param Tuple[float, float] p3: Ending map coordinate, in metres.
     :param float h3: Arrival heading, in radians.
-    :returns: The corner values described above.
+    :returns: The valid corner coordinate, or ``None`` if the lines are parallel
+        or the intersection falls inside either endpoint margin.
     :rtype: Tuple[float, float] | None
     """
     u0, u3 = (cos(h0), sin(h0)), (cos(h3), sin(h3))
