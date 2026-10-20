@@ -9,23 +9,22 @@ of virtual lanes, are forced stops: the agent halts there, turns in place,
 waits, and goes on.
 """
 
+import numpy as np
+from random import Random
+from types import MappingProxyType
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, replace
 from math import ceil, isfinite, pi, sqrt
-from random import Random
-from types import MappingProxyType
-from typing import Callable, Mapping, NamedTuple, Protocol, Sequence
-
-import numpy as np
+from typing import Callable, Mapping, NamedTuple, Protocol, Sequence, List, Tuple
 from shapely.geometry import LineString, Point
 
 from .routing import InvalidRoute, LaneRoute, RouteSpace, Transition
 from .realism import ABSOLUTE_CRUISE, JERK_TARGET, draw_speed, reference_speed
 from ..map.geometry import CenterlineProfile, normalize_angle, smooth_polyline
 from ..utils import require_nonnegative
-from typing import List, Tuple
 
 MAX_SPEED_POINTS = 4
+"""Max speed points"""
 _GRID_STEP = 0.5
 """Metres between speed-profile grid points along the path."""
 _SPEED_SMOOTHING = 4.0
@@ -60,7 +59,6 @@ class MotionLimits(Protocol):
     :param float comfortable_deceleration: Comfortable braking magnitude, in m/s squared.
     :param float min_turn_radius: Minimum turning radius, in metres.
     """
-
     max_speed: float
     """Maximum allowed target speed, in m/s."""
     max_acceleration: float
@@ -78,24 +76,22 @@ class MotionLimits(Protocol):
 @dataclass(frozen=True)
 class SpeedPoint:
     """
-    A target speed from a map position on the route onwards.
+    A target speed from a position on the agent's route onwards.
 
     A zero speed is a stop: the agent halts exactly there, waits ``dwell``
-    seconds, then heads for the next point's speed. The position is a lane of
-    the agent's route and an ``s`` within the stretch of that lane the route
-    drives, so a stop stays at the same map location when other parts of the
-    route change.
+    seconds, then heads for the next point's speed. The position is a route
+    lane or walk element and an ``s`` within its driven or walked stretch, so
+    a stop stays at the same map location when other parts of the route change.
 
-    :param str lane_id: A lane of the agent's route.
-    :param float s: Metres along that lane's centerline.
+    :param str lane_id: Route lane or walk-element ID.
+    :param float s: Position along that lane or element, in metres.
     :param float speed: Desired speed in m/s; replay keeps below lane limits and curve caps.
     :param float dwell: Seconds to wait at a stop; only for zero speeds.
     """
-
     lane_id: str
-    """A lane of the agent's route."""
+    """Route lane or walk-element ID."""
     s: float
-    """Metres along that lane's centerline."""
+    """Position along that lane or element, in metres."""
     speed: float
     """Desired speed in m/s; replay keeps below lane limits and curve caps."""
     dwell: float = 0.0
@@ -111,7 +107,6 @@ class AgentState(NamedTuple):
     :param float heading: Heading in radians.
     :param float speed: Target or instantaneous speed, in m/s.
     """
-
     x: float
     """Map X coordinate, in metres."""
     y: float
@@ -122,7 +117,8 @@ class AgentState(NamedTuple):
     """Target or instantaneous speed, in m/s."""
 
 
-def check_profile(route: LaneRoute, profile: Sequence[SpeedPoint], max_speed: float, name: str) -> None:
+def check_profile(route: LaneRoute, profile: Sequence[SpeedPoint],
+                  max_speed: float, name: str) -> None:
     """
     Check a speed profile's shape and speeds against its route.
 
@@ -131,9 +127,9 @@ def check_profile(route: LaneRoute, profile: Sequence[SpeedPoint], max_speed: fl
         strictly increasing in route order (lane, then s); the last one must not be a stop.
     :param float max_speed: Highest allowed speed in m/s.
     :param str name: The agent type, for error messages.
-    :raises ValueError: With the first problem found.
     :returns: ``None`` if the profile satisfies its shape, position, speed, and dwell constraints.
     :rtype: None
+    :raises ValueError: With the first problem found.
     """
     if not 1 <= len(profile) <= MAX_SPEED_POINTS:
         raise ValueError(f"speed_profile needs 1 to {MAX_SPEED_POINTS} points")
@@ -168,9 +164,11 @@ class RouteFrame:
         """
         Build lane windows and cumulative driven distances for a route.
 
-        :param RouteSpace space: Route space supplying lane geometry, topology, and vehicle-specific constraints.
+        :param RouteSpace space: Route space supplying lane geometry, topology,
+            and route-specific constraints.
         :param LaneRoute route: Route to inspect, validate, or convert.
-        :param Tuple[float, ...] lane_change_s: Lane-change start positions on source lanes, in metres; ``None`` uses default placement.
+        :param Tuple[float, ...] lane_change_s: Lane-change start positions on
+            source lanes, in route order.
         :returns: ``None``.
         :rtype: None
         """
@@ -194,8 +192,8 @@ class RouteFrame:
         """
         The driven stretch [start, end] of a route lane.
 
-        :param str lane_id: Map, virtual-lane, or walk-element ID, as applicable.
-        :returns: The start and end position of the driven lane or walk element, in metres.
+        :param str lane_id: Lane ID on the route.
+        :returns: Start and end positions of the driven lane stretch, in metres.
         :rtype: Tuple[float, float]
         """
         index = self.index[lane_id]
@@ -205,9 +203,10 @@ class RouteFrame:
         """
         Driven distance to ``s`` on a route lane, clamped to its stretch.
 
-        :param str lane_id: Map, virtual-lane, or walk-element ID, as applicable.
-        :param float s: Position along the lane, element, or path, in metres.
-        :returns: Travelled distance to the local position, in metres, clamped to its driven window.
+        :param str lane_id: Lane ID on the route.
+        :param float s: Position along that lane, in metres.
+        :returns: Travelled distance to the local lane position, in metres,
+            clamped to its driven window.
         :rtype: float
         """
         index = self.index[lane_id]
@@ -219,7 +218,7 @@ class RouteFrame:
         stretch, the nearer of its source end and target start.
 
         :param float distance: Travelled distance, in metres.
-        :returns: The lane or element ID and its local position, in metres.
+        :returns: The lane ID and its local position, in metres.
         :rtype: Tuple[str, float]
         """
         distance = min(max(distance, 0.0), self.total)
@@ -239,10 +238,11 @@ class RouteFrame:
         """
         Check that every speed point lies on its lane's driven stretch.
 
-        :raises InvalidRoute: For the first point outside.
-        :param Sequence[SpeedPoint] profile: Ordered target-speed points; positions are lane or walk-element metres.
-        :returns: ``None`` if all speed points lie within their driven element windows.
+        :param Sequence[SpeedPoint] profile: Ordered target-speed points; positions
+            are lane metres.
+        :returns: ``None`` if all speed points lie within their driven lane windows.
         :rtype: None
+        :raises InvalidRoute: For the first point outside.
         """
         for point in profile:
             low, high = self.window(point.lane_id)
@@ -286,15 +286,19 @@ def rebased(space: RouteSpace, old_route: LaneRoute, old_lane_change_s: Tuple[fl
     merged them when a route was truncated, and point counts fell over
     generations (-0.05 points per extend/truncate mutation).
 
-    :raises InvalidRoute: If ``route`` or ``lane_change_s`` is invalid.
-    :param RouteSpace space: Route space supplying lane geometry, topology, and vehicle-specific constraints.
+    :param RouteSpace space: Route space supplying lane geometry, topology,
+        and route-specific constraints.
     :param LaneRoute old_route: Original route on which the input speed points are defined.
-    :param Tuple[float, ...] old_lane_change_s: Lane-change start positions of the original route, in metres.
-    :param Sequence[SpeedPoint] profile: Ordered target-speed points; positions are lane or walk-element metres.
+    :param Tuple[float, ...] old_lane_change_s: Lane-change start positions of
+        the original route, in route order.
+    :param Sequence[SpeedPoint] profile: Ordered target-speed points anchored to
+        route lanes.
     :param LaneRoute route: Route to inspect, validate, or convert.
-    :param Tuple[float, ...] lane_change_s: Lane-change start positions on source lanes, in metres; ``None`` uses default placement.
+    :param Tuple[float, ...] lane_change_s: Lane-change start positions on source
+        lanes, in route order.
     :returns: The input profile mapped onto the proposed route.
     :rtype: Tuple[SpeedPoint, ...]
+    :raises InvalidRoute: If ``route`` or ``lane_change_s`` is invalid.
     """
     new = RouteFrame(space, route, lane_change_s)
     try:
@@ -321,11 +325,15 @@ def refit_end(space: RouteSpace, route: LaneRoute, length: float, target: float)
     from junctions and the moved end is not allowed, the nearest allowed end
     on the last lane instead, if there is one.
 
-    :param RouteSpace space: Route space supplying lane geometry, topology, and vehicle-specific constraints.
+    :param RouteSpace space: Route space supplying lane geometry, topology,
+        and route-specific constraints.
     :param LaneRoute route: Route to inspect, validate, or convert.
-    :param float length: Length of the path, lane, or body, in metres.
-    :param float target: Target distance or target lane, as defined by this operation.
-    :returns: The route with its end moved so that a replay path of ``length`` metres would become ``target`` metres long; where the space keeps endpoints away from junctions and the moved end is not allowed, the nearest allowed end on the last lane instead, if there is one.
+    :param float length: Current replay-path length, in metres.
+    :param float target: Desired replay-path length, in metres.
+    :returns: The route with its end moved so that a replay path of ``length``
+        metres would become ``target`` metres long; where the space keeps
+        endpoints away from junctions and the moved end is not allowed, the
+        nearest allowed end on the last lane instead, if there is one.
     :rtype: LaneRoute
     """
     end_s = route.end_s + target - length
@@ -343,8 +351,8 @@ def placed_stops(frame: RouteFrame, profile: Sequence[SpeedPoint], avoid: Sequen
     off blocked lanes and outside those stretches, between its neighbours with
     ``STOP_CLEARANCE``. Stops without such a position stay where they are.
 
-    :param RouteFrame frame: Route or walk frame used to map element positions to travelled distance.
-    :param Sequence[SpeedPoint] profile: Ordered target-speed points; positions are lane or walk-element metres.
+    :param RouteFrame frame: Route frame used to map lane positions to driven distance.
+    :param Sequence[SpeedPoint] profile: Ordered target-speed points anchored to route lanes.
     :param Sequence[Tuple[float, float]] avoid: Forbidden stop intervals along the driven path, in metres.
     :param Callable[[str], bool] blocked: Predicate identifying lanes where ordinary stops are forbidden.
     :returns: The repaired profile with stops moved outside blocked regions where feasible.
@@ -388,20 +396,20 @@ class ReplayLayout(NamedTuple):
     the smoothed path, and its pivots in path metres.
 
     :param LineString path: Replay path in map metres.
-    :param List[Span] limits: Motion limits used for acceleration, braking, and lateral speed caps.
+    :param List[Span] limits: Lane speed-limit spans along the replay path.
     :param List[Tuple[Tuple[str, ...], LineString, float]] pieces: Geometry components used by the spatial index.
-    :param Callable[[float], float] moved: Moved.
+    :param Callable[[float], float] moved: Maps joined route distance to distance
+        along the smoothed replay path.
     :param Tuple[float, ...] pivots: Path distances where the agent stops and turns in place, in metres.
     """
-
     path: LineString
     """Replay path in map metres."""
     limits: List[Span]
-    """Motion limits used for acceleration, braking, and lateral speed caps."""
+    """Lane speed-limit spans along the replay path."""
     pieces: List[Tuple[Tuple[str, ...], LineString, float]]
     """Geometry components used by the spatial index."""
     moved: Callable[[float], float]
-    """Moved."""
+    """Map joined route metres to metres along the smoothed replay path."""
     pivots: Tuple[float, ...] = ()
     """Path distances where the agent stops and turns in place, in metres."""
 
@@ -410,9 +418,10 @@ class ReplayLayout(NamedTuple):
         Path metres of the map point at ``s`` on a lane: its projection onto
         the nearest section that lies on the lane; None if none does.
 
-        :param RouteSpace space: Route space supplying lane geometry, topology, and vehicle-specific constraints.
-        :param str lane_id: Map, virtual-lane, or walk-element ID, as applicable.
-        :param float s: Position along the lane, element, or path, in metres.
+        :param RouteSpace space: Route space supplying lane geometry, topology,
+            and route-specific constraints.
+        :param str lane_id: Map or virtual-lane ID.
+        :param float s: Position along that lane, in metres.
         :returns: Mapped position along the replay path in metres, or ``None`` if no section contains it.
         :rtype: float | None
         """
@@ -443,11 +452,13 @@ class ReplayLayout(NamedTuple):
         """
         Path metres of each speed point.
 
-        :raises InvalidRoute: If a point is off the path or the points are not in driving order.
-        :param RouteSpace space: Route space supplying lane geometry, topology, and vehicle-specific constraints.
-        :param Sequence[SpeedPoint] profile: Ordered target-speed points; positions are lane or walk-element metres.
+        :param RouteSpace space: Route space supplying lane geometry, topology,
+            and route-specific constraints.
+        :param Sequence[SpeedPoint] profile: Ordered target-speed points anchored
+            to route lanes.
         :returns: Mapped positions of the speed points along the replay path, in metres.
         :rtype: List[float]
+        :raises InvalidRoute: If a point is off the path or the points are not in driving order.
         """
         positions = [self.position(space, point.lane_id, point.s) for point in profile]
         if any(b is None or a is None or b <= a for a, b in zip(positions, positions[1:])) or None in positions:
@@ -468,13 +479,17 @@ def replay_layout(space: RouteSpace, route: LaneRoute, lane_change_s: Tuple[floa
     Virtual lanes have no speed limit. Their pivots split the path into
     stretches smoothed on their own, so each corner stays a vertex of the path.
 
-    :raises InvalidRoute: If the route is illegal.
-    :param RouteSpace space: Route space supplying lane geometry, topology, and vehicle-specific constraints.
+    :param RouteSpace space: Route space supplying lane geometry, topology,
+        and route-specific constraints.
     :param LaneRoute route: Route to inspect, validate, or convert.
-    :param Tuple[float, ...] lane_change_s: Lane-change start positions on source lanes, in metres; ``None`` uses default placement.
-    :param Tuple[float, ...] | None lane_change_distances: Desired driven lengths of lane changes, in metres, or ``None`` for default lengths.
-    :returns: The route's path, each section simplified within ``_PATH_TOLERANCE`` to drop vertex noise, then smoothed (``smooth_polyline``), with its speed-limit spans: (start, end, limit) in path metres for every section whose lanes have a limit. Lane changes have the lengths ``lane_change_distances`` as far as the lanes allow (``RouteSpace.path_sections``); the rules' minimum by default.
+    :param Tuple[float, ...] lane_change_s: Lane-change start positions on source
+        lanes, in route order.
+    :param Tuple[float, ...] | None lane_change_distances: Desired driven lengths
+        of lane changes, in metres, or ``None`` for default lengths.
+    :returns: The smoothed replay-path layout, including lane speed-limit spans,
+        spatial pieces, path-distance mapping, and pivots.
     :rtype: ReplayLayout
+    :raises InvalidRoute: If the route is illegal.
     """
     points: List[Tuple[float, float]] = []
     spans, pieces, corners = [], [], []
@@ -517,8 +532,8 @@ def replay_layout(space: RouteSpace, route: LaneRoute, lane_change_s: Tuple[floa
         """
         Map a raw driven distance onto the simplified replay path.
 
-        :param float value: Value to evaluate or transform in the units specified by this operation.
-        :returns: The computed distance, duration, or scalar value described above.
+        :param float value: Distance along the joined route sections, in metres.
+        :returns: Corresponding distance along the smoothed replay path, in metres.
         :rtype: float
         """
         at = value * joined / total if total > 0 else 0.0
@@ -545,7 +560,6 @@ class ReplayPath(NamedTuple):
     :param List[Span] speed_limits: Path intervals and their lane speed limits, in m/s.
     :param Tuple[float, ...] pivots: Path distances where the agent stops and turns in place, in metres.
     """
-
     path: LineString
     """Replay path in map metres."""
     speed_limits: List[Span]
@@ -559,13 +573,16 @@ def replay_path(space: RouteSpace, route: LaneRoute, lane_change_s: Tuple[float,
     """
     The route's replay path, its speed-limit spans and its pivots, as in ``replay_layout``.
 
-    :raises InvalidRoute: If the route is illegal.
-    :rtype: ReplayPath
-    :param RouteSpace space: Route space supplying lane geometry, topology, and vehicle-specific constraints.
+    :param RouteSpace space: Route space supplying lane geometry, topology,
+        and route-specific constraints.
     :param LaneRoute route: Route to inspect, validate, or convert.
-    :param Tuple[float, ...] lane_change_s: Lane-change start positions on source lanes, in metres; ``None`` uses default placement.
-    :param Tuple[float, ...] | None lane_change_distances: Desired driven lengths of lane changes, in metres, or ``None`` for default lengths.
-    :returns: The route's replay path, its speed-limit spans and its pivots, as in ``replay_layout``.
+    :param Tuple[float, ...] lane_change_s: Lane-change start positions on source
+        lanes, in route order.
+    :param Tuple[float, ...] | None lane_change_distances: Desired driven lengths
+        of lane changes, in metres, or ``None`` for default lengths.
+    :returns: The route's replay path, its speed-limit spans, and its pivots.
+    :rtype: ReplayPath
+    :raises InvalidRoute: If the route is illegal.
     """
     layout = replay_layout(space, route, lane_change_s, lane_change_distances)
     return ReplayPath(layout.path, layout.limits, layout.pivots)
@@ -576,10 +593,11 @@ def speed_limit(space: RouteSpace, lanes: Tuple[str, ...]) -> float | None:
     The lowest positive ``speed_limit`` of the lanes, or None if none has one.
     Virtual lanes have no limit.
 
-    :rtype: float | None
-    :param RouteSpace space: Route space supplying lane geometry, topology, and vehicle-specific constraints.
+    :param RouteSpace space: Route space supplying lane geometry, topology,
+        and route-specific constraints.
     :param Tuple[str, ...] lanes: Lane IDs in driving order.
     :returns: The lowest positive limit in m/s, or ``None`` if no lane supplies one.
+    :rtype: float | None
     """
     limits = [lane.speed_limit for lane in (space.service.get_lane_by_id(lane_id) for lane_id in lanes
                                             if space.virtual_lane(lane_id) is None)
@@ -591,7 +609,7 @@ def _pieces(path: LineString, pivots: Sequence[float]) -> List[Tuple[float, Line
     """
     The path split at the vertices nearest its pivots: (start s, piece) in order.
 
-    :param LineString path: Path geometry or ordered lane sequence used by this operation.
+    :param LineString path: Replay-path geometry in map metres.
     :param Sequence[float] pivots: Distances along the path where motion stops to turn in place, in metres.
     :returns: The path split at the vertices nearest its pivots: (start s, piece) in order.
     :rtype: List[Tuple[float, LineString]]
@@ -616,11 +634,11 @@ def curvature_spans(path: LineString, pivots: Sequence[float] = ()) -> List[Span
     The path is split at its pivots and each piece measured on its own, so
     the corner at a pivot, turned at rest, is never measured.
 
-    :raises InvalidRoute: If the path has a degenerate heading interval.
-    :rtype: List[Span]
-    :param LineString path: Path geometry or ordered lane sequence used by this operation.
+    :param LineString path: Replay-path geometry in map metres.
     :param Sequence[float] pivots: Distances along the path where motion stops to turn in place, in metres.
     :returns: Start/end path distances in metres and absolute curvature in inverse metres.
+    :rtype: List[Span]
+    :raises InvalidRoute: If the path has a degenerate heading interval.
     """
     spans = []
     for start, piece in _pieces(path, pivots):
@@ -639,12 +657,12 @@ def check_turning_radius(spans: Sequence[Span], min_turn_radius: float, name: st
     """
     Check that no curvature span is tighter than ``min_turn_radius``.
 
-    :param str name: The agent type, for error messages.
-    :raises InvalidRoute: For the first span that is too tight.
-    :param Sequence[Span] spans: Distance intervals with their curvature or limit value.
+    :param Sequence[Span] spans: Distance intervals with their curvature values.
     :param float min_turn_radius: Minimum permitted turning radius, in metres.
+    :param str name: The agent type, for error messages.
     :returns: ``None`` if every curvature span respects the minimum turning radius.
     :rtype: None
+    :raises InvalidRoute: For the first span that is too tight.
     """
     for low, high, curvature in spans:
         if curvature > 1 / min_turn_radius + 1e-9:
@@ -668,11 +686,11 @@ class ReplayTrajectory:
         """
         Integrate motion and dwell intervals along a replay path, including pivot turns.
 
-        :param LineString path: Path geometry or ordered lane sequence used by this operation.
+        :param LineString path: Replay-path geometry in map metres.
         :param float start_t: Start time in scenario seconds.
         :param List[float] s: Increasing grid positions along the replay path, in metres.
         :param List[float] v: Feasible speed at each grid position, in m/s.
-        :param List[float] dwell: Stop dwell samples, in seconds.
+        :param List[float] dwell: Dwell time at each grid position, in seconds.
         :param Sequence[float] pivots: Distances along the path where motion stops to turn in place, in metres.
         :param float yaw_rate: Angular speed during pivot turns, in radians per second.
         :returns: ``None``.
@@ -711,8 +729,8 @@ class ReplayTrajectory:
         """
         Scenario time at which the agent stops at the end of its path.
 
-        :rtype: float
         :returns: Scenario time at which the agent reaches and stops at the path end, in seconds.
+        :rtype: float
         """
         return self.start_t + self._arrive[-1]
 
@@ -757,8 +775,8 @@ class ReplayTrajectory:
         Return the agent's pose and speed at scenario time ``t``.
 
         :param float t: Seconds since the scenario started.
-        :rtype: AgentState
         :returns: The map position, heading, and speed at scenario time ``t``.
+        :rtype: AgentState
         """
         s, v = self._s, self._v
         elapsed = t - self.start_t
@@ -795,7 +813,8 @@ def check_activity_window(duration: float, min_moving_fraction: float) -> None:
     :param float min_moving_fraction: Minimum required fraction of the scenario spent moving.
     :returns: ``None`` if the activity-window parameters are valid.
     :rtype: None
-    :raises ValueError: If input fields or bounds violate the validation conditions of this operation.
+    :raises ValueError: If ``duration`` is not finite and positive, or
+        ``min_moving_fraction`` is not finite within [0, 1].
     """
     if not isfinite(duration) or duration <= 0:
         raise ValueError("scenario_duration must be finite and positive")
@@ -826,8 +845,8 @@ def speed_grid(length: float, profile: Sequence[SpeedPoint], positions: Sequence
     :param float smoothing: Shortest metres over which caps are enveloped and the
         accelerate / cruise / brake profile is rounded; vehicles 4 m. Walkers
         use less, or a walk-off from rest would take 4-6 s to reach pace.
-    :rtype: Tuple[List[float], List[float], List[float]]
     :returns: Path grid positions in metres, feasible speeds in m/s, and dwell times in seconds.
+    :rtype: Tuple[List[float], List[float], List[float]]
     """
     positions = [float(position) for position in positions]
     stops = {position: point.dwell for position, point in zip(positions, profile) if point.speed == 0}
@@ -850,8 +869,8 @@ def speed_grid(length: float, profile: Sequence[SpeedPoint], positions: Sequence
         """
         Evaluate the target speed at a path distance using the latest applicable speed point.
 
-        :param float s: Position along the lane, element, or path, in metres.
-        :returns: The computed distance, duration, or scalar value described above.
+        :param float s: Distance along the replay path, in metres.
+        :returns: The moving target speed applying at that path position, in m/s.
         :rtype: float
         """
         index = max(bisect_right(positions, s) - 1, 0)
@@ -926,11 +945,11 @@ def _window_mean(s: np.ndarray, values: np.ndarray, reach: float, low: float, hi
     Mean of the piecewise-linear ``values`` over [s - reach, s + reach] for
     every ``s``; ``extend(points)`` gives the function outside [low, high].
 
-    :param np.ndarray s: Position along the lane, element, or path, in metres.
+    :param np.ndarray s: Path positions at which the moving mean is evaluated, in metres.
     :param np.ndarray values: Values sampled at the supplied path positions.
-    :param float reach: Maximum query or sampling distance, in metres.
-    :param float low: Lower bound in the units of the values being sampled or checked.
-    :param float high: Upper bound in the units of the values being sampled or checked.
+    :param float reach: Half-width of the averaging window, in metres.
+    :param float low: Start of the signal domain, in path metres.
+    :param float high: End of the signal domain, in path metres.
     :param Callable[[np.ndarray], np.ndarray] extend: Callback evaluating the extended signal at an array of path positions.
     :returns: The signal averaged within the requested distance window at each input position.
     :rtype: np.ndarray
@@ -949,9 +968,9 @@ def _envelope(s: np.ndarray, caps: np.ndarray, reach: float) -> np.ndarray:
     A smooth function at or below ``caps`` at every grid point: the moving
     minimum over a slightly wider window, then the moving mean.
 
-    :param np.ndarray s: Position along the lane, element, or path, in metres.
+    :param np.ndarray s: Sampled path positions, in metres.
     :param np.ndarray caps: Upper speed caps at the sampled path positions.
-    :param float reach: Maximum query or sampling distance, in metres.
+    :param float reach: Smoothing reach along the path, in metres.
     :returns: Smoothed values no greater than the original caps at each grid position.
     :rtype: np.ndarray
     """
@@ -973,10 +992,10 @@ def _rounded(s: np.ndarray, squared: np.ndarray, zero: Sequence[bool], reach: fl
     constant acceleration it leaves and reaches them with. A stretch whose
     mean is not positive keeps its values.
 
-    :param np.ndarray s: Position along the lane, element, or path, in metres.
+    :param np.ndarray s: Sampled path positions, in metres.
     :param np.ndarray squared: Squared speed values, in square metres per square second.
     :param Sequence[bool] zero: Mask identifying required zero-speed grid positions.
-    :param float reach: Maximum query or sampling distance, in metres.
+    :param float reach: Smoothing reach along each path stretch, in metres.
     :returns: Squared speeds smoothed separately between the required zero-speed positions.
     :rtype: np.ndarray
     """
@@ -993,12 +1012,13 @@ def _rounded(s: np.ndarray, squared: np.ndarray, zero: Sequence[bool], reach: fl
             """
             Evaluate a speed piece with odd reflection beyond each endpoint.
 
-            :param np.ndarray points: Ordered polyline vertices in map metres.
+            :param np.ndarray points: Path positions at which to evaluate the
+                reflected signal, in metres.
             :param np.ndarray piece_s: Sample positions along the current path piece, in metres.
             :param np.ndarray piece: Values of the current signal piece.
-            :param float low: Lower bound in the units of the values being sampled or checked.
-            :param float high: Upper bound in the units of the values being sampled or checked.
-            :returns: The extend values described above.
+            :param float low: Start position of the current path piece, in metres.
+            :param float high: End position of the current path piece, in metres.
+            :returns: Signal values evaluated with odd reflection beyond the piece endpoints.
             :rtype: np.ndarray
             """
             inside = np.interp(points, piece_s, piece)
@@ -1021,7 +1041,7 @@ def point_reference(space: RouteSpace, lane_id: str, kind: str, max_speed: float
 
     :param RouteSpace space: Route space supplying lane geometry, topology, and vehicle-specific constraints.
     :param str lane_id: Map, virtual-lane, or walk-element ID, as applicable.
-    :param str kind: Traffic type name or excursion category selecting the applicable rules or prior.
+    :param str kind: Agent type name selecting the applicable speed prior.
     :param float max_speed: Maximum allowed target speed, in m/s.
     :returns: The lane-aware speed reference in m/s, or 1 for absolute cruise priors.
     :rtype: float
@@ -1039,7 +1059,7 @@ def drawn_speeds(space: RouteSpace, profile: Sequence[SpeedPoint], rng: Random, 
     :param RouteSpace space: Route space supplying lane geometry, topology, and vehicle-specific constraints.
     :param Sequence[SpeedPoint] profile: Ordered target-speed points; positions are lane or walk-element metres.
     :param Random rng: Random number generator used for sampling and selection.
-    :param str kind: Traffic type name or excursion category selecting the applicable rules or prior.
+    :param str kind: Agent type name selecting the applicable speed prior.
     :param float max_speed: Maximum allowed target speed, in m/s.
     :param float min_speed: Minimum moving target speed, in m/s.
     :returns: Speed points with positive target speeds redrawn from their lane-aware priors.
@@ -1079,7 +1099,7 @@ def anchored(frame: RouteFrame, draws: Sequence[Tuple[float, float, float]]) -> 
     """
     Speed points at shares of a route's driven distance, anchored to the lane there.
 
-    :param RouteFrame frame: Route or walk frame used to map element positions to travelled distance.
+    :param RouteFrame frame: Route frame used to map lane positions to driven distance.
     :param Sequence[Tuple[float, float, float]] draws: Fraction-of-distance, speed, and dwell triples to anchor on the route.
     :returns: Speed points anchored to map lane positions at the requested distance fractions.
     :rtype: Tuple[SpeedPoint, ...]
