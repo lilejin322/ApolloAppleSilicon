@@ -8,6 +8,7 @@ crosses each gene with its own rate and returns two children.
 
 from dataclasses import replace
 from random import Random
+from typing import Tuple
 
 from ...scenario import NPCVehicleAgent
 from .. import route_operators
@@ -19,12 +20,17 @@ from .common import NPCOperatorConfig, Spaces, acceptable, on_route, positions, 
 def cx_shared_lane(first: NPCVehicleAgent, second: NPCVehicleAgent, spaces: Spaces,
                    rng: Random) -> NPCVehicleAgent | None:
     """
-    Join ``first``'s route up to a lane both routes use with ``second``'s route from it.
+    Join ``first``'s route up to a shared lane with ``second``'s route from that lane.
 
-    Lane changes keep either parent's position where it still fits, ``first``'s
-    first; others are drawn again.
+    Lane changes retain a valid position from either parent, preferring ``first``;
+    otherwise, their positions are sampled again.
 
-    :returns: The child, or None if the routes share no lane that joins without repeats.
+    :param NPCVehicleAgent first: Parent providing the route prefix.
+    :param NPCVehicleAgent second: Parent providing the route suffix.
+    :param Spaces spaces: Search spaces used to construct the child route.
+    :param Random rng: Random number generator used for crossover and sampling.
+    :returns: The child, or ``None`` if no shared lane allows joining without repeats.
+    :rtype: NPCVehicleAgent | None
     """
     space = spaces[first.vehicle_type]
     route = route_operators.cx_shared_lane(first.route, second.route, space, rng)
@@ -34,11 +40,17 @@ def cx_shared_lane(first: NPCVehicleAgent, second: NPCVehicleAgent, spaces: Spac
 def cx_bridge(first: NPCVehicleAgent, second: NPCVehicleAgent, spaces: Spaces, rng: Random,
               config: NPCOperatorConfig = NPCOperatorConfig()) -> NPCVehicleAgent | None:
     """
-    Join ``first``'s head to ``second``'s tail through a lane path between them.
+    Join ``first``'s head to ``second``'s tail through a connecting lane path.
 
     Lane-change positions are inherited as in ``cx_shared_lane``.
 
-    :returns: The child, or None if no lane pair is reachable within ``config.max_length``.
+    :param NPCVehicleAgent first: Parent providing the route head.
+    :param NPCVehicleAgent second: Parent providing the route tail.
+    :param Spaces spaces: Search spaces used to find a connecting lane path.
+    :param Random rng: Random number generator used for crossover and sampling.
+    :param NPCOperatorConfig config: Configuration controlling route construction and length limits.
+    :returns: The child, or ``None`` if no lane pair is reachable within ``config.max_length``.
+    :rtype: NPCVehicleAgent | None
     """
     space = spaces[first.vehicle_type]
     route = route_operators.cx_bridge(first.route, second.route, space, rng, config,
@@ -51,12 +63,16 @@ def cx_route_swap(first: NPCVehicleAgent, second: NPCVehicleAgent, spaces: Space
     """
     Give ``first`` the route of ``second`` with its lane-change positions.
 
-    This exchanges routes rather than creating new ones, so ``cx_npc_agent``
-    only uses it when route recombination fails. Positions that do not fit
-    ``first``'s vehicle type are drawn again.
+    Used by ``cx_npc_agent`` when route recombination fails. Positions that do
+    not fit ``first``'s vehicle type are sampled again.
 
-    :returns: The child, or None if routes and positions are equal or the route
+    :param NPCVehicleAgent first: Parent providing the child's vehicle type and other attributes.
+    :param NPCVehicleAgent second: Parent providing the route and lane-change positions.
+    :param Spaces spaces: Search spaces used to validate the route and sample positions.
+    :param Random rng: Random number generator used to resample lane-change positions.
+    :returns: The child, or ``None`` if routes and positions are equal or the route
         does not fit ``first``'s vehicle type.
+    :rtype: NPCVehicleAgent | None
     """
     if (first.route, first.lane_change_s) == (second.route, second.lane_change_s):
         return None
@@ -68,7 +84,10 @@ def cx_lane_change_s(first: NPCVehicleAgent, second: NPCVehicleAgent) -> NPCVehi
     """
     Give ``first``'s lane changes ``second``'s positions where both change between the same lanes.
 
-    :returns: The child, or None if no shared lane change has a different position.
+    :param NPCVehicleAgent first: Parent providing the route and original lane-change positions.
+    :param NPCVehicleAgent second: Parent providing positions for matching lane changes.
+    :returns: The child, or ``None`` if no shared lane change has a different position.
+    :rtype: NPCVehicleAgent | None
     """
     theirs = positions(second)
     changes = tuple(theirs.get(pair, s) for pair, s in zip(first.route.lane_change_pairs, first.lane_change_s))
@@ -79,7 +98,11 @@ def cx_vehicle_type(first: NPCVehicleAgent, second: NPCVehicleAgent, spaces: Spa
     """
     Give ``first`` the vehicle type of ``second``, with speeds clamped to that type's maximum.
 
-    :returns: The child, or None if the types are equal or ``second``'s is not in ``spaces``.
+    :param NPCVehicleAgent first: Parent providing the route, speeds, and other attributes.
+    :param NPCVehicleAgent second: Parent providing the vehicle type.
+    :param Spaces spaces: Search spaces defining the allowed vehicle types.
+    :returns: The child, or ``None`` if the types are equal or ``second``'s type is not in ``spaces``.
+    :rtype: NPCVehicleAgent | None
     """
     if first.vehicle_type is second.vehicle_type or second.vehicle_type not in spaces:
         return None
@@ -87,22 +110,34 @@ def cx_vehicle_type(first: NPCVehicleAgent, second: NPCVehicleAgent, spaces: Spa
 
 
 def cx_npc_agent(first: NPCVehicleAgent, second: NPCVehicleAgent, spaces: Spaces, rng: Random,
-                 config: NPCOperatorConfig = NPCOperatorConfig()) -> tuple[NPCVehicleAgent, NPCVehicleAgent]:
+                 config: NPCOperatorConfig = NPCOperatorConfig()) -> Tuple[NPCVehicleAgent, NPCVehicleAgent]:
     """
     Return two children: one led by ``first``, one led by ``second``.
 
-    Each gene of the lead is crossed with the other parent only with its own
-    ``config.crossover_rates`` chance, independently of the other genes,
-    through an operator drawn by ``config.crossover_weights``. Every step
-    keeps the child acceptable. When the route gene is drawn and its recombining
-    operators fail, the lead takes the other parent's whole route with probability
-    ``config.route_swap_rate`` (``cx_route_swap``). A child where no gene was
-    crossed is its lead unchanged.
+    Each gene is crossed independently with its own ``config.crossover_rates``
+    probability, using an operator drawn by ``config.crossover_weights``.
+    Every step keeps the child acceptable. If route recombination fails, the
+    lead takes the other parent's whole route with probability
+    ``config.route_swap_rate`` through ``cx_route_swap``. A child with no
+    crossed genes is its lead unchanged.
 
+    :param NPCVehicleAgent first: Lead parent of the first child and donor for the second.
+    :param NPCVehicleAgent second: Lead parent of the second child and donor for the first.
     :param Spaces spaces: A route space per vehicle type the children may have.
-    :rtype: tuple[NPCVehicleAgent, NPCVehicleAgent]
+    :param Random rng: Random number generator used for gene selection, operator selection, and crossover.
+    :param NPCOperatorConfig config: Configuration controlling crossover probabilities, operator weights, and route swapping.
+    :returns: Two children, led by ``first`` and ``second``, respectively.
+    :rtype: Tuple[NPCVehicleAgent, NPCVehicleAgent]
     """
     def child_of(lead: NPCVehicleAgent, other: NPCVehicleAgent) -> NPCVehicleAgent:
+        """
+        Build an acceptable child by crossing selected genes of ``lead`` with ``other``.
+
+        :param NPCVehicleAgent lead: Parent providing the child's initial genes.
+        :param NPCVehicleAgent other: Parent providing genes selected for crossover.
+        :returns: The resulting child, or ``lead`` unchanged if no crossover succeeds.
+        :rtype: NPCVehicleAgent
+        """
         # Routes recombine only between parents of one vehicle type (unless
         # ``config.cross_type_routes``): a car takes a van's road freely, but a
         # van rarely fits a car's, so routes flowed into the roads large vehicles
