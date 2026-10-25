@@ -396,8 +396,9 @@ class Section(Generic[T]):
 
 @dataclass(frozen=True)
 class NPCSection(Section[NPCVehicleAgent]):
-    """NPC vehicles, replayed on per-type ``RouteSpace`` mappings (``Spaces``)."""
-
+    """
+    NPC vehicles, replayed on per-type ``RouteSpace`` mappings (``Spaces``).
+    """
     agents: tuple[NPCVehicleAgent, ...] = ()
     """The NPC vehicles, in no particular order."""
     AGENT: ClassVar[type] = NPCVehicleAgent
@@ -449,8 +450,9 @@ class NPCSection(Section[NPCVehicleAgent]):
 
 @dataclass(frozen=True)
 class BicycleSection(Section[BicycleAgent]):
-    """Bicycles, replayed on the bicycles' ``RouteSpace`` (``BicycleAgent.space``)."""
-
+    """
+    Bicycles, replayed on the bicycles' ``RouteSpace`` (``BicycleAgent.space``).
+    """
     agents: tuple[BicycleAgent, ...] = ()
     """The bicycles, in no particular order."""
     AGENT: ClassVar[type] = BicycleAgent
@@ -498,8 +500,9 @@ class BicycleSection(Section[BicycleAgent]):
 
 @dataclass(frozen=True)
 class PedestrianSection(Section[PedestrianAgent]):
-    """Pedestrians, replayed on the map's ``WalkNetwork``."""
-
+    """
+    Pedestrians, replayed on the map's ``WalkNetwork``.
+    """
     agents: tuple[PedestrianAgent, ...] = ()
     """The pedestrians, in no particular order."""
     AGENT: ClassVar[type] = PedestrianAgent
