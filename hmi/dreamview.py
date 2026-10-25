@@ -21,7 +21,7 @@ from shapely.geometry import Point
 from threading import Event, RLock, Thread
 from google.protobuf.message import Message
 from types import TracebackType
-from typing import Any, List, Optional, Tuple, Dict, Union, Callable, Type, Self
+from typing import Any, List, Optional, Tuple, Dict, Callable, Type, Self
 if __package__:
     from .interface import DreamviewInterface
     from ..message.descriptor import DescriptorBundle
@@ -542,7 +542,7 @@ class Dreamview(DreamviewInterface):
         return value
 
     def _request(self, msg_type, response_type, deadline=None,
-                 **fields) -> Union[Dict[str, Any], bytes]:
+                 **fields) -> Dict[str, Any] | bytes:
         """
         Send a legacy request and wait for a response of the expected type.
 
@@ -563,7 +563,7 @@ class Dreamview(DreamviewInterface):
                            as keyword arguments.
         :returns: The complete matching JSON response dict, or raw binary bytes
                   when response_type is None. Backend error fields are not checked.
-        :rtype: Union[Dict[str, Any], bytes]
+        :rtype: Dict[str, Any] | bytes
         :raises TypeError: The request contains a value that cannot be JSON encoded.
         :raises ValueError: The request contains non-finite numbers or a
             circular reference.
@@ -768,7 +768,7 @@ class Dreamview(DreamviewInterface):
         :param float deadline: Absolute deadline on the time.monotonic() clock.
         :returns: The complete matching JSON response dict, or raw binary bytes
                   when response_type is None. Backend error fields are not checked.
-        :rtype: Union[Dict[str, Any], bytes]
+        :rtype: Dict[str, Any] | bytes
         :raises websocket.WebSocketTimeoutException: The deadline expires or
             receiving times out before a matching message arrives.
         :raises websocket.WebSocketConnectionClosedException: An empty message

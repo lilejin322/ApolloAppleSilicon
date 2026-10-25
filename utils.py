@@ -2,7 +2,7 @@ import math
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Tuple, Union
+from typing import List, Tuple
 
 from google.protobuf import text_format
 
@@ -36,7 +36,7 @@ class ApolloVehicleConfig:
 
 
 def get_vehicle_params(vehicle_param_file: str, *,
-                       descriptor_path: Union[str, Path]) -> ApolloVehicleConfig:
+                       descriptor_path: str | Path) -> ApolloVehicleConfig:
     vehicle_config_cls = DescriptorBundle(descriptor_path).message("apollo.common.VehicleConfig")
     with open(vehicle_param_file, 'r') as fp:
         v = text_format.Parse(fp.read(), vehicle_config_cls())
