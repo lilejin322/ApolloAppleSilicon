@@ -286,8 +286,6 @@ class Section(Generic[T]):
 
         :param T agent: Agent to check.
         :param Any context: Map context for this agent type: ``RouteSpace`` mappings for vehicles, a ``RouteSpace`` for bicycles, a ``WalkNetwork`` for pedestrians.
-        :returns: ``None`` if the agent is valid on ``context``.
-        :rtype: None
         :raises InvalidRoute: With the first problem found.
         :raises ValueError: If the context does not fit this agent.
         :raises NotImplementedError: If called on ``Section`` itself.
@@ -341,8 +339,6 @@ class Section(Generic[T]):
 
         :param Any context: Map context passed to ``check_agent`` and ``conflict``.
         :param SectionRules | None rules: Constraints. Defaults to ``RULES``.
-        :returns: ``None`` if the section is valid on ``context``.
-        :rtype: None
         :raises InvalidSection: If the count, an agent, the start-time spread or an overlap breaks the rules.
         """
         rules = rules or self.RULES
@@ -438,8 +434,6 @@ class NPCSection(Section[NPCVehicleAgent]):
 
         :param NPCVehicleAgent agent: Vehicle to check.
         :param Spaces context: Route spaces keyed by vehicle type.
-        :returns: ``None`` if the vehicle is valid on its space.
-        :rtype: None
         :raises InvalidRoute: If ``context`` has no space for this type, or with the first problem ``validate`` finds.
         :raises ValueError: If the space allows U-turns too tight for this type.
         """
@@ -491,8 +485,6 @@ class BicycleSection(Section[BicycleAgent]):
 
         :param BicycleAgent agent: Bicycle to check.
         :param RouteSpace context: Route space built with ``BicycleAgent.space``.
-        :returns: ``None`` if the bicycle is valid on ``context``.
-        :rtype: None
         :raises InvalidRoute: With the first problem ``validate`` finds.
         """
         agent.validate(context)
@@ -541,8 +533,6 @@ class PedestrianSection(Section[PedestrianAgent]):
 
         :param PedestrianAgent agent: Pedestrian to check.
         :param WalkNetwork context: Walk network supplying sidewalk and excursion geometry.
-        :returns: ``None`` if the pedestrian is valid on ``context``.
-        :rtype: None
         :raises InvalidRoute: With the first problem ``validate`` finds.
         """
         agent.validate(context)
