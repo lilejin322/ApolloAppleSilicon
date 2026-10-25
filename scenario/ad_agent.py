@@ -35,9 +35,6 @@ class ADAgent:
     def __post_init__(self) -> None:
         """
         Validate the field values and consistency of the constructed object.
-
-        :returns: ``None`` if validation succeeds.
-        :rtype: None
         """
         require_nonnegative(start_t=self.start_t)
 

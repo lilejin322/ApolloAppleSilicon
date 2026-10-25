@@ -266,8 +266,6 @@ class LaneRoute:
         """
         Validate the field values and consistency of the constructed object.
 
-        :returns: ``None`` if validation succeeds.
-        :rtype: None
         :raises ValueError: If the route has no lanes, the transition count is wrong, or an endpoint is not finite.
         """
         if not self.lanes:
@@ -452,8 +450,6 @@ class VirtualLane:
         """
         Validate the field values and consistency of the constructed object.
 
-        :returns: ``None`` if validation succeeds.
-        :rtype: None
         :raises ValueError: If the lane ID or line is invalid, or pivots are non-finite, out of order, outside the line, or not at line vertices.
         """
         if not self.lane_id:
@@ -510,8 +506,6 @@ class RouteRules:
         """
         Validate the field values and consistency of the constructed object.
 
-        :returns: ``None`` if validation succeeds.
-        :rtype: None
         :raises ValueError: If a configured distance is negative, or ``ambiguity_margin`` is not finite and positive.
         """
         require_nonnegative(min_turn_radius=self.min_turn_radius,
@@ -591,8 +585,6 @@ class RouteSpace:
         :param Iterable[VirtualLane] virtual_lanes: Additional immutable lane geometries and their connections.
         :param Iterable[str] extra_lanes: Additional map lanes admitted beyond the configured lane type.
         :param Mapping[str, float] lane_offsets: Rightward centreline shifts by lane ID, in metres.
-        :returns: ``None``.
-        :rtype: None
         :raises RuntimeError: If the map was loaded without its routing graph or lane index.
         :raises ValueError: If lane types are unknown, a virtual lane conflicts or joins an unknown lane, virtual lanes are incompatible with the rules, or an extra/offset lane is unknown.
         """
@@ -677,8 +669,6 @@ class RouteSpace:
         :param Tuple[float, ...] | None lane_change_s: Where each lane change starts on
             its source lane, in route order. By default each starts as soon as the
             route enters the source lane; Apollo's planning decides for the ego.
-        :returns: ``None`` if all applicable validation checks pass.
-        :rtype: None
         :raises InvalidRoute: If route topology, endpoint restrictions, lane-change placement, or pose ambiguity checks fail.
         """
         self._check(route, lane_change_s)
@@ -761,8 +751,6 @@ class RouteSpace:
 
             :param Tuple[str, ...] lanes: Lane IDs in driving order.
             :param Iterable[Tuple[float, float]] points: Ordered polyline vertices in map metres.
-            :returns: ``None`` if the operation succeeds.
-            :rtype: None
             """
             nonlocal last
             line = [] if last is None else [last]
@@ -1081,8 +1069,6 @@ class RouteSpace:
         Reject route endpoints that violate the route space endpoint restrictions.
 
         :param LaneRoute route: Route whose endpoints are checked.
-        :returns: ``None`` if the operation succeeds.
-        :rtype: None
         :raises InvalidRoute: If the start or end violates the configured endpoint restrictions.
         """
         if not self.restricts_endpoints:

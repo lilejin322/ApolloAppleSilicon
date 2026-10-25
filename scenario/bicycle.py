@@ -288,8 +288,6 @@ class BicycleAgent:
         """
         Validate the field values and consistency of the constructed object.
 
-        :returns: ``None`` if validation succeeds.
-        :rtype: None
         :raises ValueError: If input fields or bounds violate the validation conditions of this operation.
         """
         check_profile(self.route, self.speed_profile, self.spec.max_speed, self.rider_type.name)
@@ -387,8 +385,6 @@ class BicycleAgent:
         Check the route, the turn waits, the speed points, and the path's turning radius.
 
         :param RouteSpace space: Built with ``BicycleAgent.space``.
-        :returns: ``None`` if all applicable validation checks pass.
-        :rtype: None
         :raises InvalidRoute: With the first problem found.
         """
         self._validated_layout(space)

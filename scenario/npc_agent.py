@@ -150,8 +150,6 @@ class NPCVehicleAgent:
         """
         Validate the field values and consistency of the constructed object.
 
-        :returns: ``None`` if validation succeeds.
-        :rtype: None
         :raises ValueError: If input fields or bounds violate the validation conditions of this operation.
         """
         if len(self.lane_change_s) != self.route.lane_changes:
@@ -206,8 +204,6 @@ class NPCVehicleAgent:
         Check the route, lane-change positions, and final path's turning radius.
 
         :param RouteSpace space: Built with ``NPCVehicleAgent.rules`` for this type.
-        :returns: ``None`` if all applicable validation checks pass.
-        :rtype: None
         :raises ValueError: If the space allows U-turns too tight for this type.
         :raises InvalidRoute: With the first problem found.
         """

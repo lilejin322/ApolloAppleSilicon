@@ -158,8 +158,6 @@ class CurbPoint:
         """
         Validate the field values and consistency of the constructed object.
 
-        :returns: ``None`` if validation succeeds.
-        :rtype: None
         :raises ValueError: If ``sidewalk`` is empty or ``s`` is not finite and nonnegative.
         """
         if not self.sidewalk:
@@ -277,8 +275,6 @@ class Excursion:
         """
         Validate the field values and consistency of the constructed object.
 
-        :returns: ``None`` if validation succeeds.
-        :rtype: None
         :raises ValueError: If ``turn_back`` is not ``None`` and is not finite and positive.
         """
         if self.turn_back is not None and not (isfinite(self.turn_back) and self.turn_back > 0):
@@ -341,8 +337,6 @@ class WalkRoute:
         """
         Validate the field values and consistency of the constructed object.
 
-        :returns: ``None`` if validation succeeds.
-        :rtype: None
         :raises ValueError: If there are too many excursions or a non-final excursion turns back.
         """
         if len(self.excursions) > MAX_EXCURSIONS:

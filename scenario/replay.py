@@ -127,8 +127,6 @@ def check_profile(route: LaneRoute, profile: Sequence[SpeedPoint],
         strictly increasing in route order (lane, then s); the last one must not be a stop.
     :param float max_speed: Highest allowed speed in m/s.
     :param str name: The agent type, for error messages.
-    :returns: ``None`` if the profile satisfies its shape, position, speed, and dwell constraints.
-    :rtype: None
     :raises ValueError: With the first problem found.
     """
     if not 1 <= len(profile) <= MAX_SPEED_POINTS:
@@ -183,8 +181,6 @@ class RouteFrame:
         :param LaneRoute route: Route to inspect, validate, or convert.
         :param Tuple[float, ...] lane_change_s: Lane-change start positions on
             source lanes, in route order.
-        :returns: ``None``.
-        :rtype: None
         """
         legs = space.legs(route, lane_change_s=lane_change_s)
         minimum = space.rules.min_lane_change_distance
@@ -254,8 +250,6 @@ class RouteFrame:
 
         :param Sequence[SpeedPoint] profile: Ordered target-speed points; positions
             are lane metres.
-        :returns: ``None`` if all speed points lie within their driven lane windows.
-        :rtype: None
         :raises InvalidRoute: For the first point outside.
         """
         for point in profile:
@@ -674,8 +668,6 @@ def check_turning_radius(spans: Sequence[Span], min_turn_radius: float, name: st
     :param Sequence[Span] spans: Distance intervals with their curvature values.
     :param float min_turn_radius: Minimum permitted turning radius, in metres.
     :param str name: The agent type, for error messages.
-    :returns: ``None`` if every curvature span respects the minimum turning radius.
-    :rtype: None
     :raises InvalidRoute: For the first span that is too tight.
     """
     for low, high, curvature in spans:
@@ -725,8 +717,6 @@ class ReplayTrajectory:
         :param List[float] dwell: Dwell time at each grid position, in seconds.
         :param Sequence[float] pivots: Distances along the path where motion stops to turn in place, in metres.
         :param float yaw_rate: Angular speed during pivot turns, in radians per second.
-        :returns: ``None``.
-        :rtype: None
         """
         self.path = path
         self.start_t = start_t
@@ -843,8 +833,6 @@ def check_activity_window(duration: float, min_moving_fraction: float) -> None:
 
     :param float duration: Scenario duration, in seconds.
     :param float min_moving_fraction: Minimum required fraction of the scenario spent moving.
-    :returns: ``None`` if the activity-window parameters are valid.
-    :rtype: None
     :raises ValueError: If ``duration`` is not finite and positive, or
         ``min_moving_fraction`` is not finite within [0, 1].
     """

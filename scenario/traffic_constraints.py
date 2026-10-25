@@ -44,8 +44,6 @@ def check_stops(space: RouteSpace, layout: ReplayLayout, profile: Sequence[Speed
     :param ReplayLayout layout: Replay layout containing the path and route-to-path mappings.
     :param Sequence['SpeedPoint'] profile: Ordered target-speed points anchored to route lanes.
     :param Sequence[float] positions: Path positions corresponding to ``profile``, in metres.
-    :returns: ``None`` if every ordinary stop avoids prohibited regions.
-    :rtype: None
     :raises InvalidRoute: If an ordinary stop lies on a virtual or junction lane,
         inside a junction polygon, or in or too close to a lane-change stretch.
     """
@@ -100,8 +98,6 @@ def check_footprint(space: RouteSpace, path: LineString, length: float, width: f
     :param float length: Body length, in metres.
     :param float width: Body width, in metres.
     :param Sequence[float] pivots: Path distances where the agent stops and turns in place, in metres.
-    :returns: ``None`` if all sampled body footprints pass the map conflict checks.
-    :rtype: None
     :raises InvalidRoute: If a sampled footprint crosses a prohibiting marking or
         an endpoint footprint overlaps a junction under endpoint restrictions.
     """
@@ -147,8 +143,6 @@ def _check_footprint(space: RouteSpace, path: LineString, length: float, width: 
     :param float length: Body length, in metres.
     :param float width: Body width, in metres.
     :param Sequence[float] pivots: Path distances where the agent stops and turns in place, in metres.
-    :returns: ``None`` if all sampled body footprints avoid known map conflicts.
-    :rtype: None
     :raises InvalidRoute: If a sampled footprint crosses a prohibiting marking or
         an endpoint footprint overlaps a junction under endpoint restrictions.
     """

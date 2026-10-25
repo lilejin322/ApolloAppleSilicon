@@ -357,8 +357,6 @@ class PedestrianAgent:
         """
         Validate the field values and consistency of the constructed object.
 
-        :returns: ``None`` if validation succeeds.
-        :rtype: None
         :raises ValueError: If input fields or bounds violate the validation conditions of this operation.
         """
         check_profile(self.route, self.speed_profile, self.spec.max_speed, self.walker_type.name)
@@ -401,8 +399,6 @@ class PedestrianAgent:
         Check the walk, the speed points and the path's turning radius.
 
         :param WalkNetwork network: Walk network supplying sidewalk and excursion geometry.
-        :returns: ``None`` if all applicable validation checks pass.
-        :rtype: None
         :raises InvalidRoute: With the first problem found.
         """
         self._validated_layout(network)
