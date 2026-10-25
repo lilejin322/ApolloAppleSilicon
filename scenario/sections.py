@@ -24,7 +24,7 @@ import numpy as np
 from math import hypot
 from dataclasses import dataclass
 from weakref import WeakKeyDictionary
-from typing import Any, Callable, ClassVar, Generic, Iterable, Mapping, NamedTuple, TypeVar
+from typing import Any, Callable, ClassVar, Generic, Iterable, Mapping, NamedTuple, TypeVar, Tuple
 
 from .bicycle import RIDER_SPECS, BicycleAgent
 from .npc_agent import VEHICLE_SPECS, NPCVehicleAgent, VehicleType
@@ -197,7 +197,7 @@ def sampled_body(agent: Any, trajectory: Callable[[], Any],
     :rtype: Body
     """
     anchor = context
-    if isinstance(context, Mapping) and context:          # NPC spaces: key on one of its (weakly referable) spaces.
+    if isinstance(context, Mapping) and context:        # NPC spaces: key on one of its (weakly referable) spaces.
         anchor = context[min(context, key=lambda kind: kind.name)]
     try:
         cache = _BODY_CACHE.setdefault(anchor, {})
@@ -224,9 +224,9 @@ class Section(Generic[T]):
     ``RouteSpace`` mappings for vehicles, a ``RouteSpace`` for bicycles, a
     ``WalkNetwork`` for pedestrians.
 
-    :param tuple agents: The agents, in no particular order.
+    :param Tuple[T, ...] agents: The agents, in no particular order.
     """
-    agents: tuple[T, ...] = ()
+    agents: Tuple[T, ...] = ()
     """The agents, in no particular order."""
     AGENT: ClassVar[type] = object
     """Agent type stored in ``agents``. Subclasses replace the ``object`` placeholder."""
@@ -255,13 +255,13 @@ class Section(Generic[T]):
 
     # Type-specific parts.
     @staticmethod
-    def size(agent: T) -> tuple[float, float]:
+    def size(agent: T) -> Tuple[float, float]:
         """
         Body length and width of ``agent``, in metres. Subclasses implement this.
 
         :param T agent: Agent whose body size is requested.
         :returns: Body length and width, in metres.
-        :rtype: tuple[float, float]
+        :rtype: Tuple[float, float]
         :raises NotImplementedError: If called on ``Section`` itself.
         """
         raise NotImplementedError
@@ -395,7 +395,7 @@ class NPCSection(Section[NPCVehicleAgent]):
     """
     NPC vehicles, replayed on per-type ``RouteSpace`` mappings (``Spaces``).
     """
-    agents: tuple[NPCVehicleAgent, ...] = ()
+    agents: Tuple[NPCVehicleAgent, ...] = ()
     """The NPC vehicles, in no particular order."""
     AGENT: ClassVar[type] = NPCVehicleAgent
     """Agent type stored in ``agents``."""
@@ -403,13 +403,13 @@ class NPCSection(Section[NPCVehicleAgent]):
     """At most 6 vehicles, 0.4 m between bodies, and 0.5 s between starts."""
 
     @staticmethod
-    def size(agent: NPCVehicleAgent) -> tuple[float, float]:
+    def size(agent: NPCVehicleAgent) -> Tuple[float, float]:
         """
         Body length and width of ``agent`` from ``VEHICLE_SPECS``.
 
         :param NPCVehicleAgent agent: Vehicle whose body size is requested.
         :returns: Body length and width, in metres.
-        :rtype: tuple[float, float]
+        :rtype: Tuple[float, float]
         """
         spec = VEHICLE_SPECS[agent.vehicle_type]
         return spec.length, spec.width
@@ -447,7 +447,7 @@ class BicycleSection(Section[BicycleAgent]):
     """
     Bicycles, replayed on the bicycles' ``RouteSpace`` (``BicycleAgent.space``).
     """
-    agents: tuple[BicycleAgent, ...] = ()
+    agents: Tuple[BicycleAgent, ...] = ()
     """The bicycles, in no particular order."""
     AGENT: ClassVar[type] = BicycleAgent
     """Agent type stored in ``agents``."""
@@ -455,13 +455,13 @@ class BicycleSection(Section[BicycleAgent]):
     """At most 4 bicycles, 0.3 m between bodies, and 0.3 s between starts."""
 
     @staticmethod
-    def size(agent: BicycleAgent) -> tuple[float, float]:
+    def size(agent: BicycleAgent) -> Tuple[float, float]:
         """
         Body length and width of ``agent`` from ``RIDER_SPECS``.
 
         :param BicycleAgent agent: Bicycle whose body size is requested.
         :returns: Body length and width, in metres.
-        :rtype: tuple[float, float]
+        :rtype: Tuple[float, float]
         """
         spec = RIDER_SPECS[agent.rider_type]
         return spec.length, spec.width
@@ -495,7 +495,7 @@ class PedestrianSection(Section[PedestrianAgent]):
     """
     Pedestrians, replayed on the map's ``WalkNetwork``.
     """
-    agents: tuple[PedestrianAgent, ...] = ()
+    agents: Tuple[PedestrianAgent, ...] = ()
     """The pedestrians, in no particular order."""
     AGENT: ClassVar[type] = PedestrianAgent
     """Agent type stored in ``agents``."""
@@ -503,13 +503,13 @@ class PedestrianSection(Section[PedestrianAgent]):
     """At most 6 pedestrians, 0.1 m between bodies, and 0.2 s between starts."""
 
     @staticmethod
-    def size(agent: PedestrianAgent) -> tuple[float, float]:
+    def size(agent: PedestrianAgent) -> Tuple[float, float]:
         """
         Body length and width of ``agent`` from ``WALKER_SPECS``.
 
         :param PedestrianAgent agent: Pedestrian whose body size is requested.
         :returns: Body length and width, in metres.
-        :rtype: tuple[float, float]
+        :rtype: Tuple[float, float]
         """
         spec = WALKER_SPECS[agent.walker_type]
         return spec.length, spec.width
