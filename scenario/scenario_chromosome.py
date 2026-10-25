@@ -19,7 +19,7 @@ Cross-type constraints (``ScenarioRules``):
 import shapely
 import numpy as np
 from dataclasses import dataclass, field
-from typing import Any, Iterator
+from typing import Any, Dict, Iterator, Tuple
 
 from .ad_agent import ADAgent
 from .routing import InvalidRoute, RouteSpace
@@ -137,31 +137,31 @@ class Scenario:
     SECTIONS = ("npcs", "bicycles", "pedestrians")
     """Section attribute names, in the order ``validate`` checks them."""
 
-    def sections(self) -> Iterator[tuple[str, Section]]:
+    def sections(self) -> Iterator[Tuple[str, Section]]:
         """
         The traffic sections in ``SECTIONS`` order.
 
         :returns: ``(name, section)`` pairs for ``npcs``, ``bicycles``, and ``pedestrians``.
-        :rtype: Iterator[tuple[str, Section]]
+        :rtype: Iterator[Tuple[str, Section]]
         """
         for name in self.SECTIONS:
             yield name, getattr(self, name)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> Dict:
         """
         Return a JSON-compatible representation.
 
         :returns: A mapping of ``ego`` and each section name to its ``to_dict``.
-        :rtype: dict
+        :rtype: Dict
         """
         return {"ego": self.ego.to_dict(), **{name: section.to_dict() for name, section in self.sections()}}
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Scenario":
+    def from_dict(cls, data: Dict) -> "Scenario":
         """
         Build a scenario from ``to_dict`` output.
 
-        :param dict data: Serialized mapping previously produced by ``to_dict``.
+        :param Dict data: Serialized mapping previously produced by ``to_dict``.
         :returns: The reconstructed scenario.
         :rtype: Scenario
         :raises KeyError: If ``ego`` or a section name is absent, or a nested dict lacks a required field.
@@ -255,7 +255,7 @@ def ego_conflict(ego: ADAgent, context: ScenarioContext, rules: ScenarioRules, b
 
 
 def interaction(scenario: Scenario, context: ScenarioContext, rules: ScenarioRules, section: Section, agent: Any,
-                *, others: tuple[str, ...] | None = None) -> str | None:
+                *, others: Tuple[str, ...] | None = None) -> str | None:
     """
     Why ``agent`` (of ``section``'s type) clashes with the ego or with the agents
     of the other-type sections of ``scenario`` (only those named in ``others``
@@ -268,7 +268,7 @@ def interaction(scenario: Scenario, context: ScenarioContext, rules: ScenarioRul
     :param ScenarioRules rules: Cross-type constraints and the shared time grid.
     :param Section section: Section ``agent`` belongs to.
     :param Any agent: Agent being checked.
-    :param tuple[str, ...] | None others: Section names to compare against. ``None`` compares every other type.
+    :param Tuple[str, ...] | None others: Section names to compare against. ``None`` compares every other type.
     :returns: Why ``agent`` clashes with the ego or another type, or None.
     :rtype: str | None
     """
