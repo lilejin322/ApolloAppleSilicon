@@ -24,7 +24,7 @@ import numpy as np
 from math import hypot
 from dataclasses import dataclass
 from weakref import WeakKeyDictionary
-from typing import Any, Callable, ClassVar, Generic, Iterable, Mapping, NamedTuple, TypeVar, Tuple
+from typing import Any, Callable, ClassVar, Dict, Generic, Iterable, Mapping, NamedTuple, TypeVar, Tuple
 
 from .bicycle import RIDER_SPECS, BicycleAgent
 from .npc_agent import VEHICLE_SPECS, NPCVehicleAgent, VehicleType
@@ -175,7 +175,7 @@ def first_overlap(a: Body, b: Body, margin: float, times: np.ndarray) -> float |
     return float(times[index[hit[0]]]) if len(hit) else None
 
 
-_BODY_CACHE: "WeakKeyDictionary[Any, dict]" = WeakKeyDictionary()
+_BODY_CACHE: "WeakKeyDictionary[Any, Dict]" = WeakKeyDictionary()
 """Sampled bodies by map context, then ``(agent, horizon, dt)``. Weak keys let the map be collected."""
 _BODY_CACHE_SIZE = 4096
 """Entries per context at which that context's cache is cleared."""
@@ -368,21 +368,21 @@ class Section(Generic[T]):
             return False
         return True
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> Dict:
         """
         Return a JSON-compatible representation.
 
         :returns: A mapping ``{"agents": [...]}`` of each agent's ``to_dict``, in section order.
-        :rtype: dict
+        :rtype: Dict
         """
         return {"agents": [agent.to_dict() for agent in self.agents]}
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Section[T]":
+    def from_dict(cls, data: Dict) -> "Section[T]":
         """
         Build a section from ``to_dict`` output.
 
-        :param dict data: Serialized mapping previously produced by ``to_dict``.
+        :param Dict data: Serialized mapping previously produced by ``to_dict``.
         :returns: The reconstructed section.
         :rtype: Section[T]
         :raises KeyError: If ``agents`` is absent, or an agent dict lacks a required field.
