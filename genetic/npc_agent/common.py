@@ -82,10 +82,10 @@ class NPCOperatorConfig(ReplayOperatorConfig):
     :param float min_speed: Lowest nonzero target speed drawn or stepped to,
         in m/s; defaults to 4.5.
     :param float max_dwell: Longest stop drawn or stepped to, in seconds.
-    :param float min_arrival_t: Earliest route-end time in scenario seconds; when positive,
-        the agent must also start before it. Zero disables the horizon check.
     :param float route_swap_rate: Chance that a route crossover whose operators
         all failed takes the other parent's whole route instead.
+    :param float min_arrival_t: Earliest route-end time in scenario seconds; when positive,
+        the agent must also start before it. Zero disables the horizon check.
     :param Mapping[str, float] vehicle_type_weights: Traffic composition (type name ->
         weight) that type mutation resamples from, so a population keeps this mix;
         default urban US vehicle-miles (``realism.VEHICLE_MIX``).
@@ -151,6 +151,8 @@ class NPCOperatorConfig(ReplayOperatorConfig):
     def __post_init__(self) -> None:
         """
         Validate inherited settings and require a finite, nonnegative ``sigma_fraction``.
+
+        :raises ValueError: If inherited validation fails, or ``sigma_fraction`` is nonfinite or negative.
         """
         super().__post_init__()
         require_nonnegative(sigma_fraction=self.sigma_fraction)
@@ -278,7 +280,7 @@ def rebalance_vehicle_types(population: Sequence[NPCVehicleAgent], spaces: Space
     """
     offered: Dict[str, float] = {name: weight for name, weight in config.vehicle_type_weights.items()
                if weight > 0 and VehicleType[name] in spaces}
-    population = list(population)
+    population: List[NPCVehicleAgent] = list(population)
     if not offered or not population:
         return population
     total: float = sum(offered.values())

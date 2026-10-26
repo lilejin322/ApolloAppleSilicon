@@ -66,10 +66,10 @@ class PedestrianOperatorConfig(ReplayOperatorConfig):
     :param float sigma_speed: Standard deviation of target speed steps, in m/s (default: 0.2).
     :param float min_speed: Lowest nonzero target speed drawn or stepped to, in m/s (default: 0.5).
     :param float max_dwell: Longest stop drawn or stepped to, in seconds (default: 20.0).
-    :param float min_arrival_t: Earliest route-end time in scenario seconds; when
-        positive, the agent must also start before it (default: 0.0, disabling the check).
     :param float route_swap_rate: Probability of taking the other parent's whole
         route when all route crossover operators fail (default: 0.5).
+    :param float min_arrival_t: Earliest route-end time in scenario seconds; when
+        positive, the agent must also start before it (default: 0.0, disabling the check).
     :param Mapping[str, float] walker_type_weights: Walker composition that type
         mutation resamples from (default: ``realism.WALKER_MIX``).
     :param Mapping[str, float] kind_weights: Excursion kinds that kind mutation and

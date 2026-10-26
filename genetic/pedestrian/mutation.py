@@ -212,7 +212,7 @@ def mut_count(agent: PedestrianAgent, network: WalkNetwork, rng: Random,
     :rtype: PedestrianAgent | None
     :raises ValueError: If ``action`` is not in ``COUNT_ACTIONS``.
     """
-    action = rng.choice(COUNT_ACTIONS) if action is None else action
+    action: str = rng.choice(COUNT_ACTIONS) if action is None else action
     if action not in COUNT_ACTIONS:
         raise ValueError(f"action must be one of {COUNT_ACTIONS}, got {action!r}")
     route: WalkRoute = agent.route
@@ -231,7 +231,7 @@ def mut_count(agent: PedestrianAgent, network: WalkNetwork, rng: Random,
         return on_route(agent, replace(route, excursions=route.excursions[:-1], end=end), network)
     if len(route.excursions) >= MAX_EXCURSIONS or (route.excursions and route.excursions[-1].turn_back is not None):
         return None
-    drawn = _draw_kind(network, rng, config) if drawn is None else drawn
+    drawn: ExcursionKind | None = _draw_kind(network, rng, config) if drawn is None else drawn
     if drawn is None:
         return None
     if not route.excursions:
@@ -301,8 +301,9 @@ def mut_walk_stop(agent: PedestrianAgent, network: WalkNetwork, rng: Random,
         wait kind, and acceptance uniform, or ``None`` to draw them.
     :returns: The mutant, or ``None`` if no change applies or the step is rejected.
     :rtype: PedestrianAgent | None
+    :raises ValueError: If ``action`` is not ``"toggle"`` or ``"dwell"``.
     """
-    action = rng.choice(STOP_ACTIONS) if action is None else action
+    action: str = rng.choice(STOP_ACTIONS) if action is None else action
     if action not in STOP_ACTIONS:
         raise ValueError(f"action must be one of {STOP_ACTIONS}, got {action!r}")
     profile: Tuple[SpeedPoint, ...] = agent.speed_profile
@@ -418,10 +419,11 @@ def mut_turn_back(agent: PedestrianAgent, network: WalkNetwork, rng: Random,
         produces a turning point, or ``None`` to sample one.
     :returns: The mutant, or ``None`` if the walk has no excursion or no change applies.
     :rtype: PedestrianAgent | None
+    :raises ValueError: If ``action`` is not one of ``TURN_BACK_ACTIONS``.
     """
     if not agent.route.excursions:
         return None
-    action = rng.choice(TURN_BACK_ACTIONS) if action is None else action
+    action: str = rng.choice(TURN_BACK_ACTIONS) if action is None else action
     if action not in TURN_BACK_ACTIONS:
         raise ValueError(f"action must be one of {TURN_BACK_ACTIONS}, got {action!r}")
     last: Excursion = agent.route.excursions[-1]

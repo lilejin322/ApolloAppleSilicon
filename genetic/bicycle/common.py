@@ -72,10 +72,10 @@ class BicycleOperatorConfig(ReplayOperatorConfig):
     :param float min_speed: Lowest nonzero target speed drawn or stepped to,
         in m/s; defaults to 1.
     :param float max_dwell: Longest stop drawn or stepped to, in seconds.
-    :param float min_arrival_t: Earliest route-end time in scenario seconds; when positive,
-        the agent must also start before it. Zero disables the horizon check.
     :param float route_swap_rate: Chance that a route crossover whose operators
         all failed takes the other parent's whole route instead.
+    :param float min_arrival_t: Earliest route-end time in scenario seconds; when positive,
+        the agent must also start before it. Zero disables the horizon check.
     :param Mapping[str, float] rider_type_weights: Rider composition that rider-type
         mutation resamples from (``realism.RIDER_MIX`` by default).
     :param float sigma_turn_dwell: Standard deviation of turn wait steps, in seconds.
@@ -146,6 +146,8 @@ class BicycleOperatorConfig(ReplayOperatorConfig):
     def __post_init__(self) -> None:
         """
         Validate inherited settings and require finite, nonnegative turn-dwell parameters.
+
+        :raises ValueError: If inherited validation fails, or a turn-dwell parameter is nonfinite or negative.
         """
         super().__post_init__()
         require_nonnegative(sigma_turn_dwell=self.sigma_turn_dwell, max_turn_dwell=self.max_turn_dwell)
@@ -286,7 +288,7 @@ def rebalance_rider_types(population: Sequence[BicycleAgent], space: RouteSpace,
     :rtype: List[BicycleAgent]
     """
     offered: Dict[str, float] = {name: weight for name, weight in config.rider_type_weights.items() if weight > 0}
-    population = list(population)
+    population: List[BicycleAgent] = list(population)
     if not offered or not population:
         return population
     total: float = sum(offered.values())
