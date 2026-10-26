@@ -124,7 +124,7 @@ def cx_speed_profile(first: Replayed, second: Replayed, rng: Random, space: Rout
         profile: Tuple[SpeedPoint, ...] = (tuple(point for point in first.speed_profile if key(point) < lane_cut)
                    + clamp_speeds([point for point in matching if key(point) >= lane_cut], first.spec.max_speed))
         return None if profile == first.speed_profile else with_profile(first, profile)
-    second_space = second_space or space
+    second_space: RouteSpace | None = second_space or space
     try:
         total: float = space.length(first.route, lane_change_s=first.lane_change_s)
         other_total: float = second_space.length(second.route, lane_change_s=second.lane_change_s)
@@ -286,7 +286,7 @@ def mut_speed_point(agent: Replayed, rng: Random, config: ReplayOperatorConfig,
     :raises TypeError: If lane-aware addition cannot determine the agent's realism type.
     """
     profile: List[SpeedPoint] = list(agent.speed_profile)
-    action = rng.choice(SPEED_POINT_ACTIONS) if action is None else action
+    action: str = rng.choice(SPEED_POINT_ACTIONS) if action is None else action
     if action not in SPEED_POINT_ACTIONS:
         raise ValueError(f"action must be one of {SPEED_POINT_ACTIONS}, got {action!r}")
     if (action == "add" and len(profile) >= MAX_SPEED_POINTS) or (action == "remove" and len(profile) <= 1):

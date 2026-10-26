@@ -13,7 +13,7 @@ the usual earliest-change entries for AD proposals.
 from dataclasses import replace
 from math import inf, isfinite
 from random import Random
-from typing import Dict, Iterable, Iterator, List, Sequence, Tuple, TypeAlias
+from typing import Dict, Iterable, Iterator, List, Sequence, Set, Tuple, TypeAlias
 from networkx import DiGraph
 
 from ..scenario.routing import InvalidRoute, LaneRoute, RouteSpace, Transition, lane_changes, RouteLeg
@@ -253,7 +253,7 @@ def mut_extend_or_truncate(route: LaneRoute, space: RouteSpace, rng: Random,
     if any(lane not in lanes for lane in graph.predecessors(lanes[0])):
         actions.append("extend_start")
     if direction is None:
-        direction = rng.choice(("extend", "truncate"))
+        direction: str = rng.choice(("extend", "truncate"))
     elif direction not in ("extend", "truncate"):
         raise ValueError(f"direction must be 'extend' or 'truncate', not {direction!r}")
     actions = [action for action in actions if action.startswith(direction)]
@@ -354,7 +354,7 @@ def mut_lane_change(route: LaneRoute, space: RouteSpace, rng: Random,
     if not actions:
         return None
     if acceptance is None:
-        acceptance = rng.random()
+        acceptance: float = rng.random()
     if rng.choice(actions) == "insert":
         child: LaneRoute | None = _insert_lane_change(route, space, rng, config, *rng.choice(inserts),
                                     lane_change_s=lane_change_s)
@@ -558,7 +558,7 @@ def _disjoint(lanes: Iterable[str], *others: Iterable[str]) -> bool:
     :returns: ``True`` if ``lanes`` is disjoint from every collection in ``others``.
     :rtype: bool
     """
-    lanes = set(lanes)
+    lanes: Set[str] = set(lanes)
     return all(lanes.isdisjoint(other) for other in others)
 
 

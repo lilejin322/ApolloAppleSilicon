@@ -203,10 +203,10 @@ class ReplayOperatorConfig(OperatorConfig):
     :param float sigma_speed: Standard deviation of target speed steps, in m/s.
     :param float min_speed: Lowest nonzero target speed drawn or stepped to, in m/s.
     :param float max_dwell: Longest stop drawn or stepped to, in seconds.
-    :param float min_arrival_t: Earliest route-end time in scenario seconds; when positive,
-        the agent must also start before it. Zero disables the horizon check.
     :param float route_swap_rate: Chance that a route crossover whose operators
         all failed takes the other parent's whole route instead.
+    :param float min_arrival_t: Earliest route-end time in scenario seconds; when positive,
+        the agent must also start before it. Zero disables the horizon check.
     :raises ValueError: If inherited bounds, weights, gene names, or probabilities
         are invalid, or speed, dwell, or arrival-time parameters are nonfinite
         or negative.
