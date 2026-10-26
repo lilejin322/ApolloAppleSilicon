@@ -32,17 +32,18 @@ too.
 import networkx as nx
 from enum import IntEnum
 from shapely import union_all
+from shapely.geometry import Polygon
+from shapely.geometry.base import BaseGeometry
 from dataclasses import dataclass, field
 from math import atan2, ceil, cos, hypot, pi, sin
 from typing import Any, Dict, Mapping, Sequence, Tuple, Self, List
 from weakref import WeakKeyDictionary
 
+from ..map import MapService
 from ..map.geometry import polygon_to_shape
 
 EPS = 1e-6
-"""
-Epsilon
-"""
+"""Absolute tolerance for float comparisons of timings, speeds and demands."""
 
 
 class SignalColor(IntEnum):
@@ -50,13 +51,13 @@ class SignalColor(IntEnum):
     Values of ``apollo.perception.TrafficLight.Color``.
     """
     UNKNOWN = 0
-    """Unknown Signal"""
+    """Apollo's unset colour. A plan reports red, yellow or green."""
     RED = 1
-    """Red Signal"""
+    """Red: the running phase's all-red, and every signal outside that phase."""
     YELLOW = 2
-    """Yellow Signal"""
+    """Yellow of the running phase, after its green."""
     GREEN = 3
-    """Green Signal"""
+    """Green of the running phase."""
 
 
 class PedState(IntEnum):
@@ -79,7 +80,7 @@ class CycleTier:
     A junction falls into the first tier, from the largest, whose every threshold it meets.
 
     :param str name: Tier name.
-    :param tuple bounds: Smallest and largest cycle, in seconds.
+    :param Tuple[float, float] bounds: Smallest and largest cycle, in seconds.
     :param int min_phases: Fewest phases.
     :param float min_speed: Lowest fastest-approach speed limit, in m/s.
     :param int min_lanes: Fewest controlled lanes (all phases).
@@ -210,7 +211,7 @@ TAIWAN = RegionProfile(
 )
 """Taiwan practice (MOTC Traffic Engineering Manual; Rules for Road Traffic Signs, Markings and
 Signals): yellow 3 s up to 50 km/h and 4 s above, all-red 1 to 2 s, walking speed 1.0 m/s,
-countdown pedestrian heads. See docs/traffic-signal-chromosome.md for sources and assumptions."""
+countdown pedestrian heads."""
 
 MAP_REGIONS: Dict[str, RegionProfile] = {
     "borregas_ave": US_MUTCD, "borregas_ave_fix": US_MUTCD, "san_mateo": US_MUTCD,
@@ -439,27 +440,27 @@ class SignalPlan:
                 return PedState.WALK if since < round(walk, 6) else PedState.FLASHING_DONT_WALK
         raise KeyError(crosswalk_id)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> Dict[str, Any]:
         """
         A JSON-compatible mapping of this plan.
 
         Tuples become lists. The keys are ``junction_id``, ``phases``, ``demand``, ``green``, ``yellow``, ``all_red``, ``offset`` and ``walks``.
 
         :returns: A new mapping that ``from_dict`` can rebuild.
-        :rtype: dict
+        :rtype: Dict[str, Any]
         """
         return {"junction_id": self.junction_id, "phases": [list(p) for p in self.phases],
                 "demand": list(self.demand), "green": list(self.green), "yellow": self.yellow,
                 "all_red": self.all_red, "offset": self.offset, "walks": [list(w) for w in self.walks]}
 
     @classmethod
-    def from_dict(cls, data: dict) -> Self:
+    def from_dict(cls, data: Dict[str, Any]) -> Self:
         """
         Build a plan from ``to_dict`` output.
 
         ``walks`` may be absent and then defaults to no crosswalks. The other keys are required.
 
-        :param dict data: Serialized mapping previously produced by ``to_dict``.
+        :param Dict[str, Any] data: Serialized mapping previously produced by ``to_dict``.
         :returns: The reconstructed plan.
         :rtype: SignalPlan
         :raises KeyError: If a required field is absent.
@@ -720,7 +721,7 @@ CROSSWALK_PARALLEL = cos(pi / 4)
 DEFAULT_WIDTH = 20.0
 """Junction extent in metres when the junction has no usable polygon."""
 
-_TIMINGS: "WeakKeyDictionary[Any, dict]" = WeakKeyDictionary()
+_TIMINGS: WeakKeyDictionary[MapService, Dict[RegionProfile, Dict[str, SignalTiming]]] = WeakKeyDictionary()
 """Cache of ``signal_timings``: a map service to ``{RegionProfile: {unit id: SignalTiming}}``. The service is a weak key, so the entry disappears with the map."""
 
 
@@ -739,7 +740,7 @@ def _circular_mean(angles: Sequence[float]) -> float | None:
     return None if hypot(x, y) < 1e-9 else atan2(y, x)
 
 
-def _extent(area, heading: float | None) -> float:
+def _extent(area: BaseGeometry | None, heading: float | None) -> float:
     """
     Junction extent in metres, along ``heading`` when it is known.
 
@@ -748,7 +749,7 @@ def _extent(area, heading: float | None) -> float:
     rotated rectangle. A missing or empty area, or a shape with no exterior,
     yields ``DEFAULT_WIDTH``.
 
-    :param area: Junction polygon, possibly a multi-polygon, or ``None``.
+    :param BaseGeometry | None area: Junction polygon, possibly a multi-polygon, or ``None``.
     :param float | None heading: Approach direction in radians, or ``None``.
     :returns: The extent in metres.
     :rtype: float
@@ -769,14 +770,14 @@ def _extent(area, heading: float | None) -> float:
     return max(along) - min(along)
 
 
-def _walk_axis(shape) -> Tuple[float, float]:
+def _walk_axis(shape: Polygon) -> Tuple[float, float]:
     """
     (length, direction) of a crosswalk's long side: people walk along it.
 
     The long side of the minimum rotated rectangle. Its direction is the edge's
     angle, so the opposite direction is the same axis.
 
-    :param shape: Crosswalk polygon.
+    :param Polygon shape: Crosswalk polygon.
     :returns: ``(length in metres, direction in radians)``.
     :rtype: Tuple[float, float]
     """
@@ -787,13 +788,13 @@ def _walk_axis(shape) -> Tuple[float, float]:
     return max(sides)
 
 
-def control_units(service) -> Dict[str, Tuple[Tuple[str, ...], ...]]:
+def control_units(service: MapService) -> Dict[str, Tuple[Tuple[str, ...], ...]]:
     """
     Signalised control units and their phases. Junctions sharing a signal merge into one unit;
     a signal at no junction is a unit of its own. Phases are the EQ components of the signal graph
     restricted to the unit, ordered by their smallest signal ID.
 
-    :param service: Map service whose ``relations`` supply the signal graph and junction membership.
+    :param MapService service: Map service whose ``relations`` supply the signal graph and junction membership.
     :returns: ``{unit id: phases}``, sorted by unit id. A unit id joins its junction IDs with ``+``,
         or is the signal ID when the unit has no junction. Each phase lists its signal IDs in order.
     :rtype: Dict[str, Tuple[Tuple[str, ...], ...]]
@@ -821,7 +822,7 @@ def control_units(service) -> Dict[str, Tuple[Tuple[str, ...], ...]]:
     return dict(sorted(units.items()))
 
 
-def signal_timings(service, region: RegionProfile = US_MUTCD) -> Dict[str, SignalTiming]:
+def signal_timings(service: MapService, region: RegionProfile = US_MUTCD) -> Dict[str, SignalTiming]:
     """
     ``SignalTiming`` of every control unit of the map (cached per map and region).
 
@@ -829,7 +830,7 @@ def signal_timings(service, region: RegionProfile = US_MUTCD) -> Dict[str, Signa
     and the cycle tier come from the junction geometry and ``region``. A service
     that cannot be a weak key is not cached.
 
-    :param service: Map service, as in ``control_units``.
+    :param MapService service: Map service, as in ``control_units``.
     :param RegionProfile region: Timing practice. Defaults to ``US_MUTCD``.
     :returns: ``{unit id: SignalTiming}`` in ``control_units`` order. A later call
         with the same service and region returns the cached mapping.
@@ -1080,21 +1081,21 @@ class SignalSection:
             return False
         return True
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> Dict[str, List[Dict[str, Any]]]:
         """
         A JSON-compatible mapping of this section.
 
         :returns: ``{"plans": [...]}``, each plan from ``SignalPlan.to_dict``.
-        :rtype: dict
+        :rtype: Dict[str, List[Dict[str, Any]]]
         """
         return {"plans": [p.to_dict() for p in self.plans]}
 
     @classmethod
-    def from_dict(cls, data: dict) -> Self:
+    def from_dict(cls, data: Dict[str, List[Dict[str, Any]]]) -> Self:
         """
         Build a section from ``to_dict`` output.
 
-        :param dict data: Serialized mapping previously produced by ``to_dict``.
+        :param Dict[str, List[Dict[str, Any]]] data: Serialized mapping previously produced by ``to_dict``.
         :returns: The reconstructed section.
         :rtype: SignalSection
         :raises KeyError: If ``plans`` is absent, or a plan lacks a required field.
