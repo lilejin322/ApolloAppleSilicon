@@ -79,20 +79,20 @@ class ScenarioKinds:
         """
         self.context: ScenarioContext = context
         self.rules: ScenarioRules = rules
-        self.kinds: Dict[str, SectionKind] = {
+        self.kinds: Dict[str, SectionKind[Any]] = {
             "npcs": NPCKind(context.npc_spaces, npc, rules.section_rules(NPCKind.default_rules())),
             "bicycles": BicycleKind(context.bicycle_space, bicycle, rules.section_rules(BicycleKind.default_rules())),
             "pedestrians": PedestrianKind(context.walk_network, pedestrian,
                                           rules.section_rules(PedestrianKind.default_rules())),
         }
 
-    def __getitem__(self, name: str) -> SectionKind:
+    def __getitem__(self, name: str) -> SectionKind[Any]:
         """
         The section kind named ``name``.
 
         :param str name: ``"npcs"``, ``"bicycles"`` or ``"pedestrians"``.
         :returns: That section's ``SectionKind``.
-        :rtype: SectionKind
+        :rtype: SectionKind[Any]
         :raises KeyError: If ``name`` is not one of those sections.
         """
         return self.kinds[name]
@@ -107,7 +107,7 @@ class ScenarioKinds:
         :rtype: Callable[[Any], bool]
         :raises AttributeError: If ``scenario`` has no attribute ``name``.
         """
-        section = getattr(scenario, name)
+        section: Section = getattr(scenario, name)
         return lambda agent: interaction(scenario, self.context, self.rules, section, agent) is None
 
 

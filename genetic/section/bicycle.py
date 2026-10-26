@@ -5,7 +5,7 @@ on the bicycles' route space.
 """
 
 from random import Random
-from typing import List, Sequence, Tuple
+from typing import List, Sequence, Tuple, Type
 
 from ...scenario import BicycleAgent, RiderType, RouteSpace, random_rider_type
 from ...scenario.routing import InvalidRoute
@@ -23,7 +23,7 @@ class BicycleKind(SectionKind[BicycleAgent]):
     :param SectionRules | None rules: In-type constraints. None uses ``BicycleSection.RULES``.
     """
 
-    SECTION = BicycleSection
+    SECTION: Type[BicycleSection] = BicycleSection
     """Bicycle section class."""
 
     def __init__(self, space: RouteSpace, config: BicycleOperatorConfig = BicycleOperatorConfig(),

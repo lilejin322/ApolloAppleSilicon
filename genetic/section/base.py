@@ -38,7 +38,6 @@ class SectionOperatorConfig:
         agent of each child with the bottom-layer crossover.
     :param int attempts: Draws per operator before it gives up and returns its input.
     """
-
     count_weights: Mapping[int, float] | None = None
     """Prior of section sizes (size -> weight). None: uniform over ``min_count .. max_count``."""
     mutation_weights: Mapping[str, float] = field(default_factory=lambda: {"count": 1.0, "agent": 2.0})
@@ -59,7 +58,7 @@ class SectionOperatorConfig:
         :rtype: Dict[int, float]
         :raises ValueError: If the weights inside the range sum to zero.
         """
-        sizes = range(rules.min_count, rules.max_count + 1)
+        sizes: range = range(rules.min_count, rules.max_count + 1)
         weights: Mapping[int, float] = self.count_weights or {n: 1.0 for n in sizes}
         prior: Dict[int, float] = {n: float(weights.get(n, 0.0)) for n in sizes}
         if sum(prior.values()) <= 0:
@@ -186,7 +185,7 @@ def fill(kind: SectionKind[T], agents: Sequence[T], size: int, rng: Random, conf
     :param Sequence[T] agents: Agents already accepted. The input sequence is not modified.
     :param int size: Desired number of agents.
     :param Random rng: Random source for new agents.
-    :param SectionOperatorConfig config: Supplies ``attempts``, the draws allowed per missing agent.
+    :param SectionOperatorConfig config: Supplies ``attempts``. Drawing stops after ``attempts * max(1, size)`` agents that do not fit.
     :param Fits | None fits: Extra predicate, or None. Defaults to None.
     :returns: The accepted agents, shorter than ``size`` when draws run out.
     :rtype: List[T]
@@ -218,7 +217,7 @@ def random_section(kind: SectionKind[T], rng: Random, config: SectionOperatorCon
     """
     if size is None:
         prior: Dict[int, float] = config.prior(kind.rules)
-        size = rng.choices(list(prior), weights=list(prior.values()))[0]
+        size: int = rng.choices(list(prior), weights=list(prior.values()))[0]
     placed: List[T] = fill(kind, (), size, rng, config, fits)
     if len(placed) < kind.rules.min_count:
         raise ValueError(f"could not place {kind.rules.min_count} {kind.section.__name__} agents")

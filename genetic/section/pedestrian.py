@@ -5,7 +5,7 @@ values on the walk network.
 """
 
 from random import Random
-from typing import List, Sequence, Tuple
+from typing import List, Sequence, Tuple, Type
 
 from ...scenario import PedestrianAgent, WalkNetwork, WalkerType, random_walker_type
 from ...scenario.routing import InvalidRoute
@@ -28,7 +28,7 @@ class PedestrianKind(SectionKind[PedestrianAgent]):
     :param SectionRules | None rules: In-type constraints. None uses ``PedestrianSection.RULES``.
     """
 
-    SECTION = PedestrianSection
+    SECTION: Type[PedestrianSection] = PedestrianSection
     """Pedestrian section class."""
 
     def __init__(self, network: WalkNetwork, config: PedestrianOperatorConfig = PedestrianOperatorConfig(),

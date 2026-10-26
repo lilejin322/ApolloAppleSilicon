@@ -5,7 +5,7 @@ on the per-type route spaces.
 """
 
 from random import Random
-from typing import List, Sequence, Tuple
+from typing import List, Sequence, Tuple, Type
 
 from ...scenario import NPCVehicleAgent, VehicleType, random_vehicle_type
 from ...scenario.routing import InvalidRoute
@@ -23,7 +23,7 @@ class NPCKind(SectionKind[NPCVehicleAgent]):
     :param SectionRules | None rules: In-type constraints. None uses ``NPCSection.RULES``.
     """
 
-    SECTION = NPCSection
+    SECTION: Type[NPCSection] = NPCSection
     """NPC section class."""
 
     def __init__(self, spaces: Spaces, config: NPCOperatorConfig = NPCOperatorConfig(),
