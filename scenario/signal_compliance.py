@@ -25,10 +25,6 @@ STOP_SETBACK: float = 0.5
 """Metres between the stop line (crosswalk edge) and the front of the stopped body."""
 STOP_LINE_MATCH: float = 3.0
 """Metres within which a signal's stop line is matched to a controlled lane (``get_signal_stop_lines``)."""
-GO_SEARCH: float = 300.0
-"""Seconds searched for the next go; a light that never allows going leaves the agent through (red runner)."""
-GO_STEP: float = 0.1
-"""Resolution of the next-go search, in seconds."""
 
 
 class SignalStop(NamedTuple):
@@ -139,14 +135,20 @@ def may_go(signals: SignalSection, stop: SignalStop, t: float) -> bool:
 
 def next_go(signals: SignalSection, stop: SignalStop, t: float) -> Optional[float]:
     """
-    First time at or after ``t`` (on a ``GO_STEP`` grid) when ``stop`` may go; ``None`` within ``GO_SEARCH``.
+    First instant at or after ``t`` when an agent at ``stop`` may proceed.
+
+    :param SignalSection signals: Plans in force.
+    :param SignalStop stop: The stop.
+    :param float t: Scenario seconds.
+    :returns: ``t`` if it may go now; else the next start of green (vehicles) or WALK (pedestrians);
+        ``None`` for a crosswalk that never shows WALK.
+    :rtype: Optional[float]
     """
-    steps = int(GO_SEARCH / GO_STEP)
-    for k in range(steps + 1):
-        when = t + k * GO_STEP
-        if may_go(signals, stop, when):
-            return when
-    return None
+    if may_go(signals, stop, t):
+        return t
+    if stop.kind == "crosswalk":
+        return signals.next_walk(stop.control_id, t)
+    return signals.next_green(stop.control_id, t)
 
 
 def comply(build: Callable[[Dict[float, float]], ReplayTrajectory], forced: Mapping[float, float],

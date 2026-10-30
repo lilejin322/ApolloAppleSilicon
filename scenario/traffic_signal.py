@@ -30,6 +30,7 @@ too.
 """
 
 import networkx as nx
+from bisect import bisect_right
 from enum import IntEnum
 from shapely import union_all
 from shapely.geometry import Polygon
@@ -342,12 +343,15 @@ class SignalPlan:
 
     def __post_init__(self) -> None:
         """
-        Freeze the sequences and reject a plan that cannot run.
+        Freeze the sequences, reject a plan that cannot run, and index its switch points.
 
         ``phases``, ``demand``, ``green`` and ``walks`` become tuples, and ``demand`` and ``green`` become floats.
+        Every switch point (green, yellow and all-red onsets, WALK and clearance ends) is stored as a cycle
+        position rounded to 1 us, the grid ``phase_at`` reads the cycle on, so a switch never lags by a float step.
 
         :raises ValueError: Unless there is one positive green and one demand per phase, ``yellow`` is positive,
-            ``all_red`` is nonnegative, and ``offset`` lies in ``[0, cycle)``.
+            ``all_red`` is nonnegative, ``offset`` lies in ``[0, cycle)``, no signal is in two phases,
+            and every crosswalk walks in one of the phases.
         """
         object.__setattr__(self, "phases", tuple(tuple(group) for group in self.phases))
         object.__setattr__(self, "demand", tuple(float(q) for q in self.demand))
@@ -359,6 +363,27 @@ class SignalPlan:
             raise ValueError("green and yellow must be positive, all-red nonnegative")
         if not 0 <= self.offset < self.cycle:
             raise ValueError("offset must lie in [0, cycle)")
+        phase_of: Dict[str, int] = {}
+        for index, group in enumerate(self.phases):
+            for s in group:
+                if s in phase_of:
+                    raise ValueError(f"signal {s} in two phases")
+                phase_of[s] = index
+        onsets, ends, start = [], [], 0.0
+        for green in self.green:
+            onsets.append(round(start, 6))
+            ends.append((round(start + green, 6), round(start + green + self.yellow, 6)))
+            start += green + self.yellow + self.all_red
+        walk_ends: Dict[str, Tuple[int, float, float]] = {}
+        for cid, phase, walk, clearance in self.walks:
+            if not 0 <= phase < len(self.phases):
+                raise ValueError(f"crosswalk {cid} walks in no phase")
+            walk_ends.setdefault(cid, (phase, round(onsets[phase] + walk, 6),
+                                       round(onsets[phase] + walk + clearance, 6)))
+        object.__setattr__(self, "_phase_of", phase_of)
+        object.__setattr__(self, "_onsets", tuple(onsets))
+        object.__setattr__(self, "_ends", tuple(ends))
+        object.__setattr__(self, "_walk_ends", walk_ends)
 
     @property
     def cycle(self) -> float:
@@ -382,27 +407,44 @@ class SignalPlan:
         """
         return tuple(s for group in self.phases for s in group)
 
+    def _position(self, t: float) -> Tuple[int, float]:
+        """
+        (running phase, cycle position) at time ``t``.
+
+        :param float t: Absolute scenario time, in seconds.
+        :returns: The phase whose span holds the position, and ``(t + offset)`` wrapped into ``[0, cycle)``
+            and rounded to 1 us, the grid of the switch points.
+        :rtype: Tuple[int, float]
+        """
+        u = round((t + self.offset) % self.cycle, 6) % self.cycle
+        return bisect_right(self._onsets, u) - 1, u
+
+    def _wait(self, position: float, u: float) -> float:
+        """
+        Seconds from cycle position ``u`` to the next time the cycle reaches ``position``.
+
+        :param float position: Target cycle position.
+        :param float u: Current cycle position.
+        :returns: The wait, in ``(0, cycle]``: a full cycle when ``u`` is already at ``position``.
+        :rtype: float
+        """
+        ahead = position - u
+        return ahead if ahead > 0 else ahead + self.cycle
+
     def phase_at(self, t: float) -> Tuple[int, SignalColor, float]:
         """
         (running phase, its colour, seconds since that phase's green started) at time ``t``.
 
-        The cycle position is ``(t + offset)`` wrapped into ``[0, cycle)``. Green, yellow and all-red follow in that order, and the third value keeps counting from the green.
+        The cycle position is ``(t + offset)`` wrapped into ``[0, cycle)`` and read to 1 us. Green, yellow and all-red follow in that order, and the third value keeps counting from the green.
 
         :param float t: Absolute scenario time, in seconds.
         :returns: ``(phase index, colour, seconds since that phase's green started)``.
         :rtype: Tuple[int, SignalColor, float]
         """
-        u = round((t + self.offset) % self.cycle, 6) % self.cycle
-        for index, green in enumerate(self.green):
-            span = green + self.yellow + self.all_red
-            if u < span or index == len(self.green) - 1:
-                if u < green:
-                    return index, SignalColor.GREEN, u
-                if u < green + self.yellow:
-                    return index, SignalColor.YELLOW, u
-                return index, SignalColor.RED, u
-            u -= span
-        raise AssertionError("unreachable")
+        index, u = self._position(t)
+        green_end, yellow_end = self._ends[index]
+        color = SignalColor.GREEN if u < green_end else SignalColor.YELLOW if u < yellow_end else SignalColor.RED
+        return index, color, u - self._onsets[index]
 
     def color(self, signal_id: str, t: float) -> SignalColor:
         """
@@ -414,12 +456,9 @@ class SignalPlan:
         :rtype: SignalColor
         :raises KeyError: If ``signal_id`` is not one of this plan's signals.
         """
+        phase = self._phase_of[signal_id]
         index, color, _ = self.phase_at(t)
-        if signal_id in self.phases[index]:
-            return color
-        if signal_id not in self.signals:
-            raise KeyError(signal_id)
-        return SignalColor.RED
+        return color if index == phase else SignalColor.RED
 
     def ped_state(self, crosswalk_id: str, t: float) -> PedState:
         """
@@ -432,13 +471,68 @@ class SignalPlan:
         :rtype: PedState
         :raises KeyError: If ``crosswalk_id`` is not one of this plan's crosswalks.
         """
-        for cid, phase, walk, clearance in self.walks:
-            if cid == crosswalk_id:
-                index, _, since = self.phase_at(t)
-                if index != phase or since >= round(walk + clearance, 6):
-                    return PedState.DONT_WALK
-                return PedState.WALK if since < round(walk, 6) else PedState.FLASHING_DONT_WALK
-        raise KeyError(crosswalk_id)
+        phase, walk_end, clearance_end = self._walk_ends[crosswalk_id]
+        index, u = self._position(t)
+        if index != phase or u >= clearance_end:
+            return PedState.DONT_WALK
+        return PedState.WALK if u < walk_end else PedState.FLASHING_DONT_WALK
+
+    def remaining(self, signal_id: str, t: float) -> float:
+        """
+        Seconds from ``t`` until ``signal_id`` changes colour.
+
+        Green counts down to its yellow, yellow to the next colour (red, or green again for a lone
+        phase without all-red), and red to the next start of the signal's green.
+
+        :param str signal_id: A signal of this plan.
+        :param float t: Absolute scenario time, in seconds.
+        :returns: The countdown, in ``(0, cycle]``.
+        :rtype: float
+        :raises KeyError: If ``signal_id`` is not one of this plan's signals.
+        """
+        phase = self._phase_of[signal_id]
+        index, u = self._position(t)
+        if index == phase:
+            for end in self._ends[phase]:
+                if u < end:
+                    return end - u
+        return self._wait(self._onsets[phase], u)
+
+    def next_green(self, signal_id: str, t: float) -> float:
+        """
+        First instant at or after ``t`` at which ``signal_id`` shows green.
+
+        :param str signal_id: A signal of this plan.
+        :param float t: Absolute scenario time, in seconds.
+        :returns: ``t`` while the signal is green, otherwise the next start of its green.
+        :rtype: float
+        :raises KeyError: If ``signal_id`` is not one of this plan's signals.
+        """
+        phase = self._phase_of[signal_id]
+        index, u = self._position(t)
+        if index == phase and u < self._ends[phase][0]:
+            return t
+        return t + self._wait(self._onsets[phase], u)
+
+    def next_walk(self, crosswalk_id: str, t: float) -> float | None:
+        """
+        First instant at or after ``t`` at which the crosswalk shows WALK.
+
+        WALK starts with its phase's green, so a wait ends at the next start of that green.
+
+        :param str crosswalk_id: A crosswalk of this plan.
+        :param float t: Absolute scenario time, in seconds.
+        :returns: ``t`` during WALK, otherwise the next start of WALK; ``None`` if the crosswalk has no WALK interval.
+        :rtype: float | None
+        :raises KeyError: If ``crosswalk_id`` is not one of this plan's crosswalks.
+        """
+        phase, walk_end, _ = self._walk_ends[crosswalk_id]
+        if walk_end <= self._onsets[phase]:
+            return None
+        index, u = self._position(t)
+        if index == phase and u < walk_end:
+            return t
+        return t + self._wait(self._onsets[phase], u)
 
     def to_dict(self) -> Dict[str, Any]:
         """
@@ -957,30 +1051,63 @@ class SignalSection:
         """
         return self._by_signal[signal_id]
 
-    def color(self, signal_id: str, t: float, force_green: bool = False) -> SignalColor:
+    def color(self, signal_id: str, t: float) -> SignalColor:
         """
-        Colour of a signal at absolute scenario time ``t``; GREEN everywhere when ``force_green``.
+        Colour of a signal at absolute scenario time ``t``.
 
         :param str signal_id: A signal of this section.
         :param float t: Absolute scenario time, in seconds.
-        :param bool force_green: Return green for every signal of this section. Defaults to ``False``.
-        :returns: The plan's colour, or green when ``force_green`` is set.
+        :returns: That plan's colour (``SignalPlan.color``).
         :rtype: SignalColor
         :raises KeyError: If ``signal_id`` is not one of this section's signals.
         """
-        plan = self._by_signal[signal_id]
-        return SignalColor.GREEN if force_green else plan.color(signal_id, t)
+        return self._by_signal[signal_id].color(signal_id, t)
 
-    def colors(self, t: float, force_green: bool = False) -> Dict[str, SignalColor]:
+    def colors(self, t: float) -> Dict[str, SignalColor]:
         """
         Colour of every signal at time ``t``.
 
         :param float t: Absolute scenario time, in seconds.
-        :param bool force_green: As in ``color``. Defaults to ``False``.
         :returns: ``{signal id: colour}``, sorted by signal ID.
         :rtype: Dict[str, SignalColor]
         """
-        return {s: self.color(s, t, force_green) for s in sorted(self._by_signal)}
+        return {s: self.color(s, t) for s in sorted(self._by_signal)}
+
+    def remaining(self, signal_id: str, t: float) -> float:
+        """
+        Seconds from ``t`` until a signal changes colour.
+
+        :param str signal_id: A signal of this section.
+        :param float t: Absolute scenario time, in seconds.
+        :returns: That plan's countdown (``SignalPlan.remaining``).
+        :rtype: float
+        :raises KeyError: If ``signal_id`` is not one of this section's signals.
+        """
+        return self._by_signal[signal_id].remaining(signal_id, t)
+
+    def next_green(self, signal_id: str, t: float) -> float:
+        """
+        First instant at or after ``t`` at which a signal shows green.
+
+        :param str signal_id: A signal of this section.
+        :param float t: Absolute scenario time, in seconds.
+        :returns: As ``SignalPlan.next_green``.
+        :rtype: float
+        :raises KeyError: If ``signal_id`` is not one of this section's signals.
+        """
+        return self._by_signal[signal_id].next_green(signal_id, t)
+
+    def next_walk(self, crosswalk_id: str, t: float) -> float | None:
+        """
+        First instant at or after ``t`` at which a signalised crosswalk shows WALK.
+
+        :param str crosswalk_id: A crosswalk of this section.
+        :param float t: Absolute scenario time, in seconds.
+        :returns: As ``SignalPlan.next_walk``.
+        :rtype: float | None
+        :raises KeyError: If ``crosswalk_id`` is not one of this section's crosswalks.
+        """
+        return self._by_crosswalk[crosswalk_id].next_walk(crosswalk_id, t)
 
     def ped_state(self, crosswalk_id: str, t: float) -> PedState:
         """
@@ -1005,54 +1132,6 @@ class SignalSection:
         :rtype: Tuple[str, ...]
         """
         return tuple(sorted(self._by_crosswalk))
-
-    def detection(self, t: float, message_cls: Any, force_green: bool = False) -> Any:
-        """
-        An ``apollo.perception.TrafficLightDetection`` for time ``t``.
-
-        One light per signal, in signal-ID order, each with confidence 1.
-        ``contain_lights`` is set when the section has any signal. ``remaining_time``
-        is the time until the colour changes, and is omitted when ``force_green`` is set.
-
-        :param float t: Absolute scenario time, in seconds. Written to ``header.timestamp_sec``.
-        :param Any message_cls: The message class, e.g. ``DescriptorBundle(...).message(
-            "apollo.perception.TrafficLightDetection")``.
-        :param bool force_green: Show every signal green (the old FORCE_INVALID_TRAFFIC_CONTROL).
-            Defaults to ``False``.
-        :returns: The filled detection message.
-        :rtype: Any
-        """
-        message = message_cls()
-        message.header.timestamp_sec = t
-        message.contain_lights = bool(self._by_signal)
-        for signal_id, color in self.colors(t, force_green).items():
-            light = message.traffic_light.add()
-            light.id = signal_id
-            light.color = int(color)
-            light.confidence = 1.0
-            if not force_green:
-                light.remaining_time = self._remaining(signal_id, t)
-        return message
-
-    def _remaining(self, signal_id: str, t: float) -> float:
-        """
-        Seconds until ``signal_id`` changes colour, sampled every 0.1 s.
-
-        The search stops after one cycle. The result is the first sample whose
-        colour differs, rounded to 0.1 s.
-
-        :param str signal_id: A signal of this section.
-        :param float t: Absolute scenario time, in seconds.
-        :returns: The remaining time in seconds.
-        :rtype: float
-        :raises KeyError: If ``signal_id`` is not one of this section's signals.
-        """
-        plan = self._by_signal[signal_id]
-        now = plan.color(signal_id, t)
-        step, ahead = 0.1, 0.0
-        while ahead < plan.cycle and plan.color(signal_id, t + ahead + step) == now:
-            ahead += step
-        return round(ahead + step, 1)
 
     def validate(self, timings: Mapping[str, SignalTiming]) -> None:
         """
