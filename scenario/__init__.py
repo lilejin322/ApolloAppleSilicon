@@ -19,10 +19,11 @@ from .routing import (
     InvalidRoute, LaneRoute, PathSection, RouteLeg, RoutePose, RoutePoses, RouteRules, RouteSpace,
     Transition, VirtualLane,
 )
+from .signal_program import SignalProgram
 from .walkways import CurbPoint, Excursion, ExcursionKind, WalkNetwork, WalkRoute, walk_network
 
 __all__ = [
-    "ADAgent", "AgentState", "BicycleAgent", "ConnectorKind", "RIDER_SPECS", "RiderSpec", "RiderType",
+    "ADAgent", "SignalProgram", "AgentState", "BicycleAgent", "ConnectorKind", "RIDER_SPECS", "RiderSpec", "RiderType",
     "NPCVehicleAgent", "ReplayTrajectory", "SpeedPoint", "VEHICLE_SPECS",
     "VehicleSpec", "VehicleType", "InvalidRoute", "LaneRoute", "RouteLeg", "RoutePose", "RoutePoses",
     "RouteRules", "RouteSpace", "Transition", "PathSection", "VirtualLane", "random_rider_type",

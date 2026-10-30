@@ -684,6 +684,39 @@ class CyberBridge:
         self._terminate(ConnectionError("CyberBridge connection closed"))
         self.stop()
 
+    def reconnect(self) -> None:
+        """
+        Close the current TCP connection and open a new one to the same server.
+
+        Stop reception, close the socket (failing pending service calls), then
+        connect again to ``host:port``. All subscriber callbacks, publisher
+        registrations and the descriptor-registration flag are cleared, because
+        the cyber_bridge server drops readers and writers with the old
+        connection. The instance stays usable and keeps its identity, so
+        holders of this object do not need a new reference.
+
+        After reconnecting, callers must add their publishers and subscribers
+        again and call ``spin()`` to resume reception. The cyber_bridge server
+        process itself is not affected.
+
+        :raises OSError: If the new connection cannot be opened.
+        """
+        if not self._closed:
+            self.close()
+        else:
+            self.stop()
+        conn = socket.create_connection((self.host, self.port), timeout=self.timeout)
+        conn.setblocking(False)
+        with self._state_lock, self._publisher_lock:
+            self.conn = conn
+            self.subscribers = defaultdict(list)
+            self.publishable_channel = {}
+            self._descriptors_registered = False
+            self._buffer = bytearray()
+            self._receive_thread = None
+            self._spinning = False
+            self._closed = False
+
     def __enter__(self) -> Self:
         """
         Return this bridge as the context managed by a ``with`` block.
