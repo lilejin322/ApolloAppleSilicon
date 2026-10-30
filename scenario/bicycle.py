@@ -14,13 +14,15 @@ stops at each pivot of its connectors for its wait, and stops at the end of
 its route, where it stays. A bicycle manager will publish ``state_at(t)``.
 """
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from random import Random
 from types import MappingProxyType
-from typing import Iterable, Mapping, Dict, FrozenSet, List, Set, Tuple, Self
+from typing import Any, Iterable, Mapping, Dict, FrozenSet, List, Set, Tuple, Self
 
 from .bike_connectors import DEFAULT_KINDS, ConnectorKind, bike_connectors
+from .obstacle_ids import BICYCLE_ID_BASE, check_id, new_lineage_id
+from .signal_compliance import COMPLIANCE_RATES, active, comply, crosswalk_stops, lane_signal_stops
 from .replay import (
     ReplayLayout, ReplayTrajectory, RouteFrame, Span, SpeedPoint, anchored, check_profile, check_turning_radius,
     curvature_spans, drawn_speeds, placed_stops, random_draws, rebased, refit_end, replay_layout, replay_path, speed_grid,
@@ -283,6 +285,12 @@ class BicycleAgent:
     """Dimensions and limits from ``RIDER_SPECS``."""
     drive_style: float = 0.5
     """In [0, 1], from gentle to brisk: the comfortable acceleration and braking the replay uses (``realism.COMFORT``)."""
+    obstacle_id: int | None = field(default=None, compare=False)
+    """Perception obstacle ID in this type's block (``obstacle_ids``); None until a section numbers it."""
+    lineage_id: str = field(default_factory=new_lineage_id, compare=False)
+    """GA identity (uuid4 hex): kept by mutation, crossover and renumbering. Labels, not genes: both are left out of ``==`` and ``hash``."""
+    obeys_signals: bool = True
+    """Gene: whether the agent waits at red stop lines / crosswalks without WALK (``signal_compliance``)."""
 
     def __post_init__(self) -> None:
         """
@@ -291,6 +299,7 @@ class BicycleAgent:
         :raises ValueError: If input fields or bounds violate the validation conditions of this operation.
         """
         check_profile(self.route, self.speed_profile, self.spec.max_speed, self.rider_type.name)
+        check_id(self.obstacle_id, BICYCLE_ID_BASE, "bicycle")
         for dwell in self.turn_dwell:
             require_nonnegative(turn_dwell=dwell)
         require_nonnegative(start_t=self.start_t)
@@ -441,20 +450,27 @@ class BicycleAgent:
         """
         return RouteFrame(space, self.route, ()).at(distance)
 
-    def trajectory(self, space: RouteSpace) -> ReplayTrajectory:
+    def trajectory(self, space: RouteSpace, signals: Any = None) -> ReplayTrajectory:
         """
         Compute the motion this agent replays.
 
         :param RouteSpace space: As in ``validate``.
+        :param SignalSection | None signals: Signal plans in force. When the agent obeys signals,
+            it dwells at every red stop line it reaches (``signal_compliance.comply``).
         :returns: The trajectory describing the agent motion over scenario time.
         :rtype: ReplayTrajectory
         :raises InvalidRoute: If the agent is invalid in this space.
         """
         layout, curvature, positions = self._validated_layout(space)
-        s, v, dwell = speed_grid(layout.path.length, self.speed_profile, positions, self.limits,
-                                 curvature_spans=curvature, speed_limits=layout.limits,
-                                 forced_stops=dict(zip(layout.pivots, self.turn_dwell)))
-        return ReplayTrajectory(layout.path, self.start_t, s, v, dwell, layout.pivots)
+        def build(forced: Dict[float, float]) -> ReplayTrajectory:
+            s, v, dwell = speed_grid(layout.path.length, self.speed_profile, positions, self.limits,
+                                     curvature_spans=curvature, speed_limits=layout.limits, forced_stops=forced)
+            return ReplayTrajectory(layout.path, self.start_t, s, v, dwell, layout.pivots)
+        pivots = dict(zip(layout.pivots, self.turn_dwell))
+        if not active(signals, self):
+            return build(pivots)
+        stops = lane_signal_stops(space.service, self.route.lanes, layout.path, signals, self.spec.length / 2)
+        return comply(build, pivots, stops, signals, layout.path.length)
 
     def with_route(self, route: LaneRoute, space: RouteSpace, rng: Random, *,
                    keep: Mapping[PivotKey, float] | None = None,
@@ -584,7 +600,8 @@ class BicycleAgent:
             draws = random_draws(rng, spec.max_speed, stop_probability, max_dwell, min_speed)
             profile = drawn_speeds(space, anchored(RouteFrame(space, route, ()), draws), rng, rider_type.name,
                                    spec.max_speed, min_speed)
-            agent = cls(route, waits, profile, rng.uniform(0, max_start_t), rider_type, rng.random())
+            agent = cls(route, waits, profile, rng.uniform(0, max_start_t), rider_type, rng.random(),
+                        obeys_signals=rng.random() < COMPLIANCE_RATES["bicycle"])
             try:
                 # Fit the last leg to the length bounds, as for NPC vehicles,
                 # then validate the complete path.
@@ -666,6 +683,9 @@ class BicycleAgent:
             "start_t": self.start_t,
             "rider_type": self.rider_type.name,
             "drive_style": self.drive_style,
+            "obstacle_id": self.obstacle_id,
+            "lineage_id": self.lineage_id,
+            "obeys_signals": self.obeys_signals,
         }
 
     @classmethod
@@ -686,4 +706,7 @@ class BicycleAgent:
             data["start_t"],
             RiderType[data["rider_type"]],
             data.get("drive_style", 0.5),
+            obstacle_id=data.get("obstacle_id"),
+            lineage_id=data.get("lineage_id") or new_lineage_id(),
+            obeys_signals=data.get("obeys_signals", True),
         )

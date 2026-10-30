@@ -1544,9 +1544,8 @@ class RouteSpace:
             for path in itertools.islice(paths, k):
                 if max_cost is not None and sum(cost(u, v, graph[u][v])
                                                for u, v in zip(path, path[1:])) > max_cost:
-                    if entry_s is None:
-                        break
-                    continue
+                    # Each further Yen step is costly on large maps; stop at the first overrun.
+                    break
                 yield tuple(path), self._transitions(path)
         except nx.NetworkXNoPath:
             return

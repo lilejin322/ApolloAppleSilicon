@@ -10,14 +10,16 @@ end of its route, where it stays. The motion itself is computed by
 """
 
 from bisect import bisect_right
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from math import hypot
 from random import Random
 from types import MappingProxyType
-from typing import Mapping, Sequence, Self
+from typing import Any, Mapping, Sequence, Self
 from shapely.geometry import LineString
 
+from .obstacle_ids import NPC_ID_BASE, check_id, new_lineage_id
+from .signal_compliance import COMPLIANCE_RATES, active, comply, crosswalk_stops, lane_signal_stops
 from .replay import (
     STOP_CLEARANCE, ReplayTrajectory, RouteFrame, SpeedPoint, anchored, check_profile, check_turning_radius,
     curvature_spans, ordered_points, placed_stops, random_draws, rebased, refit_end, replay_layout, replay_path,
@@ -145,6 +147,12 @@ class NPCVehicleAgent:
     """Dimensions and limits from ``VEHICLE_SPECS``."""
     drive_style: float = 0.5
     """In [0, 1], from gentle to brisk: the comfortable acceleration and braking the replay uses (``realism.COMFORT``)."""
+    obstacle_id: int | None = field(default=None, compare=False)
+    """Perception obstacle ID in this type's block (``obstacle_ids``); None until a section numbers it."""
+    lineage_id: str = field(default_factory=new_lineage_id, compare=False)
+    """GA identity (uuid4 hex): kept by mutation, crossover and renumbering. Labels, not genes: both are left out of ``==`` and ``hash``."""
+    obeys_signals: bool = True
+    """Gene: whether the agent waits at red stop lines / crosswalks without WALK (``signal_compliance``)."""
 
     def __post_init__(self) -> None:
         """
@@ -156,6 +164,7 @@ class NPCVehicleAgent:
             raise ValueError(f"lane_change_s needs one position per lane change "
                              f"({self.route.lane_changes}), got {len(self.lane_change_s)}")
         check_profile(self.route, self.speed_profile, self.spec.max_speed, self.vehicle_type.name)
+        check_id(self.obstacle_id, NPC_ID_BASE, "NPC vehicle")
         require_nonnegative(start_t=self.start_t)
         if not 0 <= self.drive_style <= 1:
             raise ValueError(f"drive_style must be within [0, 1], got {self.drive_style}")
@@ -296,19 +305,26 @@ class NPCVehicleAgent:
         """
         return self._validated_layout(space)[3]
 
-    def trajectory(self, space: RouteSpace) -> ReplayTrajectory:
+    def trajectory(self, space: RouteSpace, signals: Any = None) -> ReplayTrajectory:
         """
         Compute the motion this agent replays.
 
         :param RouteSpace space: As in ``validate``.
+        :param SignalSection | None signals: Signal plans in force. When the agent obeys signals,
+            it dwells at every red stop line it reaches (``signal_compliance.comply``).
         :returns: The trajectory describing the agent motion over scenario time.
         :rtype: ReplayTrajectory
         :raises InvalidRoute: If the route or lane-change positions are invalid.
         """
         path, curvature, limits, positions = self._validated_layout(space)
-        s, v, dwell = speed_grid(path.length, self.speed_profile, positions, self.limits,
-                                 curvature_spans=curvature, speed_limits=limits)
-        return ReplayTrajectory(path, self.start_t, s, v, dwell)
+        def build(forced: Dict[float, float]) -> ReplayTrajectory:
+            s, v, dwell = speed_grid(path.length, self.speed_profile, positions, self.limits,
+                                     curvature_spans=curvature, speed_limits=limits, forced_stops=forced)
+            return ReplayTrajectory(path, self.start_t, s, v, dwell)
+        if not active(signals, self):
+            return build({})
+        stops = lane_signal_stops(space.service, self.route.lanes, path, signals, self.spec.length / 2)
+        return comply(build, {}, stops, signals, path.length)
 
     def with_route(self, route: LaneRoute, space: RouteSpace, rng: Random, *,
                    keep: Mapping[Tuple[str, str], float] | None = None,
@@ -407,7 +423,8 @@ class NPCVehicleAgent:
             draws = random_draws(rng, spec.max_speed, stop_probability, max_dwell, min_speed)
             frame = RouteFrame(space, route, positions)
             profile = drawn_speeds(space, anchored(frame, draws), rng, vehicle_type.name, spec.max_speed, min_speed)
-            agent = cls(route, positions, profile, rng.uniform(0, max_start_t), vehicle_type, rng.random())
+            agent = cls(route, positions, profile, rng.uniform(0, max_start_t), vehicle_type, rng.random(),
+                        obeys_signals=rng.random() < COMPLIANCE_RATES["npc"])
             try:
                 # Explicit lane changes and joins change the geometric length.
                 # Fit the final leg to the original length target when possible,
@@ -540,6 +557,9 @@ class NPCVehicleAgent:
             "start_t": self.start_t,
             "vehicle_type": self.vehicle_type.name,
             "drive_style": self.drive_style,
+            "obstacle_id": self.obstacle_id,
+            "lineage_id": self.lineage_id,
+            "obeys_signals": self.obeys_signals,
         }
 
     @classmethod
@@ -571,11 +591,13 @@ class NPCVehicleAgent:
                 raise ValueError("a version 1 NPC dict (speed points by fraction) needs its RouteSpace to load")
             draws = [(point["fraction"], point["speed"], point.get("dwell", 0.0)) for point in data["speed_profile"]]
             return cls(route, lane_change_s, _from_fractions(space, route, lane_change_s, draws, vehicle_type),
-                       data["start_t"], vehicle_type, data.get("drive_style", 0.5))
+                       data["start_t"], vehicle_type, data.get("drive_style", 0.5), obstacle_id=data.get("obstacle_id"), lineage_id=data.get("lineage_id") or new_lineage_id(),
+                   obeys_signals=data.get("obeys_signals", True))
         if version != SPEED_PROFILE_VERSION:
             raise ValueError(f"unknown NPC dict version {version!r}")
         return cls(route, lane_change_s, tuple(SpeedPoint(**point) for point in data["speed_profile"]),
-                   data["start_t"], vehicle_type, data.get("drive_style", 0.5))
+                   data["start_t"], vehicle_type, data.get("drive_style", 0.5), obstacle_id=data.get("obstacle_id"), lineage_id=data.get("lineage_id") or new_lineage_id(),
+                   obeys_signals=data.get("obeys_signals", True))
 
 
 def _from_fractions(space: RouteSpace, route: LaneRoute, lane_change_s: Tuple[float, ...],

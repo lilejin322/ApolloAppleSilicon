@@ -18,13 +18,15 @@ from math import pi
 from enum import Enum
 from random import Random
 from shapely.geometry import LineString
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
-from typing import Callable, Mapping, NamedTuple, Sequence, Dict, List, Tuple, Self
+from typing import Any, Callable, Mapping, NamedTuple, Sequence, Dict, List, Tuple, Self
 
 from ..map.geometry import normalize_angle, smooth_polyline
 from ..utils import require_nonnegative
 from .realism import EXCURSION_COUNT_MIX, EXCURSION_MIX, WALKER_MIX, comfort_limits, draw_speed, draw_type
+from .obstacle_ids import PEDESTRIAN_ID_BASE, check_id, new_lineage_id
+from .signal_compliance import COMPLIANCE_RATES, active, comply, crosswalk_stops, lane_signal_stops
 from .replay import (
     MAX_SPEED_POINTS, ReplayTrajectory, SpeedPoint, Span, check_profile, check_turning_radius, curvature_spans,
     ordered_points, speed_grid,
@@ -352,6 +354,12 @@ class PedestrianAgent:
     """Dimensions and limits from ``WALKER_SPECS``."""
     walk_style: float = 0.5
     """In [0, 1], from gentle to brisk: the comfortable acceleration and braking the replay uses (``realism.COMFORT``)."""
+    obstacle_id: int | None = field(default=None, compare=False)
+    """Perception obstacle ID in this type's block (``obstacle_ids``); None until a section numbers it."""
+    lineage_id: str = field(default_factory=new_lineage_id, compare=False)
+    """GA identity (uuid4 hex): kept by mutation, crossover and renumbering. Labels, not genes: both are left out of ``==`` and ``hash``."""
+    obeys_signals: bool = True
+    """Gene: whether the agent waits at red stop lines / crosswalks without WALK (``signal_compliance``)."""
 
     def __post_init__(self) -> None:
         """
@@ -360,6 +368,7 @@ class PedestrianAgent:
         :raises ValueError: If input fields or bounds violate the validation conditions of this operation.
         """
         check_profile(self.route, self.speed_profile, self.spec.max_speed, self.walker_type.name)
+        check_id(self.obstacle_id, PEDESTRIAN_ID_BASE, "pedestrian")
         require_nonnegative(start_t=self.start_t)
         if not 0 <= self.walk_style <= 1:
             raise ValueError(f"walk_style must be within [0, 1], got {self.walk_style}")
@@ -453,20 +462,27 @@ class PedestrianAgent:
         """
         return network.frame(self.route).at(distance)
 
-    def trajectory(self, network: WalkNetwork) -> ReplayTrajectory:
+    def trajectory(self, network: WalkNetwork, signals: Any = None) -> ReplayTrajectory:
         """
         Compute the motion this agent replays.
 
         :param WalkNetwork network: Walk network supplying sidewalk and excursion geometry.
+        :param SignalSection | None signals: Signal plans in force. When the agent obeys signals,
+            it dwells at every signalised crosswalk it reaches without WALK (``signal_compliance.comply``).
         :returns: The trajectory describing the agent motion over scenario time.
         :rtype: ReplayTrajectory
         :raises InvalidRoute: If the agent is invalid on this network.
         """
         layout, spans, positions = self._validated_layout(network)
-        s, v, dwell = speed_grid(layout.path.length, self.speed_profile, positions, self.limits,
-                                 curvature_spans=spans, forced_stops=dict.fromkeys(layout.pivots, 0.0),
-                                 smoothing=WALK_SPEED_SMOOTHING)
-        return ReplayTrajectory(layout.path, self.start_t, s, v, dwell, layout.pivots, yaw_rate=WALKER_YAW_RATE)
+        def build(forced: Dict[float, float]) -> ReplayTrajectory:
+            s, v, dwell = speed_grid(layout.path.length, self.speed_profile, positions, self.limits,
+                                     curvature_spans=spans, forced_stops=forced, smoothing=WALK_SPEED_SMOOTHING)
+            return ReplayTrajectory(layout.path, self.start_t, s, v, dwell, layout.pivots, yaw_rate=WALKER_YAW_RATE)
+        pivots = dict.fromkeys(layout.pivots, 0.0)
+        if not active(signals, self):
+            return build(pivots)
+        stops = crosswalk_stops(network, layout.path, signals, self.spec.length / 2)
+        return comply(build, pivots, stops, signals, layout.path.length)
 
     def with_route(self, route: WalkRoute, network: WalkNetwork) -> Self:
         """
@@ -581,7 +597,8 @@ class PedestrianAgent:
                 last_problem = f"no walk with excursions {[kind.name for kind in kinds]} fitted"
                 continue
             profile = random_walk_profile(network, route, rng, walker_type.name, spec.max_speed, min_speed)
-            agent = cls(route, profile, rng.uniform(0, max_start_t), walker_type, rng.random())
+            agent = cls(route, profile, rng.uniform(0, max_start_t), walker_type, rng.random(),
+                        obeys_signals=rng.random() < COMPLIANCE_RATES["pedestrian"])
             try:
                 trajectory = agent.trajectory(network)
             except InvalidRoute as problem:
@@ -610,6 +627,9 @@ class PedestrianAgent:
             "start_t": self.start_t,
             "walker_type": self.walker_type.name,
             "walk_style": self.walk_style,
+            "obstacle_id": self.obstacle_id,
+            "lineage_id": self.lineage_id,
+            "obeys_signals": self.obeys_signals,
         }
 
     @classmethod
@@ -624,7 +644,9 @@ class PedestrianAgent:
             names an unknown walker type.
         """
         return cls(WalkRoute.from_dict(data["route"]), tuple(SpeedPoint(**point) for point in data["speed_profile"]),
-                   data["start_t"], WalkerType[data["walker_type"]], data.get("walk_style", 0.5))
+                   data["start_t"], WalkerType[data["walker_type"]], data.get("walk_style", 0.5),
+                   obstacle_id=data.get("obstacle_id"), lineage_id=data.get("lineage_id") or new_lineage_id(),
+                   obeys_signals=data.get("obeys_signals", True))
 
 
 def rebased_walk(network: WalkNetwork, old_route: WalkRoute, profile: Sequence[SpeedPoint],

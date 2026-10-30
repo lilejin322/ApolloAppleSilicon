@@ -756,6 +756,28 @@ class ReplayTrajectory:
         """
         return self.start_t + self._arrive[-1]
 
+    def time_at(self, distance: float) -> float:
+        """
+        Scenario time at which the agent first reaches ``distance`` along its path.
+
+        :param float distance: Path metres, clamped to the path.
+        :returns: Arrival time at ``distance``, in scenario seconds.
+        :rtype: float
+        """
+        s, v = self._s, self._v
+        distance = min(max(distance, s[0]), s[-1])
+        index = bisect_left(s, distance)
+        if s[index] == distance or index == 0:
+            return self.start_t + self._arrive[index]
+        before = index - 1
+        step = s[index] - s[before]
+        acceleration = (v[index] ** 2 - v[before] ** 2) / (2 * step)
+        ds = distance - s[before]
+        speed = sqrt(max(v[before] ** 2 + 2 * acceleration * ds, 0.0))
+        if v[before] + speed <= 0:
+            return self.start_t + self._arrive[index]
+        return self.start_t + self._depart[before] + 2 * ds / (v[before] + speed)
+
     def moving_time(self, duration: float, *, min_speed: float = 0.5) -> float:
         """
         Seconds moving at least ``min_speed`` within scenario time [0, duration].

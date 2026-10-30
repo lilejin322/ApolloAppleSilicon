@@ -21,7 +21,7 @@ Cross-type constraints and the ego live in ``scenario_chromosome``.
 
 import shapely
 import numpy as np
-from math import hypot
+from math import cos, hypot, pi, radians, sin
 from dataclasses import dataclass
 from weakref import WeakKeyDictionary
 from typing import Any, Callable, ClassVar, Dict, Generic, Iterable, Mapping, NamedTuple, TypeVar, Tuple
@@ -29,7 +29,9 @@ from typing import Any, Callable, ClassVar, Dict, Generic, Iterable, Mapping, Na
 from .bicycle import RIDER_SPECS, BicycleAgent
 from .npc_agent import VEHICLE_SPECS, NPCVehicleAgent, VehicleType
 from .pedestrian import WALKER_SPECS, PedestrianAgent
+from .obstacle_ids import BICYCLE_ID_BASE, NPC_ID_BASE, PEDESTRIAN_ID_BASE, assign_ids, dedupe_lineage
 from .routing import InvalidRoute, RouteSpace
+from .signal_compliance import active
 from .walkways import WalkNetwork
 
 T = TypeVar("T")
@@ -55,6 +57,14 @@ class SectionRules:
         30 m/s move 3 m per step, less than a car length, so none passes through another.
     :param float margin: Metres between bodies: each body grows by half of it on every side.
     :param float min_start_gap: Fewest seconds between two start times.
+    :param float spawn_gap: Fewest metres between two ungrown bodies at their
+        first pose (t = 0, where every agent stands at its start). Stronger than
+        ``margin``, which only stops bodies touching: it keeps agents from all
+        spawning in one cluster.
+    :param float side_gap: With ``lane_aware``, the spawn gap for two bodies
+        that are not in one queue (side by side in adjacent lanes, crossing, or
+        opposing); ``spawn_gap`` then applies only within a queue.
+    :param bool lane_aware: Whether ``spawn_gap`` applies only to queued pairs (see ``queued``).
     """
     min_count: int = 0
     """Fewest agents."""
@@ -69,6 +79,25 @@ class SectionRules:
     """Metres between bodies: each body grows by half of it on every side."""
     min_start_gap: float = 0.3
     """Fewest seconds between two start times."""
+    spawn_gap: float = 0.0
+    """Fewest metres between two ungrown bodies at their first pose (t = 0)."""
+    side_gap: float = 0.0
+    """With ``lane_aware``, the spawn gap for two bodies not in one queue."""
+    lane_aware: bool = False
+    """Whether ``spawn_gap`` applies only to queued pairs, ``side_gap`` to the rest."""
+
+    def spawn_gap_for(self, a: "Body", b: "Body") -> float:
+        """
+        The spawn gap this type needs between ``a`` and ``b``.
+
+        :param Body a: One body.
+        :param Body b: The other body.
+        :returns: ``spawn_gap``, or ``side_gap`` for a lane-aware type when the two are not queued.
+        :rtype: float
+        """
+        if self.lane_aware and not queued(a, b):
+            return self.side_gap
+        return self.spawn_gap
 
     def __post_init__(self) -> None:
         """
@@ -79,8 +108,8 @@ class SectionRules:
         """
         if not 0 <= self.min_count <= self.max_count:
             raise ValueError("need 0 <= min_count <= max_count")
-        if self.horizon <= 0 or self.dt <= 0 or self.margin < 0 or self.min_start_gap < 0:
-            raise ValueError("horizon and dt must be positive, margin and min_start_gap nonnegative")
+        if self.horizon <= 0 or self.dt <= 0 or self.margin < 0 or self.min_start_gap < 0 or self.spawn_gap < 0 or self.side_gap < 0:
+            raise ValueError("horizon and dt must be positive, margin, min_start_gap and spawn_gap nonnegative")
 
     @property
     def times(self) -> np.ndarray:
@@ -119,6 +148,8 @@ class Body(NamedTuple):
     """Body width, in metres."""
     start_t: float
     """Scenario time the agent starts, in seconds."""
+    lane: str | None = None
+    """Map lane the agent starts on (its route's first lane), or None without a lane route."""
 
     @property
     def radius(self) -> float:
@@ -181,9 +212,59 @@ _BODY_CACHE_SIZE = 4096
 """Entries per context at which that context's cache is cleared."""
 
 
+def spawn_distance(a: Body, b: Body) -> float:
+    """
+    Metres between the two ungrown bodies at their first sample (t = 0).
+
+    Every agent stands at its start pose until its ``start_t``, so this is the
+    distance between where the two spawn.
+
+    :param Body a: One body.
+    :param Body b: The other body.
+    :returns: Edge-to-edge distance of the oriented rectangles, 0 if they touch.
+    :rtype: float
+    """
+    first = np.array([0])
+    return float(shapely.distance(shapely.polygons(_corners(a, first, 0.0)),
+                                  shapely.polygons(_corners(b, first, 0.0)))[0])
+
+
+QUEUE_LATERAL = 1.6
+"""Metres of lateral centre offset below which two aligned bodies share a lane.
+Half of a ~3.2-3.7 m urban lane: adjacent-lane centres sit a full lane width apart."""
+QUEUE_HEADING = radians(30.0)
+"""Largest heading difference, in radians, for two bodies to count as one queue."""
+
+
+def queued(a: Body, b: Body) -> bool:
+    """
+    Whether ``a`` and ``b`` start in one lane queue: the same start lane, or
+    aligned headings with lateral centre offset under ``QUEUE_LATERAL`` in
+    either body's frame.
+
+    The lane ID catches curved lanes, where geometry alone drifts; geometry
+    catches a car at the end of one lane and one at the start of its successor,
+    or overlapping junction lanes. Adjacent lanes (centres a lane width apart)
+    are not queued. Checked on borregas_ave and sunnyvale_loop (3.05-3.5 m lanes).
+
+    :param Body a: One body, at its first sample.
+    :param Body b: The other body, at its first sample.
+    :returns: True when the two spawn one behind the other in one lane.
+    :rtype: bool
+    """
+    if a.lane is not None and a.lane == b.lane:
+        return True
+    dh = abs((float(a.heading[0]) - float(b.heading[0]) + pi) % (2 * pi) - pi)
+    if dh > QUEUE_HEADING:
+        return False
+    dx, dy = float(b.x[0] - a.x[0]), float(b.y[0] - a.y[0])
+    return min(abs(-dx * sin(a.heading[0]) + dy * cos(a.heading[0])),
+               abs(-dx * sin(b.heading[0]) + dy * cos(b.heading[0]))) < QUEUE_LATERAL
+
+
 def sampled_body(agent: Any, trajectory: Callable[[], Any],
                  length: float, width: float, context: Any,
-                 rules: SectionRules) -> Body:
+                 rules: SectionRules, signals: Any = None) -> Body:
     """
     ``agent``'s body on ``rules``' grid, cached per context (map), agent and grid.
 
@@ -193,6 +274,8 @@ def sampled_body(agent: Any, trajectory: Callable[[], Any],
     :param float width: Body width, in metres.
     :param Any context: Map context the poses belong to. A mapping of route spaces is cached on one of them; a context that cannot be weakly referenced is not cached.
     :param SectionRules rules: Time grid. ``horizon`` and ``dt`` are part of the cache key.
+    :param SignalSection | None signals: Signal plans the replay obeys; part of the key only when
+        ``signal_compliance.active`` (plans exist and the agent obeys them).
     :returns: ``agent``'s body on ``rules``' grid, cached per context (map), agent and grid.
     :rtype: Body
     """
@@ -203,12 +286,13 @@ def sampled_body(agent: Any, trajectory: Callable[[], Any],
         cache = _BODY_CACHE.setdefault(anchor, {})
     except TypeError:                                   # A context that takes no weak reference.
         cache = {}
-    key = (agent, rules.horizon, rules.dt)
+    key = (agent, rules.horizon, rules.dt, signals if active(signals, agent) else None)
     body = cache.get(key)
     if body is None:
         replay = trajectory()
         poses = np.array([tuple(replay.state_at(t))[:3] for t in rules.times])
-        body = Body(poses[:, 0], poses[:, 1], poses[:, 2], length, width, agent.start_t)
+        lanes = getattr(getattr(agent, "route", None), "lanes", None)
+        body = Body(poses[:, 0], poses[:, 1], poses[:, 2], length, width, agent.start_t, lanes[0] if lanes else None)
         if len(cache) >= _BODY_CACHE_SIZE:
             cache.clear()
         cache[key] = body
@@ -228,10 +312,15 @@ class Section(Generic[T]):
     """
     agents: Tuple[T, ...] = ()
     """The agents, in no particular order."""
+    density: float | None = None
+    """Relative size gene in ``[0, 1]``, map-free: the size is ``count_for(density, min_count, max_count)``
+    under the map's budgeted rules (``map_budget``). None (legacy) means ``len(agents)`` is the gene."""
     AGENT: ClassVar[type] = object
     """Agent type stored in ``agents``. Subclasses replace the ``object`` placeholder."""
     RULES: ClassVar[SectionRules] = SectionRules()
     """Default in-type constraints for this section."""
+    ID_BASE: ClassVar[int | None] = None
+    """First ``obstacle_id`` of the agent type's block; subclasses set it. Post-init dedupes ``lineage_id`` and renumbers densely."""
 
     def __post_init__(self) -> None:
         """
@@ -240,9 +329,14 @@ class Section(Generic[T]):
         :raises TypeError: If an agent is not an instance of ``AGENT``.
         """
         object.__setattr__(self, "agents", tuple(self.agents))
+        if self.density is not None:
+            object.__setattr__(self, "density", min(max(float(self.density), 0.0), 1.0))
         for agent in self.agents:
             if not isinstance(agent, self.AGENT):
                 raise TypeError(f"{type(self).__name__} holds {self.AGENT.__name__}, got {type(agent).__name__}")
+        if self.ID_BASE is not None:
+            agents = assign_ids(dedupe_lineage(self.agents), self.ID_BASE, self.AGENT.__name__)
+            object.__setattr__(self, "agents", tuple(agents))
 
     def __len__(self) -> int:
         """
@@ -267,7 +361,7 @@ class Section(Generic[T]):
         raise NotImplementedError
 
     @staticmethod
-    def replay(agent: T, context: Any):
+    def replay(agent: T, context: Any, signals: Any = None):
         """
         Motion ``agent`` replays on its map context. Subclasses implement this.
 
@@ -294,26 +388,30 @@ class Section(Generic[T]):
 
     # Generic parts.
     @classmethod
-    def body(cls, agent: T, context: Any, rules: SectionRules | None = None) -> Body:
+    def body(cls, agent: T, context: Any, rules: SectionRules | None = None, signals: Any = None) -> Body:
         """
         ``agent``'s sampled body on the section's time grid.
 
         :param T agent: Agent to sample.
         :param Any context: Map context passed to ``replay``.
         :param SectionRules | None rules: Time grid. Defaults to ``RULES``.
+        :param SignalSection | None signals: Signal plans the replay obeys.
         :returns: ``agent``'s body on ``rules``' grid, cached per context, agent, and grid.
         :rtype: Body
         """
         rules = rules or cls.RULES
         length, width = cls.size(agent)
-        return sampled_body(agent, lambda: cls.replay(agent, context), length, width, context, rules)
+        return sampled_body(agent, lambda: cls.replay(agent, context, signals), length, width, context, rules,
+                            signals)
 
     @classmethod
-    def conflict(cls, agent: T, others: Iterable[T], context: Any, rules: SectionRules | None = None) -> str | None:
+    def conflict(cls, agent: T, others: Iterable[T], context: Any, rules: SectionRules | None = None,
+                 signals: Any = None) -> str | None:
         """
         Why ``agent`` cannot join ``others`` in one section (start gap or overlap), or None.
 
-        The first failing check wins: a start within ``min_start_gap`` of another, then a body overlap.
+        The first failing check wins: a start within ``min_start_gap`` of another,
+        then a body overlap, then spawn poses closer than ``spawn_gap``.
 
         :param T agent: Agent being added.
         :param Iterable[T] others: Agents already in the section.
@@ -327,13 +425,17 @@ class Section(Generic[T]):
         for other in others:
             if abs(agent.start_t - other.start_t) < rules.min_start_gap:
                 return f"start times {agent.start_t:.2f} and {other.start_t:.2f} closer than {rules.min_start_gap} s"
-            mine = mine or cls.body(agent, context, rules)
-            t = first_overlap(mine, cls.body(other, context, rules), rules.margin, rules.times)
+            mine = mine or cls.body(agent, context, rules, signals)
+            theirs = cls.body(other, context, rules, signals)
+            t = first_overlap(mine, theirs, rules.margin, rules.times)
             if t is not None:
                 return f"bodies overlap at t={t:.1f} s"
+            gap, need = spawn_distance(mine, theirs), rules.spawn_gap_for(mine, theirs)
+            if gap < need:
+                return f"spawns {gap:.1f} m from another (< {need} m)"
         return None
 
-    def validate(self, context: Any, rules: SectionRules | None = None) -> None:
+    def validate(self, context: Any, rules: SectionRules | None = None, signals: Any = None) -> None:
         """
         Check the count, each agent, and that no earlier agent conflicts with it.
 
@@ -349,11 +451,11 @@ class Section(Generic[T]):
                 self.check_agent(agent, context)
             except (InvalidRoute, ValueError) as error:
                 raise InvalidSection(f"agent {index}: {error}") from error
-            why = self.conflict(agent, self.agents[:index], context, rules)
+            why = self.conflict(agent, self.agents[:index], context, rules, signals)
             if why:
                 raise InvalidSection(f"agent {index}: {why}")
 
-    def is_valid(self, context: Any, rules: SectionRules | None = None) -> bool:
+    def is_valid(self, context: Any, rules: SectionRules | None = None, signals: Any = None) -> bool:
         """
         Whether ``validate`` accepts this section.
 
@@ -363,7 +465,7 @@ class Section(Generic[T]):
         :rtype: bool
         """
         try:
-            self.validate(context, rules)
+            self.validate(context, rules, signals)
         except InvalidSection:
             return False
         return True
@@ -375,7 +477,10 @@ class Section(Generic[T]):
         :returns: A mapping ``{"agents": [...]}`` of each agent's ``to_dict``, in section order.
         :rtype: Dict
         """
-        return {"agents": [agent.to_dict() for agent in self.agents]}
+        data: Dict = {"agents": [agent.to_dict() for agent in self.agents]}
+        if self.density is not None:
+            data["density"] = self.density
+        return data
 
     @classmethod
     def from_dict(cls, data: Dict) -> "Section[T]":
@@ -387,7 +492,7 @@ class Section(Generic[T]):
         :rtype: Section[T]
         :raises KeyError: If ``agents`` is absent, or an agent dict lacks a required field.
         """
-        return cls(tuple(cls.AGENT.from_dict(item) for item in data["agents"]))
+        return cls(tuple(cls.AGENT.from_dict(item) for item in data["agents"]), data.get("density"))
 
 
 @dataclass(frozen=True)
@@ -399,7 +504,13 @@ class NPCSection(Section[NPCVehicleAgent]):
     """The NPC vehicles, in no particular order."""
     AGENT: ClassVar[type] = NPCVehicleAgent
     """Agent type stored in ``agents``."""
-    RULES: ClassVar[SectionRules] = SectionRules(max_count=6, margin=0.4, min_start_gap=0.5)
+    ID_BASE: ClassVar[int | None] = NPC_ID_BASE
+    """First ``obstacle_id`` of this type's block."""
+    # Lane-aware: 8 m edge to edge within one lane queue (about a 1 s headway at
+    # urban 30 km/h; no bumper-to-bumper spawns). Side by side in adjacent lanes,
+    # or crossing/opposing, only 0.5 m: two 2.5 m trucks on 3.3 m lanes leave ~0.8 m.
+    RULES: ClassVar[SectionRules] = SectionRules(max_count=6, margin=0.4, min_start_gap=0.5, spawn_gap=8.0,
+                                                 side_gap=0.5, lane_aware=True)
     """At most 6 vehicles, 0.4 m between bodies, and 0.5 s between starts."""
 
     @staticmethod
@@ -415,7 +526,7 @@ class NPCSection(Section[NPCVehicleAgent]):
         return spec.length, spec.width
 
     @staticmethod
-    def replay(agent: NPCVehicleAgent, context: Spaces):
+    def replay(agent: NPCVehicleAgent, context: Spaces, signals: Any = None):
         """
         Motion ``agent`` replays on the route space for its vehicle type.
 
@@ -425,7 +536,7 @@ class NPCSection(Section[NPCVehicleAgent]):
         :rtype: ReplayTrajectory
         :raises KeyError: If ``context`` has no space for ``agent.vehicle_type``.
         """
-        return agent.trajectory(context[agent.vehicle_type])
+        return agent.trajectory(context[agent.vehicle_type], signals)
 
     @staticmethod
     def check_agent(agent: NPCVehicleAgent, context: Spaces) -> None:
@@ -451,7 +562,10 @@ class BicycleSection(Section[BicycleAgent]):
     """The bicycles, in no particular order."""
     AGENT: ClassVar[type] = BicycleAgent
     """Agent type stored in ``agents``."""
-    RULES: ClassVar[SectionRules] = SectionRules(max_count=4, margin=0.3, min_start_gap=0.3)
+    ID_BASE: ClassVar[int | None] = BICYCLE_ID_BASE
+    """First ``obstacle_id`` of this type's block."""
+    # spawn_gap 3 m: about one bicycle length plus riding clearance.
+    RULES: ClassVar[SectionRules] = SectionRules(max_count=4, margin=0.3, min_start_gap=0.3, spawn_gap=3.0)
     """At most 4 bicycles, 0.3 m between bodies, and 0.3 s between starts."""
 
     @staticmethod
@@ -467,7 +581,7 @@ class BicycleSection(Section[BicycleAgent]):
         return spec.length, spec.width
 
     @staticmethod
-    def replay(agent: BicycleAgent, context: RouteSpace):
+    def replay(agent: BicycleAgent, context: RouteSpace, signals: Any = None):
         """
         Motion ``agent`` replays on the bicycles' route space.
 
@@ -476,7 +590,7 @@ class BicycleSection(Section[BicycleAgent]):
         :returns: The trajectory describing the bicycle motion over scenario time.
         :rtype: ReplayTrajectory
         """
-        return agent.trajectory(context)
+        return agent.trajectory(context, signals)
 
     @staticmethod
     def check_agent(agent: BicycleAgent, context: RouteSpace) -> None:
@@ -499,7 +613,10 @@ class PedestrianSection(Section[PedestrianAgent]):
     """The pedestrians, in no particular order."""
     AGENT: ClassVar[type] = PedestrianAgent
     """Agent type stored in ``agents``."""
-    RULES: ClassVar[SectionRules] = SectionRules(max_count=6, margin=0.1, min_start_gap=0.2)
+    ID_BASE: ClassVar[int | None] = PEDESTRIAN_ID_BASE
+    """First ``obstacle_id`` of this type's block."""
+    # spawn_gap 0.5 m: pairs and small groups walk close; still no stacked spawns.
+    RULES: ClassVar[SectionRules] = SectionRules(max_count=6, margin=0.1, min_start_gap=0.2, spawn_gap=0.5)
     """At most 6 pedestrians, 0.1 m between bodies, and 0.2 s between starts."""
 
     @staticmethod
@@ -515,7 +632,7 @@ class PedestrianSection(Section[PedestrianAgent]):
         return spec.length, spec.width
 
     @staticmethod
-    def replay(agent: PedestrianAgent, context: WalkNetwork):
+    def replay(agent: PedestrianAgent, context: WalkNetwork, signals: Any = None):
         """
         Motion ``agent`` replays on the map's walk network.
 
@@ -524,7 +641,7 @@ class PedestrianSection(Section[PedestrianAgent]):
         :returns: The trajectory describing the pedestrian motion over scenario time.
         :rtype: ReplayTrajectory
         """
-        return agent.trajectory(context)
+        return agent.trajectory(context, signals)
 
     @staticmethod
     def check_agent(agent: PedestrianAgent, context: WalkNetwork) -> None:
