@@ -14,10 +14,11 @@ from ...scenario.scenario_chromosome import Scenario, interaction
 from ...scenario.sections import Section
 from ..ad_agent import mut_ad_agent
 from ..section import mut_section
+from ..traffic_signal import mut_signal_section
 from .chromosome import ScenarioKinds, ScenarioOperatorConfig, _with
 
-TARGETS: Tuple[str, ...] = ("ego",) + Scenario.SECTIONS
-"""Mutation targets, the ego first and then ``Scenario.SECTIONS``."""
+TARGETS: Tuple[str, ...] = ("ego",) + Scenario.SECTIONS + ("signals",)
+"""Mutation targets: the ego, then ``Scenario.SECTIONS``, then the signal plans."""
 
 
 def mut_ego(scenario: Scenario, kinds: ScenarioKinds, rng: Random,
@@ -48,12 +49,37 @@ def mut_ego(scenario: Scenario, kinds: ScenarioKinds, rng: Random,
     return scenario
 
 
+def mut_signals(scenario: Scenario, kinds: ScenarioKinds, rng: Random,
+                config: ScenarioOperatorConfig = ScenarioOperatorConfig()) -> Scenario:
+    """
+    Mutate the signal plans (``mut_signal_section``), retried up to ``config.attempts``
+    times while the scenario under the new plans is invalid: complying agents re-time
+    their stops, which may make bodies overlap.
+
+    :param Scenario scenario: Scenario whose plans are mutated.
+    :param ScenarioKinds kinds: Map context, rules and signal timings.
+    :param Random rng: Random source.
+    :param ScenarioOperatorConfig config: Signal operators and ``attempts``.
+    :returns: The scenario with new plans, or the original when no valid mutant is found.
+    :rtype: Scenario
+    """
+    for _ in range(config.attempts):
+        signals = mut_signal_section(scenario.signals, kinds.timings, rng, config.signals)
+        if signals == scenario.signals:
+            continue
+        candidate: Scenario = _with(scenario, "signals", signals)
+        if candidate.is_valid(kinds.context, kinds.rules):
+            return candidate
+    return scenario
+
+
 def mut_scenario(scenario: Scenario, kinds: ScenarioKinds, rng: Random,
                  config: ScenarioOperatorConfig = ScenarioOperatorConfig()) -> Scenario:
     """
     One mutation event, its target drawn once by ``config.mutation_weights``: the ego
     (``mut_ego``) or one section (``mut_section``: add, delete, or mutate one
-    agent, checked against the other sections and the ego).
+    agent, checked against the other sections and the ego), or the signal plans
+    (``mut_signal_section``; only a candidate when the scenario has plans).
 
     :param Scenario scenario: Scenario to mutate.
     :param ScenarioKinds kinds: Section kinds and the cross-type fit test.
@@ -65,10 +91,14 @@ def mut_scenario(scenario: Scenario, kinds: ScenarioKinds, rng: Random,
     :raises IndexError: If every mutation weight is missing or not positive.
     :raises ValueError: If the ego is chosen and ``mut_ad_agent`` accepts no route, and the original ego is invalid.
     """
-    names: List[str] = [name for name in TARGETS if config.mutation_weights.get(name, 0) > 0]
+    names: List[str] = [name for name in TARGETS if config.mutation_weights.get(name, 0) > 0
+                        and (name != "signals" or scenario.signals.plans)]
     target: str = rng.choices(names, weights=[config.mutation_weights[name] for name in names])[0]
     if target == "ego":
         return mut_ego(scenario, kinds, rng, config)
-    section: Section = mut_section(getattr(scenario, target), kinds[target], rng, config.sections[target],
+    if target == "signals":
+        return mut_signals(scenario, kinds, rng, config)
+    section: Section = mut_section(getattr(scenario, target), kinds.of(target, scenario.signals), rng,
+                                   config.sections[target],
                                    kinds.fits(scenario, target))
     return scenario if section is getattr(scenario, target) else _with(scenario, target, section)

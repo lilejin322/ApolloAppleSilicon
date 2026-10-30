@@ -315,6 +315,8 @@ def rebalance_rider_types(population: Sequence[BicycleAgent], space: RouteSpace,
         if child is None and redraw and donors:
             index: int = donors[0]
             child = _fresh(space, RiderType[wanted], rng, config, starts_on_bike_lane(space, population[index].route))
+            if child is not None:
+                child = replace(child, lineage_id=population[index].lineage_id)   # Same slot, same lineage.
         if child is None:
             unreachable.add(wanted)
             continue

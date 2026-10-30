@@ -8,7 +8,7 @@ the bottom-layer operators.
 from typing import List
 
 from .base import (
-    MUTATION_ACTIONS, SectionKind, SectionOperatorConfig, cx_section, fill, mut_agent, mut_count, mut_section,
+    MUTATION_ACTIONS, SectionKind, adapt_section, SectionOperatorConfig, cx_section, fill, mut_agent, mut_count, mut_section,
     random_section, rebalance_sections,
 )
 from .bicycle import BicycleKind
@@ -16,6 +16,6 @@ from .npc import NPCKind
 from .pedestrian import PedestrianKind
 
 __all__: List[str] = [
-    "MUTATION_ACTIONS", "SectionKind", "SectionOperatorConfig", "cx_section", "fill", "mut_agent", "mut_count",
+    "MUTATION_ACTIONS", "SectionKind", "adapt_section", "SectionOperatorConfig", "cx_section", "fill", "mut_agent", "mut_count",
     "mut_section", "random_section", "rebalance_sections", "BicycleKind", "NPCKind", "PedestrianKind",
 ]

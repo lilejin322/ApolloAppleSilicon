@@ -317,7 +317,7 @@ def rebalance_vehicle_types(population: Sequence[NPCVehicleAgent], spaces: Space
             if old in counts:
                 counts[old] -= 1
             counts[wanted] += 1
-            population[index] = fresh
+            population[index] = replace(fresh, lineage_id=population[index].lineage_id)   # Same slot, same lineage.
 
 
 def _fresh(spaces: Spaces, vehicle_type: VehicleType, rng: Random, config: NPCOperatorConfig,

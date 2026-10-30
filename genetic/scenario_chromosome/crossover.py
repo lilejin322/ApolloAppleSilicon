@@ -14,6 +14,7 @@ from ...scenario.scenario_chromosome import Scenario
 from ...scenario.sections import Section
 from ..ad_agent import cx_ad_agent
 from ..section import cx_section
+from ..traffic_signal import cx_signal_section
 from .chromosome import ScenarioKinds, ScenarioOperatorConfig, _with
 
 
@@ -25,6 +26,9 @@ def cx_scenario(first: Scenario, second: Scenario, kinds: ScenarioKinds, rng: Ra
     Then section by section (NPCs, bicycles, pedestrians) the parents' sections
     are set-crossed (``cx_section``), every agent checked against its child's ego
     and the child's sections already built; clashing agents are dropped and redrawn.
+    The signal plans are crossed per junction first (``cx_signal_section``), so every
+    agent is checked replaying under its child's plans; with no plans on either parent
+    the children keep empty sections.
 
     :param Scenario first: Leading parent of the first child.
     :param Scenario second: Leading parent of the second child.
@@ -40,8 +44,13 @@ def cx_scenario(first: Scenario, second: Scenario, kinds: ScenarioKinds, rng: Ra
     if rng.random() < config.ego_crossover_rate:
         egos = cx_ad_agent(first.ego, second.ego, kinds.context.ego_space, rng, config.ad)
     children: List[Scenario] = [Scenario(egos[0]), Scenario(egos[1])]
+    if first.signals.plans or second.signals.plans:     # Plans first: complying agents replay under them.
+        signals = cx_signal_section(first.signals, second.signals, rng, config.signals)
+        children = [_with(children[0], "signals", signals[0]), _with(children[1], "signals", signals[1])]
     for name in Scenario.SECTIONS:
-        crossed: Tuple[Section, Section] = cx_section(getattr(first, name), getattr(second, name), kinds[name], rng,
+        crossed: Tuple[Section, Section] = cx_section(getattr(first, name), getattr(second, name),
+                                                      (kinds.of(name, children[0].signals),
+                                                       kinds.of(name, children[1].signals)), rng,
                                                       config.sections[name],
                                                       (kinds.fits(children[0], name), kinds.fits(children[1], name)))
         children = [_with(children[0], name, crossed[0]), _with(children[1], name, crossed[1])]

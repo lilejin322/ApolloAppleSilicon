@@ -6,7 +6,7 @@ pedestrian sections). Constraints live with the data in ``scenario``.
 
 from .chromosome import ScenarioKinds, ScenarioOperatorConfig, random_scenario, rebalance_scenarios
 from .crossover import cx_scenario
-from .mutation import TARGETS, mut_ego, mut_scenario
+from .mutation import TARGETS, mut_ego, mut_scenario, mut_signals
 
-__all__ = ["ScenarioKinds", "ScenarioOperatorConfig", "TARGETS", "cx_scenario", "mut_ego", "mut_scenario",
+__all__ = ["ScenarioKinds", "ScenarioOperatorConfig", "TARGETS", "cx_scenario", "mut_ego", "mut_scenario", "mut_signals",
            "random_scenario", "rebalance_scenarios"]
