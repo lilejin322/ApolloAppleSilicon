@@ -10,14 +10,13 @@ from functools import cached_property
 from math import atan2, cos, degrees, hypot, isfinite, sin
 import networkx as nx
 from google.protobuf.message import Message
-from shapely import make_valid
 from shapely.geometry import LineString, MultiPoint, Point
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import substring
 from typing import (TYPE_CHECKING, Callable, Iterable, Iterator, List,
                                   Mapping, NamedTuple, Optional, Set, Tuple, Dict)
 
-from .geometry import chord_heading, curve_to_line, normalize_angle, polygon_to_shape
+from .geometry import chord_heading, curve_to_line, normalize_angle, polygon_area
 from .types import LaneSignalOverlap, LaneStopLine
 from ..utils import require_nonnegative
 
@@ -189,7 +188,10 @@ class MapRelations:
 
         Junction polygons often cover the first or last few metres of the lanes
         entering and leaving them, so these include such lanes, not just the
-        lanes crossing the junction.
+        lanes crossing the junction. That is what grouping signals and tracing
+        movements need; whether an agent is inside the junction box (no lane
+        changes or stops there) is ``RouteSpace.is_junction_lane``, which
+        leaves such approach and exit lanes out.
 
         :returns: Sorted lane IDs by junction ID; every junction included,
             with an empty list if no lane overlaps it.
@@ -273,6 +275,22 @@ class MapRelations:
         """
         return {lane_id: sorted({record.signal_id for record in records})
                 for lane_id, records in self.lane_signal_overlaps.items()}
+
+    @cached_property
+    def drivable_length(self) -> float:
+        """
+        Total centreline length of the map's ``CITY_DRIVING`` lanes, in metres: the map size
+        ``scenario.map_budget.MapBudget`` scales agent counts by.
+
+        :returns: The sum over every city-driving lane, junction lanes included.
+        :rtype: float
+        """
+        from ..message.descriptor import DescriptorBundle
+        service = self._service
+        city = DescriptorBundle(service.descriptor_path).message("apollo.hdmap.Lane").DESCRIPTOR.fields_by_name[
+            "type"].enum_type.values_by_name["CITY_DRIVING"].number
+        return float(sum(service.get_lane_central_curve_by_id(lane_id).length
+                         for lane_id, lane in service.lane_table.items() if lane.type == city))
 
     def get_signal_stop_lines(self, signal_id: str, lane_id: str,
                               max_distance: float) -> Tuple[LaneStopLine, ...]:
@@ -441,7 +459,7 @@ class MapRelations:
         graph.add_nodes_from(sorted(self._service.signal_table))
         evidence = defaultdict(list)
         for junction_id, signals in sorted(self.signals_at_junction.items()):
-            area = self._junction_areas.get(junction_id)
+            area = self.junction_areas.get(junction_id)
             movements: Dict[str, List[_Movement]] = {}
 
             def movements_of(signal: str) -> List[_Movement]:
@@ -609,26 +627,33 @@ class MapRelations:
         return None if hypot(x, y) < 1e-9 * len(lanes) else atan2(y, x)
 
     @cached_property
-    def _junction_areas(self) -> Dict[str, Optional[BaseGeometry]]:
+    def junction_areas(self) -> Dict[str, Optional[BaseGeometry]]:
         """
-        Each junction's polygon, made valid; None where it has no usable polygon.
+        Each junction's polygon as a valid area (``polygon_area``); None where
+        it has no usable polygon.
 
-        Movements are judged inside these areas. A self-intersecting polygon is
-        repaired with ``make_valid`` rather than rejected; a missing one, or one
-        with fewer than three points, gives None, and that junction's movements
-        are judged whole.
+        Movements are judged inside these areas, and routing and walkways read
+        junctions from here too, so every layer repairs a self-intersecting
+        polygon the same way. A junction without an area has its movements
+        judged whole.
 
         :returns: Area by junction ID; every junction included.
         :rtype: Dict[str, Optional[BaseGeometry]]
         """
-        areas = {}
-        for junction_id, junction in self._service.junction_table.items():
-            try:
-                area = polygon_to_shape(junction.polygon)
-            except ValueError:
-                area = None
-            areas[junction_id] = area if area is None or area.is_valid else make_valid(area)
-        return areas
+        return {junction_id: polygon_area(junction.polygon)
+                for junction_id, junction in self._service.junction_table.items()}
+
+    @cached_property
+    def crosswalk_areas(self) -> Dict[str, Optional[BaseGeometry]]:
+        """
+        Each crosswalk's polygon as a valid area (``polygon_area``); None where
+        it has no usable polygon.
+
+        :returns: Area by crosswalk ID; every crosswalk included.
+        :rtype: Dict[str, Optional[BaseGeometry]]
+        """
+        return {crosswalk_id: polygon_area(crosswalk.polygon)
+                for crosswalk_id, crosswalk in self._service.crosswalk_table.items()}
 
     def _movement(self, signal_id: str, path: Tuple[str, ...],
                   area: Optional[BaseGeometry]) -> _Movement:
@@ -645,7 +670,7 @@ class MapRelations:
             overlap position starts the movement.
         :param Tuple[str, ...] path: Lane IDs from ``movement_paths``.
         :param Optional[BaseGeometry] area: The junction's area from
-            ``_junction_areas``, or None to judge the whole course.
+            ``junction_areas``, or None to judge the whole course.
         :returns: Whether it yields as a left turn or U-turn, and its line
             inside the junction; a course of zero length neither yields nor
             has a line.

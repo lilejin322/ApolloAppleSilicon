@@ -10,7 +10,7 @@ from bisect import bisect_right
 from itertools import accumulate
 from math import atan2, ceil, hypot, pi
 from google.protobuf.message import Message
-from shapely import STRtree
+from shapely import STRtree, make_valid
 from shapely.geometry import LineString, MultiLineString, Point, Polygon
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import substring
@@ -55,6 +55,41 @@ def polygon_to_shape(polygon: Message) -> Optional[Polygon]:
         raise ValueError("A map polygon must contain at least three points")
     return Polygon(points)
 
+
+def valid_area(shape: BaseGeometry) -> BaseGeometry:
+    """
+    Repair a self-intersecting polygon, keeping every lobe and only area.
+
+    ``make_valid``'s "structure" method keeps both lobes of a bow-tie, where
+    ``buffer(0)`` drops one, and with ``keep_collapsed=False`` it drops spikes
+    instead of returning them as dangling lines. A valid shape is returned as is.
+
+    :param BaseGeometry shape: A polygon or multipolygon, possibly invalid.
+    :returns: A valid polygonal geometry; empty if nothing has area.
+    :rtype: BaseGeometry
+    """
+    return shape if shape.is_valid else make_valid(shape, method="structure", keep_collapsed=False)
+
+
+def polygon_area(polygon: Message) -> Optional[BaseGeometry]:
+    """
+    A junction's or crosswalk's polygon as a valid area (``valid_area``).
+
+    Every map-area consumer reads polygons through here, so they agree on
+    which objects have an area and what it is.
+
+    :param Message polygon: An ``apollo.hdmap.Polygon`` message.
+    :returns: The area, or None if it has no points, fewer than three, or no area.
+    :rtype: Optional[BaseGeometry]
+    """
+    try:
+        shape = polygon_to_shape(polygon)
+    except ValueError:
+        return None
+    if shape is None:
+        return None
+    shape = valid_area(shape)
+    return None if shape.is_empty or shape.area <= 0 else shape
 
 def curves_to_lines(curves: Iterable[Message]) -> Optional[MultiLineString]:
     """

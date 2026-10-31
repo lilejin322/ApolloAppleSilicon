@@ -11,8 +11,8 @@ import networkx as nx
 from functools import cached_property
 from math import isfinite
 from pathlib import Path
-from threading import Lock
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from threading import Lock, RLock
+from typing import Any, Callable, Dict, Hashable, List, NamedTuple, Optional, Tuple, TypeVar
 from google.protobuf.message import Message
 from shapely import STRtree
 from shapely.geometry import LineString, Point
@@ -42,6 +42,9 @@ _snapshots: Dict[Tuple[type, Path, Path], _Snapshot] = {}
 _snapshots_lock = Lock()
 """Serializes loads and evictions. Cache hits read ``_snapshots`` without it:
 an entry is only ever replaced by a complete, more indexed one."""
+_derived_lock = RLock()
+"""Serializes builds of ``MapService.derived`` data; reentrant, as one build may need another."""
+_T = TypeVar("_T")
 
 
 def _resolve(path: str | Path) -> Path:
@@ -186,6 +189,31 @@ class MapService:
         self.routing_graph: Optional[nx.DiGraph] = None
         self._centerlines: Dict[str, LineString] = dict()
         self._centerline_profiles: Dict[str, CenterlineProfile] = dict()
+        # Shared, like the tables, by every handle that adopts this map (``derived``).
+        self._view: "MapService" = self
+        self._derived: Dict[Hashable, Any] = dict()
+
+    def derived(self, key: Hashable, build: Callable[["MapService"], _T]) -> _T:
+        """
+        Data derived from the loaded map, built once per map and shared by every handle of it.
+
+        ``build`` receives the map's own view: a service that never loads another map, so the
+        result stays bound to this map when a caller later switches maps, and holding it keeps
+        no handle alive. Results live as long as the map: its file snapshot (until
+        ``clear_cache``), or the handles of a map loaded from a message. An indexed handle and a
+        tables-only handle of one file have separate stores, as their views differ.
+
+        :param Hashable key: What is derived, with any parameters.
+        :param Callable[[MapService], _T] build: Builds it from the map's view; an exception stores nothing.
+        :returns: The shared result; callers must not change it.
+        :rtype: _T
+        """
+        store = self._derived
+        if key not in store:
+            with _derived_lock:
+                if key not in store:
+                    store[key] = build(self._view)
+        return store[key]
 
     def load_map_from_file(self, filename: str | Path, load_only: bool = False) -> None:
         """
@@ -224,6 +252,7 @@ class MapService:
                 if not load_only and cached.indexed is None:
                     indexed = type(self)(self.descriptor_path)
                     indexed._adopt_map(cached.tables)
+                    indexed._view, indexed._derived = indexed, {}   # its own: derived data may need indexes
                     indexed.build_spatial_indexes()
                     indexed.build_routing_graph()
                     cached = cached._replace(indexed=indexed)
