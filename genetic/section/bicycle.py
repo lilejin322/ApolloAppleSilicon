@@ -8,9 +8,10 @@ from random import Random
 from typing import List, Sequence, Tuple, Type
 
 from ...scenario import BicycleAgent, RiderType, RouteSpace, random_rider_type
-from ...scenario.routing import InvalidRoute
 from ...scenario.sections import BicycleSection, SectionRules
+from ...scenario.signal_compliance import COMPLIANCE_RATES
 from ..bicycle import BicycleOperatorConfig, cx_bicycle, mut_bicycle, rebalance_rider_types
+from ..bicycle.common import fresh_agent
 from .base import SectionKind
 
 
@@ -22,6 +23,9 @@ class BicycleKind(SectionKind[BicycleAgent]):
     :param BicycleOperatorConfig config: Bicycle operators. Defaults to ``BicycleOperatorConfig()``.
     :param SectionRules | None rules: In-type constraints. None uses ``BicycleSection.RULES``.
     """
+
+    compliance_rate: float = COMPLIANCE_RATES["bicycle"]
+    """Share of its agents that obey signals."""
 
     SECTION: Type[BicycleSection] = BicycleSection
     """Bicycle section class."""
@@ -40,17 +44,14 @@ class BicycleKind(SectionKind[BicycleAgent]):
 
     def random_agent(self, rng: Random) -> BicycleAgent | None:
         """
-        Draw one bicycle, or None when the draw fails.
+        Draw one bicycle within the kind's operator bounds (``bicycle.fresh_agent``), or None when the draw fails.
 
         :param Random rng: Random source for the rider type and the agent.
         :returns: The agent, or None.
         :rtype: BicycleAgent | None
         """
         rider_type: RiderType = random_rider_type(rng, self.config.rider_type_weights)
-        try:
-            return BicycleAgent.random(self.context, rng, rider_type=rider_type, max_start_t=self.config.max_start_t)
-        except (InvalidRoute, ValueError, RuntimeError):
-            return None
+        return fresh_agent(self.context, rider_type, rng, self.config, attempts=1)
 
     def mutate_agent(self, agent: BicycleAgent, rng: Random) -> BicycleAgent:
         """

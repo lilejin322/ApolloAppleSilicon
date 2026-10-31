@@ -14,8 +14,10 @@ from dataclasses import dataclass, field
 from math import isfinite
 from random import Random
 from types import MappingProxyType
-from typing import Callable, ClassVar, Dict, List, Mapping, Sequence, Set, Tuple, TypeVar
+from typing import Any, Callable, ClassVar, Dict, List, Mapping, Sequence, Set, Tuple, TypeVar
 
+from ..scenario.replay import arrives_in_window
+from ..scenario.routing import InvalidRoute
 from ..utils import require_nonnegative
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -29,8 +31,8 @@ class OperatorConfig:
     Bounds and step sizes shared by every agent type's crossover and mutation.
 
     Subclasses name their operators in ``CROSSOVERS`` and ``MUTATIONS`` and
-    give default weights; the base declares none, so it only configures
-    ``route_operators``.
+    give default weights; the base declares none. Agents on lane routes add
+    ``LaneRouteConfig``'s search limits.
 
     :param float min_length: Shortest accepted length of a child route, in metres.
     :param float max_length: Longest accepted length of a child route, in metres.
@@ -40,21 +42,6 @@ class OperatorConfig:
     :param Mapping[str, float] mutation_weights: Relative chance of each mutation.
     :param float sigma_s: Standard deviation of route position steps, in metres.
     :param float sigma_t: Standard deviation of start time steps, in seconds.
-    :param int bridge_candidates: Cheapest lane paths considered when bridging or rerouting.
-    :param float max_detour: A rerouted stretch is at most this share longer than the
-        shortest of it and its alternatives (``inf`` disables). Real routes are
-        near-shortest; unbounded alternatives made routes loop and grow over generations.
-    :param float lane_change_odds: Odds ``p / (1 - p)`` of a lane change where one is
-        possible, as in generation (``lane_change_probability`` 0.2 -> 0.25). Lane-change
-        mutation accepts a child with ``k`` more lane changes with probability
-        ``lane_change_odds ** k``, so lane changes do not pile up over generations.
-    :param bool bridge_within_parents: Bridge crossover keeps only children whose
-        length lies in the parents' range widened by ``BRIDGE_BOUND_SLACK`` times
-        the longer parent's length. Where
-        parents rarely meet, the only bridges are long detours, and bridged children
-        grew routes by a step (shalun bicycles on curb lanes: +27 m per child, median
-        150 -> 190 m in five generations). Off by default: vehicle routes stay stable
-        without it.
     """
 
     CROSSOVERS: ClassVar[Tuple[str, ...]] = ()
@@ -78,6 +65,53 @@ class OperatorConfig:
     """Standard deviation of route position steps, in metres."""
     sigma_t: float = 1.0
     """Standard deviation of start time steps, in seconds."""
+
+    def __post_init__(self) -> None:
+        """
+        Validate route bounds, step sizes, operator limits, and selection weights.
+
+        :raises ValueError: If length bounds are invalid, time or step parameters
+            are nonfinite or negative, ``attempts`` is less than 1, or operator
+            weights contain unknown names, nonfinite values, or negative values.
+        """
+        if not (isfinite(self.max_length) and 0 <= self.min_length <= self.max_length):
+            raise ValueError("min_length must be nonnegative and at most a finite max_length")
+        require_nonnegative(max_start_t=self.max_start_t, sigma_s=self.sigma_s, sigma_t=self.sigma_t)
+        if self.attempts < 1:
+            raise ValueError("attempts must be at least 1")
+        for weights, names in ((self.crossover_weights, self.CROSSOVERS), (self.mutation_weights, self.MUTATIONS)):
+            unknown: Set[str] = set(weights) - set(names)
+            if unknown:
+                raise ValueError(f"unknown operators {sorted(unknown)}; expected some of {names}")
+            if not all(isfinite(weight) and weight >= 0 for weight in weights.values()):
+                raise ValueError("operator weights must be finite and not negative")
+
+
+@dataclass(frozen=True)
+class LaneRouteConfig(OperatorConfig):
+    """
+    Search limits of ``route_operators`` for agents on lane routes: the ego,
+    NPCs, and bicycles. Pedestrians walk routes on the walk network and have
+    no lanes to bridge, reroute, or change, so their config leaves these out.
+    The parameters below include all fields inherited from ``OperatorConfig``.
+
+    :param int bridge_candidates: Cheapest lane paths considered when bridging or rerouting.
+    :param float max_detour: A rerouted stretch is at most this share longer than the
+        shortest of it and its alternatives (``inf`` disables). Real routes are
+        near-shortest; unbounded alternatives made routes loop and grow over generations.
+    :param float lane_change_odds: Odds ``p / (1 - p)`` of a lane change where one is
+        possible, as in generation (``lane_change_probability`` 0.2 -> 0.25). Lane-change
+        mutation accepts a child with ``k`` more lane changes with probability
+        ``lane_change_odds ** k``, so lane changes do not pile up over generations.
+    :param bool bridge_within_parents: Bridge crossover keeps only children whose
+        length lies in the parents' range widened by ``BRIDGE_BOUND_SLACK`` times
+        the longer parent's length. Where
+        parents rarely meet, the only bridges are long detours, and bridged children
+        grew routes by a step (shalun bicycles on curb lanes: +27 m per child, median
+        150 -> 190 m in five generations). Off by default: vehicle routes stay stable
+        without it.
+    """
+
     bridge_candidates: int = 5
     """Number of cheapest lane paths considered when bridging or rerouting."""
     max_detour: float = 0.3
@@ -89,45 +123,73 @@ class OperatorConfig:
 
     def __post_init__(self) -> None:
         """
-        Validate route bounds, step sizes, operator limits, and selection weights.
+        Validate the inherited fields, then the lane-route search limits.
 
-        :raises ValueError: If length bounds are invalid, time or step parameters
-            are nonfinite or negative, ``lane_change_odds`` is outside [0, 1],
-            ``max_detour`` is negative or NaN, ``attempts`` or ``bridge_candidates``
-            is less than 1, or operator weights contain unknown names, nonfinite
-            values, or negative values.
+        :raises ValueError: If an inherited field is invalid, ``lane_change_odds``
+            is outside [0, 1], ``max_detour`` is negative or NaN, or
+            ``bridge_candidates`` is less than 1.
         """
-        if not (isfinite(self.max_length) and 0 <= self.min_length <= self.max_length):
-            raise ValueError("min_length must be nonnegative and at most a finite max_length")
-        require_nonnegative(max_start_t=self.max_start_t, sigma_s=self.sigma_s, sigma_t=self.sigma_t)
+        super().__post_init__()
         if not 0 <= self.lane_change_odds <= 1:
             raise ValueError("lane_change_odds must be within [0, 1]")
         if not self.max_detour >= 0:
             raise ValueError("max_detour must be nonnegative")
-        if self.attempts < 1:
-            raise ValueError("attempts must be at least 1")
         if self.bridge_candidates < 1:
             raise ValueError("bridge_candidates must be at least 1")
-        for weights, names in ((self.crossover_weights, self.CROSSOVERS), (self.mutation_weights, self.MUTATIONS)):
-            unknown: Set[str] = set(weights) - set(names)
-            if unknown:
-                raise ValueError(f"unknown operators {sorted(unknown)}; expected some of {names}")
-            if not all(isfinite(weight) and weight >= 0 for weight in weights.values()):
-                raise ValueError("operator weights must be finite and not negative")
+
+def replay_acceptable(agent: Agent, trajectory: Callable[[], Any], config: "ReplayOperatorConfig") -> bool:
+    """
+    Whether a replayed agent passes the operators' bounds: its start time, a valid replay, the
+    replay path's length bounds and the arrival window (``replay.arrives_in_window``).
+
+    :param Agent agent: Candidate; ``start_t`` is read.
+    :param Callable[[], Any] trajectory: Builds its replay (``ReplayTrajectory``) on its map context.
+    :param ReplayOperatorConfig config: ``max_start_t``, ``min_length``, ``max_length`` and ``min_arrival_t``.
+    :returns: True if every check passes; False if a bound is broken or the replay raises ``InvalidRoute``.
+    :rtype: bool
+    """
+    if agent.start_t > config.max_start_t:
+        return False
+    try:
+        replay = trajectory()
+    except InvalidRoute:
+        return False
+    return (config.min_length <= replay.path.length <= config.max_length
+            and arrives_in_window(agent.start_t, replay.arrival_t, config.min_arrival_t))
 
 
 def gauss_step(rng: Random, value: float, sigma: float, high: float) -> float:
     """
-    Move ``value`` by a normal step of standard deviation ``sigma``, clamped to ``[0, high]``.
+    Move ``value`` by a normal step of standard deviation ``sigma``, reflected into ``[0, high]``.
+
+    Reflecting keeps a gene drawn uniformly at generation uniform under repeated steps;
+    clamping would pile it onto the bounds (``reflect``).
 
     :param Random rng: Random number generator used to sample the step.
     :param float value: Initial value to move.
     :param float sigma: Standard deviation of the normal step.
-    :param float high: Upper bound of the clamping interval; must be nonnegative.
-    :returns: The stepped value clamped to ``[0, high]``.
+    :param float high: Upper bound of the interval; must be nonnegative.
+    :returns: The stepped value folded into ``[0, high]``.
     :rtype: float
     """
-    return min(max(value + rng.gauss(0, sigma), 0.0), high)
+    return reflect(value + rng.gauss(0, sigma), 0.0, high)
+
+
+def reflect(value: float, low: float, high: float) -> float:
+    """
+    ``value`` folded into [low, high]; symmetric steps folded this way keep a uniform law uniform.
+
+    :param float value: The stepped quantity.
+    :param float low: Lower end of the interval.
+    :param float high: Upper end of the interval.
+    :returns: ``low`` when the interval is empty; otherwise ``value`` folded into ``[low, high]``.
+    :rtype: float
+    """
+    if high <= low:
+        return low
+    span: float = high - low
+    u: float = (value - low) % (2 * span)
+    return low + (u if u <= span else 2 * span - u)
 
 
 def apply_weighted(
@@ -158,7 +220,7 @@ def apply_weighted(
         for _ in range(attempts):
             child: Agent | None = operators[name]()
             if child is not None and accept(child):
-                logger.debug("%s produced %s", name, "->".join(child.route.lanes))
+                logger.debug("%s produced %r", name, child)
                 return child
         del remaining[name]
     return None
@@ -182,21 +244,6 @@ class ReplayOperatorConfig(OperatorConfig):
     :param Mapping[str, float] mutation_weights: Relative chance of each mutation.
     :param float sigma_s: Standard deviation of route position steps, in metres.
     :param float sigma_t: Standard deviation of start time steps, in seconds.
-    :param int bridge_candidates: Cheapest lane paths considered when bridging or rerouting.
-    :param float max_detour: A rerouted stretch is at most this share longer than the
-        shortest of it and its alternatives (``inf`` disables). Real routes are
-        near-shortest; unbounded alternatives made routes loop and grow over generations.
-    :param float lane_change_odds: Odds ``p / (1 - p)`` of a lane change where one is
-        possible, as in generation (``lane_change_probability`` 0.2 -> 0.25). Lane-change
-        mutation accepts a child with ``k`` more lane changes with probability
-        ``lane_change_odds ** k``, so lane changes do not pile up over generations.
-    :param bool bridge_within_parents: Bridge crossover keeps only children whose
-        length lies in the parents' range widened by ``BRIDGE_BOUND_SLACK`` times
-        the longer parent's length. Where
-        parents rarely meet, the only bridges are long detours, and bridged children
-        grew routes by a step (shalun bicycles on curb lanes: +27 m per child, median
-        150 -> 190 m in five generations). Off by default: vehicle routes stay stable
-        without it.
     :param Mapping[str, float] crossover_rates: Chance, per gene in ``GENES``,
         that a child takes it from the other parent; missing genes never cross.
     :param Mapping[str, float] mutation_rates: Chance, per gene, that it mutates.

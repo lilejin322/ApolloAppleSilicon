@@ -79,7 +79,8 @@ def mut_scenario(scenario: Scenario, kinds: ScenarioKinds, rng: Random,
     One mutation event, its target drawn once by ``config.mutation_weights``: the ego
     (``mut_ego``) or one section (``mut_section``: add, delete, or mutate one
     agent, checked against the other sections and the ego), or the signal plans
-    (``mut_signal_section``; only a candidate when the scenario has plans).
+    (``mut_signal_section``; only a candidate when the scenario has plans and
+    ``config.evolve_signals``).
 
     :param Scenario scenario: Scenario to mutate.
     :param ScenarioKinds kinds: Section kinds and the cross-type fit test.
@@ -92,7 +93,7 @@ def mut_scenario(scenario: Scenario, kinds: ScenarioKinds, rng: Random,
     :raises ValueError: If the ego is chosen and ``mut_ad_agent`` accepts no route, and the original ego is invalid.
     """
     names: List[str] = [name for name in TARGETS if config.mutation_weights.get(name, 0) > 0
-                        and (name != "signals" or scenario.signals.plans)]
+                        and (name != "signals" or (config.evolve_signals and scenario.signals.plans))]
     target: str = rng.choices(names, weights=[config.mutation_weights[name] for name in names])[0]
     if target == "ego":
         return mut_ego(scenario, kinds, rng, config)

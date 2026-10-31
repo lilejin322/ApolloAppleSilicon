@@ -11,7 +11,6 @@ may also use ``VirtualLane``s, lanes the map lacks that exist only in their
 """
 
 import itertools
-import weakref
 import numpy as np
 import networkx as nx
 from enum import Enum
@@ -19,13 +18,14 @@ from random import Random
 from dataclasses import dataclass
 from math import ceil, cos, dist, isfinite, sin
 from types import MappingProxyType
-from typing import Callable, Iterable, Iterator, Mapping, NamedTuple, Dict, FrozenSet, List, Tuple, Self
+from typing import Any, Callable, Iterable, Iterator, Mapping, NamedTuple, Dict, FrozenSet, List, Tuple, Self
 import shapely
 from shapely.geometry import LineString, Point
+from shapely.geometry.base import BaseGeometry
 from shapely.ops import substring, unary_union
 
 from ..map import MapService
-from ..map.geometry import max_replay_curvature, polygon_to_shape
+from ..map.geometry import max_replay_curvature
 from ..message.descriptor import DescriptorBundle
 from ..utils import require_nonnegative
 
@@ -45,10 +45,6 @@ _CHANGE_SAMPLES = 64
 """Maximum draws while narrowing a lane-change window around a feasible continuation."""
 _JOIN_REACH = 10.0
 """Metres of each lane on either side of a forward step checked for the step's curvature."""
-_CURVATURE_CACHE: "weakref.WeakKeyDictionary[MapService, Dict]" = weakref.WeakKeyDictionary()
-"""Per map: replayed curvature of each lane and of each forward step between lanes."""
-_JUNCTION_CACHE: "weakref.WeakKeyDictionary[MapService, Dict]" = weakref.WeakKeyDictionary()
-"""Per map: the union of its junction polygons, its junction lanes, and endpoint ranges per lane and margin."""
 ENDPOINT_JUNCTION_MARGIN = 5.0
 """Default ``RouteRules.endpoint_junction_margin`` of ego and NPC rules, in metres."""
 JUNCTION_SHARE = 0.5
@@ -61,6 +57,9 @@ _ENDPOINT_STEP = 0.5
 """Metres between the positions checked when finding where on a lane a route may start or end."""
 _ENDPOINT_OVERSHOOT = 100.0
 """Metres a random walk may drive past its target length to find an allowed end."""
+_SEARCH_CACHE_SIZE = 512
+"""Results of the space's pure queries (``reachable``, ``lane_paths``, ``poses``) it keeps; crossover retries
+and validation repeat them."""
 
 
 def _lane_curvature(service: MapService, lane_id: str) -> float:
@@ -72,7 +71,7 @@ def _lane_curvature(service: MapService, lane_id: str) -> float:
     :returns: Maximum replay curvature of the lane, in inverse metres.
     :rtype: float
     """
-    cache = _CURVATURE_CACHE.setdefault(service, {})
+    cache = service.derived("replay_curvature", lambda view: {})   # filled lane by lane, per map
     key = ("lane", lane_id)
     if key not in cache:
         cache[key] = max_replay_curvature(service.get_lane_central_curve_by_id(lane_id).coords)
@@ -89,7 +88,7 @@ def _join_curvature(service: MapService, source: str, target: str) -> float:
     :returns: Maximum replay curvature across the source-to-target join, in inverse metres.
     :rtype: float
     """
-    cache = _CURVATURE_CACHE.setdefault(service, {})
+    cache = service.derived("replay_curvature", lambda view: {})   # filled lane by lane, per map
     key = ("join", source, target)
     if key not in cache:
         before = service.get_lane_central_curve_by_id(source)
@@ -149,37 +148,36 @@ def _junction_info(service: MapService, no_turn: int) -> Dict:
     :returns: The map's junction polygons as one shape (None without polygons) and its junction lanes: lanes with a ``junction_id``, lanes mostly inside junction polygons, and turn lanes that enter one (maps often leave ``junction_id`` unset).
     :rtype: Dict
     """
-    info = _JUNCTION_CACHE.get(service)
-    if info is None:
-        shapes = []
-        for junction in service.junction_table.values():
-            try:
-                shape = polygon_to_shape(junction.polygon)
-            except ValueError:
-                continue
-            if shape is not None:
-                shape = shape if shape.is_valid else shape.buffer(0)
-                if not shape.is_empty:
-                    shapes.append(shape)
-        union = unary_union(shapes) if shapes else None
-        if union is not None:
-            shapely.prepare(union)
-        lanes = set()
-        for lane_id, lane in service.lane_table.items():
-            if lane.HasField("junction_id"):
-                lanes.add(lane_id)
-                continue
-            if union is None:
-                continue
-            line = service.get_lane_central_curve_by_id(lane_id)
-            if not union.intersects(line):
-                continue
-            inside = line.intersection(union).length
-            if inside > JUNCTION_SHARE * line.length or (lane.turn != no_turn and inside > 0):
-                lanes.add(lane_id)
-        info = {"union": union, "lanes": frozenset(lanes), "ranges": {}}
-        _JUNCTION_CACHE[service] = info
-    return info
+    return service.derived(("junction_info", no_turn), lambda view: _build_junction_info(view, no_turn))
+
+
+def _build_junction_info(service: MapService, no_turn: int) -> Dict:
+    """
+    ``_junction_info``, uncached.
+
+    :param MapService service: The map's own view (``MapService.derived``).
+    :param int no_turn: Apollo enum number identifying a lane without a turn.
+    :returns: As ``_junction_info``.
+    :rtype: Dict
+    """
+    shapes = [area for area in service.relations.junction_areas.values() if area is not None]
+    union = unary_union(shapes) if shapes else None
+    if union is not None:
+        shapely.prepare(union)
+    lanes = set()
+    for lane_id, lane in service.lane_table.items():
+        if lane.HasField("junction_id"):
+            lanes.add(lane_id)
+            continue
+        if union is None:
+            continue
+        line = service.get_lane_central_curve_by_id(lane_id)
+        if not union.intersects(line):
+            continue
+        inside = line.intersection(union).length
+        if inside > JUNCTION_SHARE * line.length or (lane.turn != no_turn and inside > 0):
+            lanes.add(lane_id)
+    return {"union": union, "lanes": frozenset(lanes), "ranges": {}}
 
 
 def _quintic(u: float) -> float:
@@ -598,6 +596,7 @@ class RouteSpace:
             raise ValueError(f"unknown extra or offset lanes {unknown[:5]}")
         self._offsets = {lane_id: float(offset) for lane_id, offset in lane_offsets.items() if offset}
         self._offset_lines: Dict[str, LineString] = {}
+        self._searches: Dict[Tuple, Any] = {}
         self._virtual: Dict[str, VirtualLane] = {}
         for lane in virtual_lanes:
             if lane.lane_id in service.lane_table or lane.lane_id in self._virtual:
@@ -902,11 +901,26 @@ class RouteSpace:
         mostly (``JUNCTION_SHARE``) inside the map's junction polygons, or is a
         turn lane that enters one.
 
+        This is the junction box that lane-change, stop, and endpoint rules
+        keep out of. It differs on purpose from
+        ``MapRelations.lanes_overlapping_junction``, which also counts approach
+        and exit lanes that merely touch a junction, for grouping its signals.
+
         :param str lane_id: Map or virtual-lane ID.
         :returns: ``True`` if the lane is classified as a junction lane; otherwise ``False``.
         :rtype: bool
         """
         return lane_id in _junction_info(self.service, self._no_turn)["lanes"]
+
+    @property
+    def junction_area(self) -> BaseGeometry | None:
+        """
+        The map's junction polygons as one prepared shape; ``None`` if the map has none.
+
+        :returns: The union of the junction polygons.
+        :rtype: BaseGeometry | None
+        """
+        return _junction_info(self.service, self._no_turn)["union"]
 
     @property
     def restricts_endpoints(self) -> bool:
@@ -1063,6 +1077,39 @@ class RouteSpace:
             if best is None or abs(candidate - s) < abs(best - s):
                 best = candidate
         return best
+
+    def nearest_end(self, route: LaneRoute, s: float) -> float | None:
+        """
+        The end position nearest to ``s`` that ``route``'s last lane allows, by the rules
+        ``validate`` applies to an end: at least ``_ENDPOINT_STEP`` beyond where the route
+        enters that lane (each lane change at its earliest start, as ``validate`` places them),
+        not on a virtual lane, away from junctions where the space keeps endpoints off them,
+        and, where the rules want unambiguous poses, with no other lane within the margin
+        (the nearest such position on a ``_WAYPOINT_STEP`` grid). Every operator that moves
+        or picks an end repairs it here.
+
+        :param LaneRoute route: The route; its ``end_s`` is ignored.
+        :param float s: Desired end position on the last lane, in metres.
+        :returns: The allowed end nearest to ``s``, or ``None`` if the last lane has none past the
+            entry, or a lane change has no room.
+        :rtype: float | None
+        """
+        lane = route.lanes[-1]
+        if lane in self._virtual:
+            return None
+        try:
+            entries, _ = self._entries(route, lambda index, earliest, latest: earliest)
+        except InvalidRoute:
+            return None
+        low, high = entries[-1] + _ENDPOINT_STEP, self._lengths[lane]
+        if low > high:
+            return None
+        end = self.nearest_endpoint(lane, s, low=low) if self.restricts_endpoints else min(max(s, low), high)
+        if end is None or not self.rules.unambiguous or self._unambiguous(self._pose(lane, end)):
+            return end
+        allowed = [c for c in self._candidate_s(low, high) if not self.restricts_endpoints or self.endpoint_allowed(lane, c)]
+        return next((c for c in sorted(allowed, key=lambda c: abs(c - s)) if self._unambiguous(self._pose(lane, c))),
+                    None)
 
     def _check_endpoints(self, route: LaneRoute) -> None:
         """
@@ -1311,9 +1358,20 @@ class RouteSpace:
         entries must still leave room for all later changes and the end pose.
 
         :param LaneRoute route: The route to convert.
-        :returns: Start pose, intermediate waypoints, and end pose for Apollo routing.
+        :returns: Start pose, intermediate waypoints, and end pose for Apollo routing; cached per route.
         :rtype: RoutePoses
         :raises InvalidRoute: If the route is illegal or cannot be sent unambiguously.
+        """
+        return self._search(("poses", route), lambda: self._poses(route))
+
+    def _poses(self, route: LaneRoute) -> RoutePoses:
+        """
+        ``poses``, uncached.
+
+        :param LaneRoute route: The route to convert.
+        :returns: As ``poses``.
+        :rtype: RoutePoses
+        :raises InvalidRoute: As ``poses``.
         """
         lengths, entries, _ = self._check(route)
         self._check_endpoints(route)
@@ -1489,13 +1547,14 @@ class RouteSpace:
         :param float max_cost: Largest path cost to include.
         :param float | None entry_s: If supplied, use lower bounds on driven
             distance from this source position, including partial lane entries.
-        :returns: Lane ID to cost; empty if ``source`` is not allowed.
+        :returns: Lane ID to cost, a fresh dict per call (searches are cached, ``_search``);
+            empty if ``source`` is not allowed.
         :rtype: Dict[str, float]
         """
         if source not in self.graph:
             return {}
-        return nx.single_source_dijkstra_path_length(
-            self.graph, source, cutoff=max_cost, weight=self._weight(source, entry_s))
+        return dict(self._search(("reachable", source, max_cost, entry_s), lambda: nx.single_source_dijkstra_path_length(
+            self.graph, source, cutoff=max_cost, weight=self._weight(source, entry_s))))
 
     def lane_paths(
         self, source: str, target: str, k: int = 5, *, max_cost: float | None = None,
@@ -1517,7 +1576,40 @@ class RouteSpace:
             from this position. Rank the candidates by lane cost with the unused
             source prefix removed; validate complete routes before accepting them.
         :returns: (lanes, transitions) pairs; nothing if either lane is not allowed
-            or the target is unreachable.
+            or the target is unreachable. Searches are cached (``_search``).
+        :rtype: Iterator[Tuple[Tuple[str, ...], Tuple[Transition, ...]]]
+        """
+        yield from self._search(("lane_paths", source, target, k, max_cost, entry_s),
+                                lambda: tuple(self._lane_paths(source, target, k, max_cost, entry_s)))
+
+    def _search(self, key: Tuple, run: Callable[[], Any]) -> Any:
+        """
+        A query's result, run once per key: these queries are pure functions of the space and
+        their arguments. The oldest results are dropped past ``_SEARCH_CACHE_SIZE``; a query that
+        raises is not stored.
+
+        :param Tuple key: The search's name and arguments.
+        :param Callable[[], Any] run: Runs the search.
+        :returns: Its result; callers must not change it.
+        :rtype: Any
+        """
+        if key not in self._searches:
+            if len(self._searches) >= _SEARCH_CACHE_SIZE:
+                del self._searches[next(iter(self._searches))]
+            self._searches[key] = run()
+        return self._searches[key]
+
+    def _lane_paths(self, source: str, target: str, k: int, max_cost: float | None, entry_s: float | None,
+                    ) -> Iterator[Tuple[Tuple[str, ...], Tuple[Transition, ...]]]:
+        """
+        The search behind ``lane_paths``, uncached.
+
+        :param str source: First lane of every path.
+        :param str target: Last lane of every path.
+        :param int k: Maximum number of paths.
+        :param float | None max_cost: As in ``lane_paths``.
+        :param float | None entry_s: As in ``lane_paths``.
+        :returns: (lanes, transitions) pairs, cheapest first.
         :rtype: Iterator[Tuple[Tuple[str, ...], Tuple[Transition, ...]]]
         """
         if source not in self.graph or target not in self.graph or k <= 0:
@@ -1759,7 +1851,7 @@ class RouteSpace:
                 # The nearest allowed end after the entry, else drive on to a lane with one.
                 if travelled > target + _ENDPOINT_OVERSHOOT:
                     return None
-                end_s = self.nearest_endpoint(current, end_s, low=entry + _ENDPOINT_STEP)
+                end_s = self.nearest_end(LaneRoute(tuple(lanes), tuple(transitions), start_s, end_s), end_s)
                 if end_s is not None:
                     return LaneRoute(tuple(lanes), tuple(transitions), start_s, end_s)
             forward, lateral = [], []

@@ -23,13 +23,13 @@ from types import MappingProxyType
 from typing import Any, Callable, Mapping, NamedTuple, Sequence, Dict, List, Tuple, Self
 
 from ..map.geometry import normalize_angle, smooth_polyline
-from ..utils import require_nonnegative
+from ..utils import require_nonnegative, require_unit_interval
 from .realism import EXCURSION_COUNT_MIX, EXCURSION_MIX, WALKER_MIX, comfort_limits, draw_speed, draw_type
 from .obstacle_ids import PEDESTRIAN_ID_BASE, check_id, new_lineage_id
-from .signal_compliance import COMPLIANCE_RATES, active, comply, crosswalk_stops, lane_signal_stops
+from .signal_compliance import COMPLIANCE_RATES, active, comply, crosswalk_stops
 from .replay import (
-    MAX_SPEED_POINTS, ReplayTrajectory, SpeedPoint, Span, check_profile, check_turning_radius, curvature_spans,
-    ordered_points, speed_grid,
+    arrives_in_window, rebased_profile, MAX_SPEED_POINTS, ReplayTrajectory, SpeedPoint, Span, check_profile, check_turning_radius, curvature_spans,
+    memo_layout, ordered_points, speed_grid,
 )
 from .routing import InvalidRoute
 from .walkways import MAX_EXCURSIONS, ExcursionKind, WalkFrame, WalkNetwork, WalkRoute
@@ -118,7 +118,9 @@ class WalkerSpec:
     :param float max_acceleration: m/s^2.
     :param float max_deceleration: m/s^2, positive.
     :param float max_lateral_acceleration: m/s^2; walkers slow down round tight corners.
-    :param float comfortable_deceleration: m/s^2, positive.
+
+    Comfortable acceleration and braking come from ``realism.COMFORT`` by the
+    agent's ``walk_style`` (``realism.comfort_limits``), within these hard limits.
     """
 
     length: float
@@ -139,15 +141,13 @@ class WalkerSpec:
     """m/s^2, positive."""
     max_lateral_acceleration: float
     """m/s^2; walkers slow down round tight corners."""
-    comfortable_deceleration: float
-    """m/s^2, positive."""
 
 
 WALKER_SPECS = MappingProxyType({
-    WalkerType.ADULT: WalkerSpec(0.35, 0.55, 1.70, "ST_PEDESTRIAN", 0.25, 3.5, 1.5, 2.0, 2.0, 1.0),
-    WalkerType.ELDERLY: WalkerSpec(0.35, 0.55, 1.65, "ST_PEDESTRIAN", 0.25, 2.0, 1.0, 1.5, 1.2, 0.8),
-    WalkerType.CHILD: WalkerSpec(0.25, 0.40, 1.25, "ST_PEDESTRIAN", 0.25, 4.0, 2.0, 2.5, 2.5, 1.2),
-    WalkerType.RUNNER: WalkerSpec(0.40, 0.55, 1.75, "ST_PEDESTRIAN", 0.25, 5.0, 2.5, 3.0, 3.0, 1.5),
+    WalkerType.ADULT: WalkerSpec(0.35, 0.55, 1.70, "ST_PEDESTRIAN", 0.25, 3.5, 1.5, 2.0, 2.0),
+    WalkerType.ELDERLY: WalkerSpec(0.35, 0.55, 1.65, "ST_PEDESTRIAN", 0.25, 2.0, 1.0, 1.5, 1.2),
+    WalkerType.CHILD: WalkerSpec(0.25, 0.40, 1.25, "ST_PEDESTRIAN", 0.25, 4.0, 2.0, 2.5, 2.5),
+    WalkerType.RUNNER: WalkerSpec(0.40, 0.55, 1.75, "ST_PEDESTRIAN", 0.25, 5.0, 2.5, 3.0, 3.0),
 })
 """Dimensions and replay limits per walker type. Bodies follow FHWA's standing body
 ellipse of 0.5 x 0.6 m (FHWA-RD-98-107) and 95th-percentile breadth and depth of
@@ -315,13 +315,16 @@ def _entry_wait(network: WalkNetwork, frame: WalkFrame, index: int, profile: Seq
     """
     element = frame.elements[index]
     previous = frame.elements[index - 1] if index else None
-    curb = network.curb_distance(LineString(element.coords)) if len(element.coords) > 1 else 0.0
+    curb = None                                 # measured only for a stop on the excursion: a costly union
     stops = []
     for point in profile:
         if point.speed != 0:
             continue
-        if point.lane_id == element.name and point.s <= curb + GUTTER_REACH:
-            stops.append(frame.distance(element.name, point.s))
+        if point.lane_id == element.name:
+            if curb is None:
+                curb = network.curb_distance(LineString(element.coords)) if len(element.coords) > 1 else 0.0
+            if point.s <= curb + GUTTER_REACH:
+                stops.append(frame.distance(element.name, point.s))
         elif previous is not None and point.lane_id == previous.name and point.s >= previous.length - 1e-6:
             stops.append(frame.offsets[index])
     return min(stops) if stops else None
@@ -359,7 +362,7 @@ class PedestrianAgent:
     lineage_id: str = field(default_factory=new_lineage_id, compare=False)
     """GA identity (uuid4 hex): kept by mutation, crossover and renumbering. Labels, not genes: both are left out of ``==`` and ``hash``."""
     obeys_signals: bool = True
-    """Gene: whether the agent waits at red stop lines / crosswalks without WALK (``signal_compliance``)."""
+    """Gene: whether the agent waits at signalised crosswalks until the parallel vehicle light is green (``signal_compliance``)."""
 
     def __post_init__(self) -> None:
         """
@@ -370,8 +373,7 @@ class PedestrianAgent:
         check_profile(self.route, self.speed_profile, self.spec.max_speed, self.walker_type.name)
         check_id(self.obstacle_id, PEDESTRIAN_ID_BASE, "pedestrian")
         require_nonnegative(start_t=self.start_t)
-        if not 0 <= self.walk_style <= 1:
-            raise ValueError(f"walk_style must be within [0, 1], got {self.walk_style}")
+        require_unit_interval(walk_style=self.walk_style)
 
     @property
     def spec(self) -> WalkerSpec:
@@ -421,6 +423,18 @@ class PedestrianAgent:
         :rtype: Tuple[WalkLayout, List[Span], List[float]]
         :raises InvalidRoute: If route geometry, topology, point placement, or map constraints fail the checks performed here.
         """
+        return memo_layout(network, ("pedestrian", self.route, self.speed_profile, self.walker_type),
+                           lambda: self._build_layout(network))
+
+    def _build_layout(self, network: WalkNetwork) -> Tuple[WalkLayout, List[Span], List[float]]:
+        """
+        ``_validated_layout``, uncached.
+
+        :param WalkNetwork network: Walk network supplying sidewalk and excursion geometry.
+        :returns: As ``_validated_layout``.
+        :rtype: Tuple[WalkLayout, List[Span], List[float]]
+        :raises InvalidRoute: As ``_validated_layout``.
+        """
         network.validate(self.route)
         frame = network.frame(self.route)
         frame.check_windows(self.speed_profile)
@@ -468,7 +482,8 @@ class PedestrianAgent:
 
         :param WalkNetwork network: Walk network supplying sidewalk and excursion geometry.
         :param SignalSection | None signals: Signal plans in force. When the agent obeys signals,
-            it dwells at every signalised crosswalk it reaches without WALK (``signal_compliance.comply``).
+            it waits at the curb of every signalised crossing it steps onto until the parallel vehicle
+            light is green (``signal_compliance.comply``).
         :returns: The trajectory describing the agent motion over scenario time.
         :rtype: ReplayTrajectory
         :raises InvalidRoute: If the agent is invalid on this network.
@@ -481,7 +496,7 @@ class PedestrianAgent:
         pivots = dict.fromkeys(layout.pivots, 0.0)
         if not active(signals, self):
             return build(pivots)
-        stops = crosswalk_stops(network, layout.path, signals, self.spec.length / 2)
+        stops = crosswalk_stops(network, self.route, layout, signals, self.spec.length / 2)
         return comply(build, pivots, stops, signals, layout.path.length)
 
     def with_route(self, route: WalkRoute, network: WalkNetwork) -> Self:
@@ -607,7 +622,7 @@ class PedestrianAgent:
             if not min_length <= trajectory.path.length <= max_length:
                 last_problem = f"path length {trajectory.path.length:.1f} is outside [{min_length}, {max_length}]"
                 continue
-            if min_arrival_t and (agent.start_t >= min_arrival_t or trajectory.arrival_t < min_arrival_t):
+            if not arrives_in_window(agent.start_t, trajectory.arrival_t, min_arrival_t):
                 last_problem = f"walk must start before and finish at or after {min_arrival_t} s"
                 continue
             return agent
@@ -622,8 +637,7 @@ class PedestrianAgent:
         """
         return {
             "route": self.route.to_dict(),
-            "speed_profile": [{"lane_id": point.lane_id, "s": point.s, "speed": point.speed, "dwell": point.dwell}
-                              for point in self.speed_profile],
+            "speed_profile": [point.to_dict() for point in self.speed_profile],
             "start_t": self.start_t,
             "walker_type": self.walker_type.name,
             "walk_style": self.walk_style,
@@ -643,7 +657,7 @@ class PedestrianAgent:
         :raises KeyError: If a required serialized field is absent or ``walker_type``
             names an unknown walker type.
         """
-        return cls(WalkRoute.from_dict(data["route"]), tuple(SpeedPoint(**point) for point in data["speed_profile"]),
+        return cls(WalkRoute.from_dict(data["route"]), tuple(SpeedPoint.from_dict(point) for point in data["speed_profile"]),
                    data["start_t"], WalkerType[data["walker_type"]], data.get("walk_style", 0.5),
                    obstacle_id=data.get("obstacle_id"), lineage_id=data.get("lineage_id") or new_lineage_id(),
                    obeys_signals=data.get("obeys_signals", True))
@@ -672,18 +686,7 @@ def rebased_walk(network: WalkNetwork, old_route: WalkRoute, profile: Sequence[S
         old = network.frame(old_route)
     except InvalidRoute:
         old = None
-    placed = []
-    for point in profile:
-        low, high = new.window(point.lane_id) if point.lane_id in new.index else (0.0, -1.0)
-        if low <= point.s <= high:
-            placed.append((new.distance(point.lane_id, point.s), 0, point))
-        else:
-            share = old.distance(point.lane_id, point.s) / old.total \
-                if old is not None and old.total > 0 and point.lane_id in old.index else 0.0
-            name, s = new.at(share * new.total)
-            placed.append((new.distance(name, s), 1, replace(point, lane_id=name, s=s)))
-    moving = next((point.speed for point in profile if point.speed > 0), profile[-1].speed)
-    return ordered_points(placed, SpeedPoint(route.lanes[0], 0.0, moving))
+    return rebased_profile(old, new, profile, (route.lanes[0], 0.0))
 
 
 def random_walk_profile(network: WalkNetwork, route: WalkRoute, rng: Random, kind: str, max_speed: float,

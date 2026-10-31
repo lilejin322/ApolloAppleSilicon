@@ -15,10 +15,10 @@ from typing import ClassVar, Mapping, Tuple
 from ...scenario.pedestrian import WALKER_SPECS, PedestrianAgent, WalkerType
 from ...scenario.realism import EXCURSION_COUNT_MIX, EXCURSION_MIX, WALKER_MIX, mapped_speed
 from ...scenario.routing import InvalidRoute
-from ...scenario.replay import ReplayTrajectory, SpeedPoint
+from ...scenario.replay import SpeedPoint
 from ...scenario.walkways import CurbPoint, WalkNetwork, WalkRoute
 from ...utils import require_nonnegative
-from ..common import ReplayOperatorConfig
+from ..common import ReplayOperatorConfig, replay_acceptable
 
 GENES: Tuple[str, ...] = ("route", "walker_type", "speed_profile", "start_t")
 """Pedestrian genes, in the order each call varies them: the walk first, and the
@@ -31,8 +31,9 @@ class PedestrianOperatorConfig(ReplayOperatorConfig):
     Rates, weights, bounds, and step sizes for PedestrianAgent crossover and mutation.
 
     The parameters below include all fields inherited from ``ReplayOperatorConfig``
-    and ``OperatorConfig``. Length bounds apply to the replay path, as in
-    ``PedestrianAgent.random``; route position steps apply along the sidewalk.
+    and ``OperatorConfig``; walk routes have no lanes, so it carries none of
+    ``LaneRouteConfig``'s search limits. Length bounds apply to the replay path,
+    as in ``PedestrianAgent.random``; route position steps apply along the sidewalk.
 
     :param float min_length: Shortest accepted replay path length, in metres (default: 10.0).
     :param float max_length: Longest accepted replay path length, in metres (default: 200.0).
@@ -48,15 +49,6 @@ class PedestrianOperatorConfig(ReplayOperatorConfig):
     :param float sigma_s: Standard deviation of walk endpoint and speed-point
         position steps, in metres (default: 2.0).
     :param float sigma_t: Standard deviation of start time steps, in seconds (default: 1.0).
-    :param int bridge_candidates: Number of candidate lane paths considered by shared
-        lane-route operators (default: 5); unused by pedestrian operators.
-    :param float max_detour: Maximum relative detour allowed by shared lane-route
-        rerouting (default: 0.3); unused by pedestrian operators.
-    :param float lane_change_odds: Lane-change acceptance odds for shared lane-route
-        mutation (default: 0.25); unused by pedestrian operators.
-    :param bool bridge_within_parents: Whether shared lane-route bridge crossover
-        constrains child length to the widened parental range (default: False);
-        unused by pedestrian operators.
     :param Mapping[str, float] crossover_rates: Independent crossover probability per
         gene; defaults to 0.5 each for ``route``, ``walker_type``, ``speed_profile``,
         and ``start_t``. Missing genes never cross.
@@ -183,14 +175,39 @@ def acceptable(network: WalkNetwork, agent: PedestrianAgent, config: PedestrianO
     :returns: ``True`` if the trajectory is valid and all configured bounds are satisfied.
     :rtype: bool
     """
-    if agent.start_t > config.max_start_t:
-        return False
-    try:
-        trajectory: ReplayTrajectory = agent.trajectory(network)
-    except InvalidRoute:
-        return False
-    return (config.min_length <= trajectory.path.length <= config.max_length
-            and (not config.min_arrival_t or agent.start_t < config.min_arrival_t <= trajectory.arrival_t))
+    return replay_acceptable(agent, lambda: agent.trajectory(network), config)
+
+
+def fresh_agent(network: WalkNetwork, walker_type: WalkerType, rng: Random, config: PedestrianOperatorConfig,
+                attempts: int = 20) -> PedestrianAgent | None:
+    """
+    A random pedestrian of ``walker_type`` drawn within ``config``'s bounds and mixes and accepted by
+    ``acceptable``: every draw of a new walker (generation, a section's fill and count mutation)
+    goes through here, so a new agent always passes the checks the operators apply.
+
+    :param WalkNetwork network: Walk network to draw on.
+    :param WalkerType walker_type: Walker type of the new agent.
+    :param Random rng: Random source used by ``PedestrianAgent.random``.
+    :param PedestrianOperatorConfig config: Length, speed, start and arrival bounds, excursion mixes and reaches.
+    :param int attempts: Draws before giving up; one draw already retries walks internally.
+    :returns: An acceptable agent, or None if the draws are exhausted or generation raises ``RuntimeError``.
+    :rtype: PedestrianAgent | None
+    """
+    for _ in range(attempts):
+        try:
+            agent: PedestrianAgent = PedestrianAgent.random(
+                network, rng, walker_type=walker_type, max_start_t=config.max_start_t, min_length=config.min_length,
+                max_length=config.max_length, count_weights=config.count_weights, kind_weights=config.kind_weights,
+                max_link=config.max_link, max_approach=config.max_approach,
+                turn_back_probability=config.turn_back_probability, min_speed=config.min_speed,
+                min_arrival_t=config.min_arrival_t)
+        except (InvalidRoute, ValueError):
+            continue
+        except RuntimeError:
+            return None
+        if acceptable(network, agent, config):
+            return agent
+    return None
 
 
 def on_route(agent: PedestrianAgent, route: WalkRoute | None, network: WalkNetwork) -> PedestrianAgent | None:

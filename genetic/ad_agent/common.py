@@ -10,15 +10,15 @@ from dataclasses import dataclass, field, replace
 from typing import ClassVar, Mapping, Tuple
 
 from ...scenario import ADAgent, LaneRoute, RouteSpace
-from ..common import OperatorConfig
+from ..common import LaneRouteConfig
 
 
 @dataclass(frozen=True)
-class ADOperatorConfig(OperatorConfig):
+class ADOperatorConfig(LaneRouteConfig):
     """
     Bounds, weights, and step sizes for ADAgent crossover and mutation.
 
-    Bounds and step sizes are inherited from ``OperatorConfig``. Weight keys
+    Bounds, step sizes, and lane-route search limits are inherited from ``LaneRouteConfig``. Weight keys
     must belong to ``CROSSOVERS`` or ``MUTATIONS``; omitted or zero-weight
     operators are disabled. Positive weights control selection order, with
     up to ``attempts`` tries per selected operator.

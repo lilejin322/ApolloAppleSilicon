@@ -15,13 +15,20 @@ from types import MappingProxyType
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, replace
 from math import ceil, isfinite, pi, sqrt
-from typing import Callable, Mapping, NamedTuple, Protocol, Sequence, List, Tuple
+from typing import Any, Callable, Dict, Mapping, NamedTuple, Protocol, Sequence, List, Tuple, TypeVar
+from weakref import WeakKeyDictionary
 from shapely.geometry import LineString, Point
 
 from .routing import InvalidRoute, LaneRoute, RouteSpace, Transition
 from .realism import ABSOLUTE_CRUISE, JERK_TARGET, draw_speed, reference_speed
 from ..map.geometry import CenterlineProfile, normalize_angle, smooth_polyline
 from ..utils import require_nonnegative
+
+_LAYOUTS: "WeakKeyDictionary[Any, Dict[Tuple, Any]]" = WeakKeyDictionary()
+"""Per route space or walk network: validated layouts by layout key (``memo_layout``)."""
+_LAYOUT_CACHE_SIZE = 4096
+"""Layouts kept per space; the oldest are dropped first."""
+_Built = TypeVar("_Built")
 
 MAX_SPEED_POINTS = 4
 """Max speed points"""
@@ -96,6 +103,27 @@ class SpeedPoint:
     """Desired speed in m/s; replay keeps below lane limits and curve caps."""
     dwell: float = 0.0
     """Seconds to wait at a stop; only for zero speeds."""
+
+    def to_dict(self) -> Dict:
+        """
+        A JSON-compatible mapping of this point.
+
+        :returns: ``lane_id``, ``s``, ``speed`` and ``dwell``.
+        :rtype: Dict
+        """
+        return {"lane_id": self.lane_id, "s": self.s, "speed": self.speed, "dwell": self.dwell}
+
+    @classmethod
+    def from_dict(cls, data: Mapping) -> "SpeedPoint":
+        """
+        A point from ``to_dict`` output.
+
+        :param Mapping data: Serialized mapping previously produced by ``to_dict``.
+        :returns: The point.
+        :rtype: SpeedPoint
+        :raises TypeError: If a key is missing or unknown.
+        """
+        return cls(**data)
 
 
 class AgentState(NamedTuple):
@@ -313,88 +341,178 @@ def rebased(space: RouteSpace, old_route: LaneRoute, old_lane_change_s: Tuple[fl
         old = RouteFrame(space, old_route, old_lane_change_s)
     except InvalidRoute:
         old = None
+    return rebased_profile(old, new, profile, (route.lanes[0], route.start_s))
+
+
+def rebased_profile(old: Any, new: Any, profile: Sequence[SpeedPoint], start: Tuple[str, float],
+                    ) -> Tuple[SpeedPoint, ...]:
+    """
+    Speed points moved from one route's frame to another's, the rule ``rebased`` (lane routes) and
+    ``pedestrian.rebased_walk`` (walks) share: a point whose lane (or walk element) is on the new
+    route, within its stretch there, keeps it and its ``s``; any other moves to the same share of
+    the distance it had on the old route (the new start if the old frame is missing or the point
+    is not on it). Points are then put in order (``ordered_points``).
+
+    :param Any old: The old route's frame (``RouteFrame`` or ``walkways.WalkFrame``), or None.
+    :param Any new: The new route's frame, of the same kind.
+    :param Sequence[SpeedPoint] profile: The points on the old route.
+    :param Tuple[str, float] start: The new route's first lane (element) and start ``s``, for the
+        point ``ordered_points`` falls back to.
+    :returns: The profile on the new route.
+    :rtype: Tuple[SpeedPoint, ...]
+    """
     placed = []
     for point in profile:
         low, high = new.window(point.lane_id) if point.lane_id in new.index else (0.0, -1.0)
         if low <= point.s <= high:
             placed.append((new.distance(point.lane_id, point.s), 0, point))
         else:
-            share = old.distance(point.lane_id, point.s) / old.total if old is not None and old.total > 0 else 0.0
+            share = (old.distance(point.lane_id, point.s) / old.total
+                     if old is not None and old.total > 0 and point.lane_id in old.index else 0.0)
             lane_id, s = new.at(share * new.total)
             placed.append((new.distance(lane_id, s), 1, replace(point, lane_id=lane_id, s=s)))
     moving = next((point.speed for point in profile if point.speed > 0), profile[-1].speed)
-    return ordered_points(placed, SpeedPoint(route.lanes[0], route.start_s, moving))
+    return ordered_points(placed, SpeedPoint(start[0], start[1], moving))
+
+
+LENGTH_FITS = 4
+"""Times ``random`` refits a route's end to bring its replayed length within bounds."""
+_LENGTH_INSIDE = 1e-3
+"""Metres inside the length bounds a refitted route aims for."""
+
+
+def arrives_in_window(start_t: float, arrival_t: float, min_arrival_t: float) -> bool:
+    """
+    Whether a replay meets ``min_arrival_t``: when positive, the agent starts before it and
+    arrives at or after it, so it is on the road at that time; zero disables the check.
+
+    :param float start_t: Scenario seconds the agent moves off.
+    :param float arrival_t: Scenario seconds it reaches its end (``ReplayTrajectory.arrival_t``).
+    :param float min_arrival_t: Earliest end time in scenario seconds, or 0.
+    :returns: Whether the window holds.
+    :rtype: bool
+    """
+    return not min_arrival_t or start_t < min_arrival_t <= arrival_t
+
+
+def length_target(length: float, min_length: float, max_length: float) -> float:
+    """
+    The replay-path length a route refit aims for: ``length`` when it is in bounds, else just
+    inside the nearer bound (a fit landing on a bound misses it by a float step).
+
+    :param float length: The route's driven length (``RouteSpace.length``), in metres.
+    :param float min_length: Shortest accepted path, in metres.
+    :param float max_length: Longest accepted path, in metres.
+    :returns: The target length, in metres.
+    :rtype: float
+    """
+    inside = min(0.5 * (max_length - min_length), _LENGTH_INSIDE)
+    return min(max(length, min_length + inside), max_length - inside)
 
 
 def refit_end(space: RouteSpace, route: LaneRoute, length: float, target: float) -> LaneRoute:
     """
     The route with its end moved so that a replay path of ``length`` metres
-    would become ``target`` metres long; where the space keeps endpoints away
-    from junctions and the moved end is not allowed, the nearest allowed end
-    on the last lane instead, if there is one.
+    would become ``target`` metres long; where the moved end is not allowed
+    (before the route enters its last lane, or by a junction where the space
+    keeps endpoints off them), the nearest allowed end instead, if there is one
+    (``RouteSpace.nearest_end``).
 
     :param RouteSpace space: Route space supplying lane geometry, topology,
         and route-specific constraints.
     :param LaneRoute route: Route to inspect, validate, or convert.
     :param float length: Current replay-path length, in metres.
     :param float target: Desired replay-path length, in metres.
-    :returns: The route with its end moved so that a replay path of ``length``
-        metres would become ``target`` metres long; where the space keeps
-        endpoints away from junctions and the moved end is not allowed, the
-        nearest allowed end on the last lane instead, if there is one.
+    :returns: The route with its end moved, or at the nearest allowed end; the moved end
+        unchanged when the last lane allows none.
     :rtype: LaneRoute
     """
     end_s = route.end_s + target - length
-    if space.restricts_endpoints and not space.endpoint_allowed(route.lanes[-1], end_s):
-        nearest = space.nearest_endpoint(route.lanes[-1], end_s)
-        end_s = end_s if nearest is None else nearest
-    return replace(route, end_s=end_s)
+    nearest = space.nearest_end(route, end_s)
+    return replace(route, end_s=end_s if nearest is None else nearest)
 
 
-def placed_stops(frame: RouteFrame, profile: Sequence[SpeedPoint], avoid: Sequence[Tuple[float, float]],
-                 blocked: Callable[[str], bool]) -> Tuple[SpeedPoint, ...]:
+def memo_layout(context: Any, key: Tuple, build: Callable[[], _Built]) -> _Built:
     """
-    The profile with each stop that lies on a ``blocked`` lane or within an
-    ``avoid`` stretch (driven distances) moved to the nearest driven position
-    off blocked lanes and outside those stretches, between its neighbours with
-    ``STOP_CLEARANCE``. Stops without such a position stay where they are.
+    ``build()``, once per ``key`` on ``context``.
+
+    An agent's validated layout (path, spans, speed-point positions) depends only on the genes in
+    its key, and agents are frozen values, so operators that validate a child and then replay it,
+    or change a gene the layout ignores (start time, style, compliance), build it once. A failure
+    (``InvalidRoute``) is remembered too. Past ``_LAYOUT_CACHE_SIZE`` entries the oldest go first.
+
+    :param Any context: The route space or walk network the layout is built on; held weakly.
+    :param Tuple key: The agent type and every gene the layout depends on.
+    :param Callable[[], _Built] build: Builds and validates the layout.
+    :returns: The layout; callers must not change it.
+    :rtype: _Built
+    :raises InvalidRoute: If the layout is invalid.
+    """
+    cache = _LAYOUTS.setdefault(context, {})
+    if key not in cache:
+        if len(cache) >= _LAYOUT_CACHE_SIZE:
+            del cache[next(iter(cache))]
+        try:
+            cache[key] = build()
+        except InvalidRoute as problem:
+            cache[key] = problem
+    value = cache[key]
+    if isinstance(value, InvalidRoute):
+        raise InvalidRoute(str(value))
+    return value
+
+
+_PLACEMENT_EDGE = 1e-3
+"""Metres a moved stop keeps inside an allowed stretch, off its boundary."""
+
+
+def placed_stops(frame: RouteFrame, profile: Sequence[SpeedPoint],
+                 blocks: Mapping[str, Tuple[Tuple[float, float, str], ...] | None]) -> Tuple[SpeedPoint, ...]:
+    """
+    The profile with each stop that ``blocks`` forbids (``traffic_constraints.stop_blocks``, the rule
+    validation applies) moved to the nearest driven position where a stop may lie, between its
+    neighbours with ``STOP_CLEARANCE``. A stop with no such position is dropped: the agent keeps the
+    rest of its profile instead of failing validation as a whole.
 
     :param RouteFrame frame: Route frame used to map lane positions to driven distance.
     :param Sequence[SpeedPoint] profile: Ordered target-speed points anchored to route lanes.
-    :param Sequence[Tuple[float, float]] avoid: Forbidden stop intervals along the driven path, in metres.
-    :param Callable[[str], bool] blocked: Predicate identifying lanes where ordinary stops are forbidden.
-    :returns: The repaired profile with stops moved outside blocked regions where feasible.
+    :param Mapping blocks: Per lane, ``(low, high, reason)`` lane-metre spans where a stop may not lie;
+        ``None`` for a lane where none may.
+    :returns: The repaired profile.
     :rtype: Tuple[SpeedPoint, ...]
     """
-    allowed = []
+    # Allowed driven stretches; an end cut by a blocked span (closed) is kept _PLACEMENT_EDGE inside it.
+    allowed: List[Tuple[float, float]] = []
     for index, lane_id in enumerate(frame.route.lanes):
-        if blocked(lane_id):
+        spans = blocks.get(lane_id, ())
+        if spans is None:
             continue
-        low = frame.offsets[index]
-        pieces = [(low, low + frame.ends[index] - frame.starts[index])]
-        for a, b in avoid:
+        pieces = [(frame.starts[index], frame.ends[index])]
+        for a, b, _ in spans:
             pieces = [piece for x, y in pieces
-                      for piece in ((x, min(y, a)), (max(x, b), y)) if piece[1] > piece[0]]
-        allowed.extend(pieces)
+                      for piece in ((x, min(y, a - _PLACEMENT_EDGE)), (max(x, b + _PLACEMENT_EDGE), y))
+                      if piece[1] >= piece[0]]
+        shift = frame.offsets[index] - frame.starts[index]
+        allowed.extend((shift + x, shift + y) for x, y in pieces)
     marks = [frame.distance(point.lane_id, point.s) for point in profile]
-    profile = list(profile)
+    kept: List[SpeedPoint] = []
+    kept_marks: List[float] = []
     for index, point in enumerate(profile):
-        if point.speed > 0:
-            continue
         here = marks[index]
-        before = marks[index - 1] + STOP_CLEARANCE if index else 0.0
+        if point.speed > 0 or any(a <= here <= b for a, b in allowed):
+            kept.append(point)
+            kept_marks.append(here)
+            continue
+        before = kept_marks[-1] + STOP_CLEARANCE if kept_marks else 0.0
         after = marks[index + 1] - STOP_CLEARANCE if index + 1 < len(marks) else frame.total
-        if any(a <= here <= b for a, b in allowed):
-            continue
-        options = [min(max(here, max(a, before)), min(b, after)) for a, b in allowed
-                   if min(b, after) >= max(a, before)]
+        options = [min(max(here, a, before), b, after) for a, b in allowed if min(b, after) >= max(a, before)]
         if not options:
-            continue
+            continue                            # Nowhere to stop between its neighbours: drop it.
         target = min(options, key=lambda value: abs(value - here))
         lane_id, s = frame.at(target)
-        profile[index] = replace(point, lane_id=lane_id, s=s)
-        marks[index] = frame.distance(lane_id, s)
-    return tuple(profile)
+        kept.append(replace(point, lane_id=lane_id, s=s))
+        kept_marks.append(frame.distance(lane_id, s))
+    return tuple(kept)
 
 
 class ReplayLayout(NamedTuple):
@@ -442,19 +560,6 @@ class ReplayLayout(NamedTuple):
             if best is None or gap < best[0] - 1e-9:
                 best = (gap, offset + line.project(point))
         return None if best is None else min(max(self.moved(best[1]), 0.0), self.path.length)
-
-    def lanes_at(self, position: float) -> Tuple[str, ...]:
-        """
-        The lanes of the section at path metres ``position``.
-
-        :param float position: Position along the replay path, in metres.
-        :returns: Lane IDs belonging to the path section at the requested path position.
-        :rtype: Tuple[str, ...]
-        """
-        for lanes, line, offset in self.pieces:
-            if position <= self.moved(offset + line.length) + 1e-9:
-                return lanes
-        return self.pieces[-1][0]
 
     def positions(self, space: RouteSpace, profile: Sequence[SpeedPoint]) -> List[float]:
         """
@@ -777,6 +882,40 @@ class ReplayTrajectory:
         if v[before] + speed <= 0:
             return self.start_t + self._arrive[index]
         return self.start_t + self._depart[before] + 2 * ds / (v[before] + speed)
+
+    def departure_at(self, distance: float) -> float:
+        """
+        Scenario time at which the agent leaves ``distance`` along its path: after any dwell and
+        pivot turn there, or ``time_at`` for a point it passes without stopping.
+
+        :param float distance: Path metres, clamped to the path.
+        :returns: Departure time from ``distance``, in scenario seconds.
+        :rtype: float
+        """
+        s = self._s
+        distance = min(max(distance, s[0]), s[-1])
+        index = bisect_left(s, distance)
+        if s[index] == distance:
+            return self.start_t + self._depart[index]
+        return self.time_at(distance)
+
+    def last_rest(self, low: float, high: float) -> float | None:
+        """
+        Path metres of the last place in ``[low, high)`` where the agent comes to rest: its start,
+        a stop of its profile, a forced stop or a pivot (its end does not count).
+
+        :param float low: Lower bound, in path metres.
+        :param float high: Upper bound (excluded), in path metres.
+        :returns: That grid position, or ``None`` if the agent does not rest there.
+        :rtype: float | None
+        """
+        s, v = self._s, self._v
+        for index in range(min(bisect_left(s, high), len(s) - 1) - 1, -1, -1):
+            if s[index] < low:
+                break
+            if v[index] == 0.0:
+                return s[index]
+        return None
 
     def moving_time(self, duration: float, *, min_speed: float = 0.5) -> float:
         """

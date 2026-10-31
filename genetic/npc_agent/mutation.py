@@ -12,7 +12,7 @@ from typing import Callable, Dict, List, Tuple
 from ...scenario import NPCVehicleAgent, VehicleType, LaneRoute, RouteSpace
 from ...scenario.realism import draw_type
 from .. import profile_operators, route_operators
-from ..common import vary
+from ..common import reflect, vary
 from ..profile_operators import mut_drive_style, mut_speed, mut_start_t, mut_stop
 from .common import NPCOperatorConfig, Spaces, acceptable, on_route, retyped
 
@@ -94,7 +94,7 @@ def mut_lane_change_s(agent: NPCVehicleAgent, spaces: Spaces, rng: Random,
                       config: NPCOperatorConfig = NPCOperatorConfig()) -> NPCVehicleAgent | None:
     """
     Move one lane change's start position by a normal step (``config.sigma_s``),
-    within its window on the source lane.
+    reflected into its window on the source lane (``common.reflect``).
 
     :param NPCVehicleAgent agent: Agent whose lane-change start position is mutated.
     :param Spaces spaces: Search spaces defining valid lane-change windows.
@@ -110,7 +110,7 @@ def mut_lane_change_s(agent: NPCVehicleAgent, spaces: Spaces, rng: Random,
     lane: int = agent.route.lane_change_indices[index]
     low: float = space.legs(agent.route, lane_change_s=agent.lane_change_s)[lane].start_s
     high: float = space.lane_length(agent.route.lanes[lane]) - space.rules.min_lane_change_distance
-    change: float = min(max(agent.lane_change_s[index] + rng.gauss(0, config.sigma_s), low), high)
+    change: float = reflect(agent.lane_change_s[index] + rng.gauss(0, config.sigma_s), low, high)
     changes: Tuple[float, ...] = agent.lane_change_s[:index] + (change,) + agent.lane_change_s[index + 1:]
     return replace(agent, lane_change_s=changes)
 
@@ -120,7 +120,7 @@ def mut_vehicle_type(agent: NPCVehicleAgent, spaces: Spaces, rng: Random,
                      drawn: VehicleType | None = None) -> NPCVehicleAgent | None:
     """
     Resample the vehicle type from ``config.vehicle_type_weights`` using only
-    types in ``spaces``, with speeds clamped to the selected type's maximum.
+    types in ``spaces``, with speeds mapped onto the selected type's prior (``retyped``).
 
     Sampling from the configured composition preserves the intended population
     mix. The caller's acceptance check rejects types incompatible with the
@@ -141,7 +141,7 @@ def mut_vehicle_type(agent: NPCVehicleAgent, spaces: Spaces, rng: Random,
     vehicle_type: VehicleType | None = drawn if drawn is not None else draw_vehicle_type(spaces, rng, config)
     if vehicle_type is None or vehicle_type is agent.vehicle_type:
         return None
-    return retyped(agent, vehicle_type)
+    return retyped(agent, vehicle_type, spaces)
 
 
 def draw_vehicle_type(spaces: Spaces, rng: Random,
@@ -227,7 +227,7 @@ def mut_npc_agent(agent: NPCVehicleAgent, spaces: Spaces, rng: Random,
         "vehicle_type": vehicle_type,
         "speed": lambda child: mut_speed(child, rng, config, spaces.get(child.vehicle_type)),
         "speed_point": lambda child: mut_speed_point(child, rng, config, spaces, point_action),
-        "stop": lambda child: mut_stop(child, rng, config),
+        "stop": lambda child: mut_stop(child, rng, config, allows=child.stop_rule(spaces[child.vehicle_type])),
         "drive_style": lambda child: mut_drive_style(child, rng),
         "start_t": lambda child: mut_start_t(child, rng, config),
     }

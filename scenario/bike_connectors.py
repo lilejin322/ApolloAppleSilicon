@@ -59,6 +59,10 @@ _HEADING_CHORD = 3.0
 _STRAIGHT_TURN = radians(45)
 _TURN_LIMIT = radians(135)
 """Heading changes up to ``_STRAIGHT_TURN`` are straight; beyond ``_TURN_LIMIT``, U-turns get no connector."""
+_MOVEMENT_ANGLE = radians(30)
+"""Largest difference between the chord headings of a connector leg and of a car lane for the leg to ride
+beside that lane's movement (``parallel_car_lanes``). On the bundled maps matched movements differ by at
+most 4 degrees and the next-closest ones by 40 or more."""
 _SAMPLE_STEP = 0.5
 """Approximate spacing in metres of a curved connector's vertices."""
 _CORNER_MARGIN = 1.0
@@ -87,38 +91,13 @@ def bike_connectors(service: MapService, *, min_turn_radius: float,
     if service.routing_graph is None:
         raise RuntimeError("bike_connectors needs a map loaded with load_only=False")
     kinds = frozenset(kinds)
-    types = DescriptorBundle(service.descriptor_path).message(
-        "apollo.hdmap.Lane").DESCRIPTOR.fields_by_name["type"].enum_type.values_by_name
-    biking, city = types["BIKING"].number, types["CITY_DRIVING"].number
-    lanes, graph = service.lane_table, service.routing_graph
+    biking, city = _lane_type(service, "BIKING"), _lane_type(service, "CITY_DRIVING")
+    lanes = service.lane_table
     bikes = {lane_id for lane_id, lane in lanes.items() if lane.type == biking}
-
-    def forward(lane_id: str) -> List[str]:
-        """
-        List forward successor lanes in stable order.
-
-        :param str lane_id: Map lane ID.
-        :returns: Forward-connected map lane IDs in stable order.
-        :rtype: List[str]
-        """
-        return sorted(target for target in graph.successors(lane_id)
-                      if graph[lane_id][target]["direction_type"] == "F")
-
-    def car_neighbours(lane_id: str) -> List[str]:
-        """
-        List city-driving lanes beside a bike lane.
-
-        :param str lane_id: Bike-lane ID.
-        :returns: IDs of adjacent city-driving lanes.
-        :rtype: List[str]
-        """
-        lane = lanes[lane_id]
-        return [other.id for other in (*lane.left_neighbor_forward_lane_id, *lane.right_neighbor_forward_lane_id)
-                if other.id in lanes and lanes[other.id].type == city]
 
     chains = nx.DiGraph()
     chains.add_nodes_from(bikes)
-    chains.add_edges_from((lane_id, target) for lane_id in bikes for target in forward(lane_id) if target in bikes)
+    chains.add_edges_from((lane_id, target) for lane_id in bikes for target in _forward(service, lane_id) if target in bikes)
     chain = {lane_id: index for index, group in enumerate(nx.weakly_connected_components(chains))
              for lane_id in group}
     ends = sorted(lane_id for lane_id in bikes if chains.out_degree(lane_id) == 0)
@@ -127,14 +106,14 @@ def bike_connectors(service: MapService, *, min_turn_radius: float,
     pairs = set()
     beside = {}
     for start in starts:
-        for car in car_neighbours(start):
+        for car in _car_neighbours(service, start):
             beside.setdefault(car, []).append(start)
     road_lanes = road_lanes or {}
     road_pairs = set()
     for end in ends:
-        frontier = set(car_neighbours(end))
+        frontier = set(_car_neighbours(service, end))
         for _ in range(_TOPOLOGY_STEPS):
-            frontier = {target for car in frontier for target in forward(car) if lanes[target].type == city}
+            frontier = {target for car in frontier for target in _forward(service, car) if lanes[target].type == city}
             pairs.update((end, start) for car in frontier for start in beside.get(car, ()))
             road_pairs.update((end, car) for car in frontier if car in road_lanes)
     poses = {lane_id: _end_pose(service.get_lane_central_curve_by_id(lane_id)) for lane_id in ends}
@@ -173,6 +152,106 @@ def bike_connectors(service: MapService, *, min_turn_radius: float,
 
 Pose = Tuple[Tuple[float, float], float]
 """A point and a heading in radians."""
+
+
+def parallel_car_lanes(service: MapService, connector: VirtualLane) -> Tuple[Tuple[str, ...], ...]:
+    """
+    The car lanes each leg of a bicycle connector rides beside: one tuple for a straight or right
+    connector, two for a two-stage left (before and after its corner).
+
+    A rider crosses with the car movement beside it and so obeys that movement's light
+    (``signal_compliance.connector_signal_stops``); bike lanes carry no signal of their own. The
+    first leg looks at the car lanes next to the bike lane it leaves and the lanes they lead to,
+    the second at the lanes next to the lane it joins (that lane itself when it is a road lane)
+    and the lanes leading into them. A car lane counts when its chord heading is within
+    ``_MOVEMENT_ANGLE`` of the leg's.
+
+    :param MapService service: The map the connector was built on (``bike_connectors``).
+    :param VirtualLane connector: A connector from ``bike_connectors``.
+    :returns: Sorted car-lane IDs per leg; a leg beside no car movement gets an empty tuple.
+    :rtype: Tuple[Tuple[str, ...], ...]
+    """
+    city = _lane_type(service, "CITY_DRIVING")
+    (end,), (start,) = connector.predecessors, connector.successors
+    out = set(_car_neighbours(service, end))
+    out |= {target for lane in list(out) for target in _forward(service, lane)}
+    joined = [start] if service.lane_table[start].type == city else _car_neighbours(service, start)
+    into = set(joined) | {source for lane in joined for source in _backward(service, lane)}
+    cuts = (0.0, *connector.pivots, connector.line.length)
+    legs = []
+    for (a, b), candidates in zip(zip(cuts, cuts[1:]), (out, into) if connector.pivots else (out,)):
+        heading = chord_heading(connector.line, a, b)
+        legs.append(tuple(sorted(
+            lane for lane in candidates if service.lane_table[lane].type == city
+            and abs(normalize_angle(_lane_heading(service, lane) - heading)) <= _MOVEMENT_ANGLE)))
+    return tuple(legs)
+
+
+def _lane_type(service: MapService, name: str) -> int:
+    """
+    The number of a ``apollo.hdmap.Lane.Type`` value.
+
+    :param MapService service: Map whose descriptor defines the enum.
+    :param str name: Type name, e.g. ``"BIKING"``.
+    :returns: Its enum number.
+    :rtype: int
+    """
+    return DescriptorBundle(service.descriptor_path).message(
+        "apollo.hdmap.Lane").DESCRIPTOR.fields_by_name["type"].enum_type.values_by_name[name].number
+
+
+def _forward(service: MapService, lane_id: str) -> List[str]:
+    """
+    Forward successor lanes in stable order.
+
+    :param MapService service: Map with its routing graph.
+    :param str lane_id: Map lane ID.
+    :returns: Forward-connected map lane IDs, sorted.
+    :rtype: List[str]
+    """
+    graph = service.routing_graph
+    return sorted(target for target in graph.successors(lane_id) if graph[lane_id][target]["direction_type"] == "F")
+
+
+def _backward(service: MapService, lane_id: str) -> List[str]:
+    """
+    Lanes that lead forward into ``lane_id``, in stable order.
+
+    :param MapService service: Map with its routing graph.
+    :param str lane_id: Map lane ID.
+    :returns: Forward-connected predecessor lane IDs, sorted.
+    :rtype: List[str]
+    """
+    graph = service.routing_graph
+    return sorted(source for source in graph.predecessors(lane_id) if graph[source][lane_id]["direction_type"] == "F")
+
+
+def _car_neighbours(service: MapService, lane_id: str) -> List[str]:
+    """
+    City-driving lanes beside a lane (its left and right forward neighbours).
+
+    :param MapService service: Map supplying the lane table.
+    :param str lane_id: Map lane ID, usually a bike lane.
+    :returns: IDs of adjacent city-driving lanes, left before right.
+    :rtype: List[str]
+    """
+    lanes, city = service.lane_table, _lane_type(service, "CITY_DRIVING")
+    lane = lanes[lane_id]
+    return [other.id for other in (*lane.left_neighbor_forward_lane_id, *lane.right_neighbor_forward_lane_id)
+            if other.id in lanes and lanes[other.id].type == city]
+
+
+def _lane_heading(service: MapService, lane_id: str) -> float:
+    """
+    Chord heading of a lane from its start to its end.
+
+    :param MapService service: Map supplying lane centerlines.
+    :param str lane_id: Map lane ID.
+    :returns: Direction in radians.
+    :rtype: float
+    """
+    line = service.get_lane_central_curve_by_id(lane_id)
+    return chord_heading(line, 0.0, line.length)
 
 
 def _end_pose(line: LineString) -> Pose:

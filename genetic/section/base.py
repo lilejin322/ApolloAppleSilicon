@@ -100,6 +100,9 @@ class SectionKind(Generic[T]):
 
     SECTION: Type[Section] = Section
     """The ``Section`` subclass this kind builds."""
+    compliance_rate: float = 0.5
+    """Share of its agents that obey signals, as drawn at generation (``signal_compliance.COMPLIANCE_RATES``);
+    compliance flips in ``mut_agent`` keep it stationary."""
 
     def build(self, agents: Sequence[T], density: float | None = None) -> Section:
         """
@@ -427,23 +430,47 @@ def mut_agent(section: Section, kind: SectionKind[T], rng: Random,
     :param Section section: Section containing the agent.
     :param SectionKind[T] kind: Section kind that mutates and checks the agent.
     :param Random rng: Random source for the picked index and the mutation.
-    :param SectionOperatorConfig config: Supplies ``attempts``. Defaults to ``SectionOperatorConfig()``.
+    :param SectionOperatorConfig config: Supplies ``attempts`` and ``compliance_flip_rate``.
+        Defaults to ``SectionOperatorConfig()``.
     :param Fits | None fits: Extra predicate, or None. Defaults to None.
-    :returns: The section with the mutant, or ``section`` when it is empty or no mutant fits.
+    :returns: The section with the mutant, or ``section`` when it is empty, no mutant fits, or a
+        compliance flip is rejected (``_flip_accepted``).
     :rtype: Section
     """
     if not section.agents:
         return section
     index: int = rng.randrange(len(section.agents))
+    agent: T = section.agents[index]
     others: Tuple[T, ...] = section.agents[:index] + section.agents[index + 1:]
+    if rng.random() < config.compliance_flip_rate:          # Drawn once per event: retries never re-pick it.
+        mutant: T = flip_compliance(agent)
+        if _flip_accepted(agent, kind.compliance_rate, rng.random()) and _fits(kind, mutant, others, fits):
+            return kind.build(section.agents[:index] + (mutant,) + section.agents[index + 1:], section.density)
+        return section
     for _ in range(config.attempts):
-        mutant: T = (flip_compliance(section.agents[index]) if rng.random() < config.compliance_flip_rate
-                     else kind.mutate_agent(section.agents[index], rng))
-        if mutant is section.agents[index]:
+        mutant = kind.mutate_agent(agent, rng)
+        if mutant is agent:
             continue
         if _fits(kind, mutant, others, fits):
             return kind.build(section.agents[:index] + (mutant,) + section.agents[index + 1:], section.density)
     return section
+
+
+def _flip_accepted(agent: Any, rate: float, accept: float) -> bool:
+    """
+    Metropolis acceptance of flipping ``agent``'s ``obeys_signals``, against a prior of ``rate`` obeying.
+
+    The flip is accepted with probability ``min(1, prior(new) / prior(old))``, so the gene's share
+    stays at ``rate`` instead of drifting to one half as a plain toggle would.
+
+    :param Any agent: NPC, bicycle or pedestrian before the flip.
+    :param float rate: Prior share of agents that obey.
+    :param float accept: Uniform draw in ``[0, 1)``.
+    :returns: Whether the flip is accepted.
+    :rtype: bool
+    """
+    new, old = (1.0 - rate, rate) if agent.obeys_signals else (rate, 1.0 - rate)
+    return accept * old < new
 
 
 def mut_section(section: Section, kind: SectionKind[T], rng: Random,

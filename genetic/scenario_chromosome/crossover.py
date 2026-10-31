@@ -43,9 +43,11 @@ def cx_scenario(first: Scenario, second: Scenario, kinds: ScenarioKinds, rng: Ra
     egos: Tuple[ADAgent, ADAgent] = (first.ego, second.ego)
     if rng.random() < config.ego_crossover_rate:
         egos = cx_ad_agent(first.ego, second.ego, kinds.context.ego_space, rng, config.ad)
-    children: List[Scenario] = [Scenario(egos[0]), Scenario(egos[1])]
+    fingerprint: str = kinds.context.walk_network.fingerprint
+    children: List[Scenario] = [Scenario(egos[0], walk_network=fingerprint), Scenario(egos[1], walk_network=fingerprint)]
     if first.signals.plans or second.signals.plans:     # Plans first: complying agents replay under them.
-        signals = cx_signal_section(first.signals, second.signals, rng, config.signals)
+        signals = (cx_signal_section(first.signals, second.signals, rng, config.signals) if config.evolve_signals
+                   else (first.signals, second.signals))     # Fixed plans pass on unchanged.
         children = [_with(children[0], "signals", signals[0]), _with(children[1], "signals", signals[1])]
     for name in Scenario.SECTIONS:
         crossed: Tuple[Section, Section] = cx_section(getattr(first, name), getattr(second, name),

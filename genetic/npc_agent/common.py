@@ -16,11 +16,9 @@ from typing import ClassVar, Dict, List, Mapping, Sequence, Set, Tuple, TypeAlia
 
 from ...scenario import InvalidRoute, LaneRoute, NPCVehicleAgent, RouteSpace, VehicleType
 from ...scenario.npc_agent import VEHICLE_SPECS
-from ...scenario.realism import VEHICLE_MIX
-from ...scenario.replay import ReplayTrajectory, SpeedPoint
-from ...utils import require_nonnegative
-from ..common import ReplayOperatorConfig
-from ..profile_operators import clamp_speeds
+from ...scenario.realism import VEHICLE_MIX, mapped_speed
+from ...scenario.replay import SpeedPoint, point_reference
+from ..common import LaneRouteConfig, ReplayOperatorConfig, replay_acceptable
 
 GENES: Tuple[str, ...] = ("route", "lane_change_s", "vehicle_type", "speed_profile", "start_t")
 """NPC genes, in the order each call varies them: the route first, since the
@@ -33,12 +31,12 @@ the types present are offered to vehicle-type crossover and mutation."""
 
 
 @dataclass(frozen=True)
-class NPCOperatorConfig(ReplayOperatorConfig):
+class NPCOperatorConfig(LaneRouteConfig, ReplayOperatorConfig):
     """
     Rates, weights, bounds, and step sizes for NPCVehicleAgent crossover and mutation.
 
     Length bounds apply to the NPC's replay path. Parameters below include all
-    fields inherited from ``ReplayOperatorConfig`` and ``OperatorConfig``;
+    fields inherited from ``LaneRouteConfig``, ``ReplayOperatorConfig``, and ``OperatorConfig``;
     NPC-specific defaults are noted where those fields are overridden.
 
     :param float min_length: Minimum accepted replay-path length in metres; defaults to 150.
@@ -92,12 +90,8 @@ class NPCOperatorConfig(ReplayOperatorConfig):
     :param bool cross_type_routes: Let route crossover combine parents of different
         vehicle types. Off by default: a small type takes a large type's roads freely but
         not the reverse, so routes drift towards the roads large vehicles fit.
-    :param float sigma_fraction: Unused compatibility field, defaulting to 0.1;
-        must be finite and nonnegative. Speed-point moves use ``sigma_s`` metres
-        of driven distance since map-position speed profiles (format version 2).
     :raises ValueError: If inherited bounds, weights, gene names, or probabilities
-        are invalid, or speed, dwell, arrival-time, or ``sigma_fraction`` values
-        are nonfinite or negative.
+        are invalid, or speed, dwell or arrival-time values are nonfinite or negative.
     """
 
     GENES: ClassVar[Tuple[str, ...]] = GENES
@@ -143,19 +137,8 @@ class NPCOperatorConfig(ReplayOperatorConfig):
     """Per-gene mutation probabilities; missing genes are disabled."""
     min_length: float = 150.0
     """Minimum accepted replay-path length, in metres."""
-    sigma_fraction: float = 0.1
-    """Unused compatibility field; speed-point position steps use ``sigma_s`` metres instead."""
     min_speed: float = 4.5
     """Lowest nonzero target speed drawn or stepped to, in metres per second."""
-
-    def __post_init__(self) -> None:
-        """
-        Validate inherited settings and require a finite, nonnegative ``sigma_fraction``.
-
-        :raises ValueError: If inherited validation fails, or ``sigma_fraction`` is nonfinite or negative.
-        """
-        super().__post_init__()
-        require_nonnegative(sigma_fraction=self.sigma_fraction)
 
 
 def acceptable(spaces: Spaces, agent: NPCVehicleAgent, config: NPCOperatorConfig) -> bool:
@@ -173,14 +156,8 @@ def acceptable(spaces: Spaces, agent: NPCVehicleAgent, config: NPCOperatorConfig
         bound is violated.
     :rtype: bool
     """
-    if agent.start_t > config.max_start_t or agent.vehicle_type not in spaces:
-        return False
-    try:
-        trajectory: ReplayTrajectory = agent.trajectory(spaces[agent.vehicle_type])
-    except InvalidRoute:
-        return False
-    return (config.min_length <= trajectory.path.length <= config.max_length
-            and (not config.min_arrival_t or agent.start_t < config.min_arrival_t <= trajectory.arrival_t))
+    return agent.vehicle_type in spaces and replay_acceptable(
+        agent, lambda: agent.trajectory(spaces[agent.vehicle_type]), config)
 
 
 def positions(agent: NPCVehicleAgent) -> Dict[Tuple[str, str], float]:
@@ -224,20 +201,34 @@ def on_route(agent: NPCVehicleAgent, route: LaneRoute | None, space: RouteSpace,
         return None
 
 
-def retyped(agent: NPCVehicleAgent, vehicle_type: VehicleType) -> NPCVehicleAgent:
+def retyped(agent: NPCVehicleAgent, vehicle_type: VehicleType, spaces: Spaces) -> NPCVehicleAgent:
     """
-    ``agent`` as another vehicle type, its speeds clamped to that type's maximum.
+    ``agent`` as another vehicle type: each target speed's cruise factor (its share of the lane's
+    reference speed, ``realism.reference_speed``) moves to the same quantile of the new type's
+    prior (``realism.mapped_speed``), within the type's maximum, as for riders and walkers.
+    Clamping alone left cars retyped to buses cruising like cars (mean factor 0.906 against
+    0.797 for buses drawn as buses).
 
     :param NPCVehicleAgent agent: Source agent whose vehicle type and target speeds
         are updated; route, lane-change positions, and start time are preserved.
-    :param VehicleType vehicle_type: Target vehicle type supplying the maximum
-        speed used to clamp the speed profile.
-    :returns: A new agent with the target vehicle type and clamped speed profile,
-        even if the type is unchanged. Route and trajectory validity for the new
-        vehicle type are not checked here.
+    :param VehicleType vehicle_type: Target vehicle type supplying the speed prior and maximum speed.
+    :param Spaces spaces: Route spaces by vehicle type; ``vehicle_type``'s supplies the lane limits.
+    :returns: A copy with the target vehicle type and mapped speed profile, or ``agent`` itself if
+        its type already matches. Route and trajectory validity for the new vehicle type are not checked here.
     :rtype: NPCVehicleAgent
     """
-    profile: Tuple[SpeedPoint, ...] = clamp_speeds(agent.speed_profile, VEHICLE_SPECS[vehicle_type].max_speed)
+    if vehicle_type is agent.vehicle_type:
+        return agent
+    space: RouteSpace = spaces[vehicle_type]
+    old, new = agent.vehicle_type.name, vehicle_type.name
+    old_top, top = VEHICLE_SPECS[agent.vehicle_type].max_speed, VEHICLE_SPECS[vehicle_type].max_speed
+
+    def mapped(point: SpeedPoint) -> SpeedPoint:
+        factor = point.speed / point_reference(space, point.lane_id, old, old_top)
+        return replace(point, speed=min(mapped_speed(old, new, factor) * point_reference(space, point.lane_id, new, top),
+                                        top))
+
+    profile: Tuple[SpeedPoint, ...] = tuple(mapped(point) if point.speed > 0 else point for point in agent.speed_profile)
     return replace(agent, vehicle_type=vehicle_type, speed_profile=profile)
 
 
@@ -299,7 +290,7 @@ def rebalance_vehicle_types(population: Sequence[NPCVehicleAgent], spaces: Space
                   if agent.vehicle_type.name not in offered or counts[agent.vehicle_type.name] > target[agent.vehicle_type.name]]
         rng.shuffle(donors)
         for index in donors:
-            child: NPCVehicleAgent = retyped(population[index], VehicleType[wanted])
+            child: NPCVehicleAgent = retyped(population[index], VehicleType[wanted], spaces)
             if acceptable(spaces, child, config):
                 old: str = population[index].vehicle_type.name
                 if old in counts:
@@ -308,7 +299,7 @@ def rebalance_vehicle_types(population: Sequence[NPCVehicleAgent], spaces: Space
                 population[index] = child
                 break
         else:
-            fresh: NPCVehicleAgent | None = _fresh(spaces, VehicleType[wanted], rng, config) if redraw and donors else None
+            fresh: NPCVehicleAgent | None = fresh_agent(spaces, VehicleType[wanted], rng, config) if redraw and donors else None
             if fresh is None:
                 unreachable.add(wanted)
                 continue
@@ -320,25 +311,34 @@ def rebalance_vehicle_types(population: Sequence[NPCVehicleAgent], spaces: Space
             population[index] = replace(fresh, lineage_id=population[index].lineage_id)   # Same slot, same lineage.
 
 
-def _fresh(spaces: Spaces, vehicle_type: VehicleType, rng: Random, config: NPCOperatorConfig,
-           attempts: int = 20) -> NPCVehicleAgent | None:
+def fresh_agent(spaces: Spaces, vehicle_type: VehicleType, rng: Random, config: NPCOperatorConfig,
+                attempts: int = 20) -> NPCVehicleAgent | None:
     """
-    Generate a random acceptable NPC vehicle agent, or ``None`` if all attempts fail.
+    A random NPC of ``vehicle_type`` drawn within ``config``'s bounds and accepted by ``acceptable``.
 
-    :param Spaces spaces: Search spaces used to sample the agent.
-    :param VehicleType vehicle_type: Vehicle type of the generated agent.
+    Every draw of a new NPC (generation, a section's fill and count mutation, rebalancing)
+    goes through here, so a new agent always passes the checks the operators apply.
+
+    :param Spaces spaces: Route spaces by vehicle type; ``vehicle_type``'s is drawn on.
+    :param VehicleType vehicle_type: Vehicle type of the new agent.
     :param Random rng: Random number generator used for sampling.
-    :param NPCOperatorConfig config: Configuration controlling agent generation and acceptance.
-    :param int attempts: Maximum number of generation attempts.
-    :returns: An acceptable agent, or ``None`` if no attempt succeeds.
+    :param NPCOperatorConfig config: Length, speed, dwell, start and arrival bounds.
+    :param int attempts: Draws before giving up; one draw already retries routes internally.
+    :returns: An acceptable agent, or ``None`` if the type has no space or no draw succeeds.
     :rtype: NPCVehicleAgent | None
     """
+    if vehicle_type not in spaces:
+        return None
     for _ in range(attempts):
         try:
-            agent: NPCVehicleAgent = NPCVehicleAgent.random(spaces[vehicle_type], rng, vehicle_type=vehicle_type,
-                                           max_start_t=config.max_start_t, min_speed=config.min_speed)
-        except InvalidRoute:
+            agent: NPCVehicleAgent = NPCVehicleAgent.random(
+                spaces[vehicle_type], rng, vehicle_type=vehicle_type, max_start_t=config.max_start_t,
+                min_length=config.min_length, max_length=config.max_length, max_dwell=config.max_dwell,
+                min_speed=config.min_speed, min_arrival_t=config.min_arrival_t)
+        except (InvalidRoute, ValueError):
             continue
+        except RuntimeError:                    # The draw exhausted its own route attempts.
+            return None
         if acceptable(spaces, agent, config):
             return agent
     return None

@@ -8,9 +8,10 @@ from random import Random
 from typing import List, Sequence, Tuple, Type
 
 from ...scenario import NPCVehicleAgent, VehicleType, random_vehicle_type
-from ...scenario.routing import InvalidRoute
 from ...scenario.sections import NPCSection, SectionRules, Spaces
+from ...scenario.signal_compliance import COMPLIANCE_RATES
 from ..npc_agent import NPCOperatorConfig, cx_npc_agent, mut_npc_agent, rebalance_vehicle_types
+from ..npc_agent.common import fresh_agent
 from .base import SectionKind
 
 
@@ -22,6 +23,9 @@ class NPCKind(SectionKind[NPCVehicleAgent]):
     :param NPCOperatorConfig config: NPC operators. Defaults to ``NPCOperatorConfig()``.
     :param SectionRules | None rules: In-type constraints. None uses ``NPCSection.RULES``.
     """
+
+    compliance_rate: float = COMPLIANCE_RATES["npc"]
+    """Share of its agents that obey signals."""
 
     SECTION: Type[NPCSection] = NPCSection
     """NPC section class."""
@@ -40,20 +44,15 @@ class NPCKind(SectionKind[NPCVehicleAgent]):
 
     def random_agent(self, rng: Random) -> NPCVehicleAgent | None:
         """
-        Draw one NPC, or None when its type has no space or the draw fails.
+        Draw one NPC within the kind's operator bounds (``npc_agent.fresh_agent``), or None when its type has
+        no space or the draw fails.
 
         :param Random rng: Random source for the vehicle type and the agent.
         :returns: The agent, or None.
         :rtype: NPCVehicleAgent | None
         """
         vehicle_type: VehicleType = random_vehicle_type(rng, self.config.vehicle_type_weights)
-        if vehicle_type not in self.context:
-            return None
-        try:
-            return NPCVehicleAgent.random(self.context[vehicle_type], rng, vehicle_type=vehicle_type,
-                                          max_start_t=self.config.max_start_t)
-        except (InvalidRoute, ValueError, RuntimeError):
-            return None
+        return fresh_agent(self.context, vehicle_type, rng, self.config, attempts=1)
 
     def mutate_agent(self, agent: NPCVehicleAgent, rng: Random) -> NPCVehicleAgent:
         """

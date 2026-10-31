@@ -10,7 +10,10 @@ A section is valid when every agent is valid on its own and, within the type:
   ``SectionRules.dt`` up to ``SectionRules.horizon``. An agent stands at its
   start before ``start_t`` and stays at its end after arriving, as the replay
   places it; bodies grow by ``SectionRules.margin`` (half each side);
-- start times are spread out: no two within ``SectionRules.min_start_gap``.
+- start times are spread out within a queue: no two agents queued one behind
+  the other (``queued``) start within ``SectionRules.min_start_gap``, as a
+  follower does not pull away at the instant its leader does. Agents elsewhere
+  may start together.
 
 Type composition is a population property, not a section one (a section of
 three cannot hold one e-bike in six); ``genetic.section`` restores it across
@@ -30,6 +33,7 @@ from .bicycle import RIDER_SPECS, BicycleAgent
 from .npc_agent import VEHICLE_SPECS, NPCVehicleAgent, VehicleType
 from .pedestrian import WALKER_SPECS, PedestrianAgent
 from .obstacle_ids import BICYCLE_ID_BASE, NPC_ID_BASE, PEDESTRIAN_ID_BASE, assign_ids, dedupe_lineage
+from .bike_connectors import parallel_car_lanes
 from .routing import InvalidRoute, RouteSpace
 from .signal_compliance import active
 from .walkways import WalkNetwork
@@ -56,7 +60,7 @@ class SectionRules:
     :param float dt: Sampling step in seconds. At 0.1 s two cars closing at
         30 m/s move 3 m per step, less than a car length, so none passes through another.
     :param float margin: Metres between bodies: each body grows by half of it on every side.
-    :param float min_start_gap: Fewest seconds between two start times.
+    :param float min_start_gap: Fewest seconds between the start times of two agents in one queue (``queued``).
     :param float spawn_gap: Fewest metres between two ungrown bodies at their
         first pose (t = 0, where every agent stands at its start). Stronger than
         ``margin``, which only stops bodies touching: it keeps agents from all
@@ -262,11 +266,31 @@ def queued(a: Body, b: Body) -> bool:
                abs(-dx * sin(b.heading[0]) + dy * cos(b.heading[0]))) < QUEUE_LATERAL
 
 
+def _plans_of(signals: Any, signal_ids: Iterable[str]) -> Tuple[Any, ...]:
+    """
+    The distinct plans of ``signal_ids`` that ``signals`` holds, sorted by junction ID.
+
+    :param SignalSection signals: Plans in force.
+    :param Iterable[str] signal_ids: Signal IDs, possibly repeated or without a plan.
+    :returns: The plans.
+    :rtype: Tuple[SignalPlan, ...]
+    """
+    plans = {}
+    for signal_id in signal_ids:
+        try:
+            plan = signals.plan_of(signal_id)
+        except KeyError:
+            continue
+        plans[plan.junction_id] = plan
+    return tuple(plans[key] for key in sorted(plans))
+
+
 def sampled_body(agent: Any, trajectory: Callable[[], Any],
                  length: float, width: float, context: Any,
-                 rules: SectionRules, signals: Any = None) -> Body:
+                 rules: SectionRules, signal_key: Any = None) -> Body:
     """
-    ``agent``'s body on ``rules``' grid, cached per context (map), agent and grid.
+    ``agent``'s body on ``rules``' grid, cached per context (map), agent, grid and the signal
+    plans its replay can meet. Past ``_BODY_CACHE_SIZE`` bodies the least recently used goes.
 
     :param Any agent: Agent sampled. Its ``start_t`` is stored, and it is part of the cache key.
     :param Callable[[], Any] trajectory: Builds the replay. Called only on a cache miss; ``state_at`` supplies x, y, and heading.
@@ -274,8 +298,8 @@ def sampled_body(agent: Any, trajectory: Callable[[], Any],
     :param float width: Body width, in metres.
     :param Any context: Map context the poses belong to. A mapping of route spaces is cached on one of them; a context that cannot be weakly referenced is not cached.
     :param SectionRules rules: Time grid. ``horizon`` and ``dt`` are part of the cache key.
-    :param SignalSection | None signals: Signal plans the replay obeys; part of the key only when
-        ``signal_compliance.active`` (plans exist and the agent obeys them).
+    :param Any signal_key: What of the signal plans the replay depends on (``Section.signal_plans``),
+        or None for a replay without signals.
     :returns: ``agent``'s body on ``rules``' grid, cached per context (map), agent and grid.
     :rtype: Body
     """
@@ -286,16 +310,16 @@ def sampled_body(agent: Any, trajectory: Callable[[], Any],
         cache = _BODY_CACHE.setdefault(anchor, {})
     except TypeError:                                   # A context that takes no weak reference.
         cache = {}
-    key = (agent, rules.horizon, rules.dt, signals if active(signals, agent) else None)
-    body = cache.get(key)
+    key = (agent, rules.horizon, rules.dt, signal_key)
+    body = cache.pop(key, None)                         # Re-inserted below: most recently used last.
     if body is None:
         replay = trajectory()
         poses = np.array([tuple(replay.state_at(t))[:3] for t in rules.times])
         lanes = getattr(getattr(agent, "route", None), "lanes", None)
         body = Body(poses[:, 0], poses[:, 1], poses[:, 2], length, width, agent.start_t, lanes[0] if lanes else None)
         if len(cache) >= _BODY_CACHE_SIZE:
-            cache.clear()
-        cache[key] = body
+            del cache[next(iter(cache))]
+    cache[key] = body
     return body
 
 
@@ -374,6 +398,21 @@ class Section(Generic[T]):
         raise NotImplementedError
 
     @staticmethod
+    def signal_plans(agent: T, context: Any, signals: Any) -> Tuple[Any, ...]:
+        """
+        Every plan of ``signals`` that ``agent``'s replay could stop for: a superset of the plans
+        its compliance stops use (``signal_compliance``), so bodies cached by these plans stay
+        exact when other junctions' plans change. Subclasses narrow this; here, every plan.
+
+        :param T agent: Agent replayed.
+        :param Any context: Its map context.
+        :param SignalSection signals: Plans in force.
+        :returns: The plans, sorted by junction ID.
+        :rtype: Tuple[SignalPlan, ...]
+        """
+        return tuple(signals.plans)
+
+    @staticmethod
     def check_agent(agent: T, context: Any) -> None:
         """
         Check ``agent`` on its map context. Subclasses implement this.
@@ -401,8 +440,9 @@ class Section(Generic[T]):
         """
         rules = rules or cls.RULES
         length, width = cls.size(agent)
-        return sampled_body(agent, lambda: cls.replay(agent, context, signals), length, width, context, rules,
-                            signals)
+        plans = cls.signal_plans(agent, context, signals) if active(signals, agent) else ()
+        return sampled_body(agent, lambda: cls.replay(agent, context, signals if plans else None), length, width,
+                            context, rules, plans or None)
 
     @classmethod
     def conflict(cls, agent: T, others: Iterable[T], context: Any, rules: SectionRules | None = None,
@@ -410,8 +450,8 @@ class Section(Generic[T]):
         """
         Why ``agent`` cannot join ``others`` in one section (start gap or overlap), or None.
 
-        The first failing check wins: a start within ``min_start_gap`` of another,
-        then a body overlap, then spawn poses closer than ``spawn_gap``.
+        The first failing check wins: a start within ``min_start_gap`` of another agent in
+        its queue (``queued``), then a body overlap, then spawn poses closer than ``spawn_gap``.
 
         :param T agent: Agent being added.
         :param Iterable[T] others: Agents already in the section.
@@ -423,10 +463,11 @@ class Section(Generic[T]):
         rules = rules or cls.RULES
         mine = None
         for other in others:
-            if abs(agent.start_t - other.start_t) < rules.min_start_gap:
-                return f"start times {agent.start_t:.2f} and {other.start_t:.2f} closer than {rules.min_start_gap} s"
             mine = mine or cls.body(agent, context, rules, signals)
             theirs = cls.body(other, context, rules, signals)
+            if abs(agent.start_t - other.start_t) < rules.min_start_gap and queued(mine, theirs):
+                return (f"start times {agent.start_t:.2f} and {other.start_t:.2f} closer than "
+                        f"{rules.min_start_gap} s in one queue")
             t = first_overlap(mine, theirs, rules.margin, rules.times)
             if t is not None:
                 return f"bodies overlap at t={t:.1f} s"
@@ -511,7 +552,7 @@ class NPCSection(Section[NPCVehicleAgent]):
     # or crossing/opposing, only 0.5 m: two 2.5 m trucks on 3.3 m lanes leave ~0.8 m.
     RULES: ClassVar[SectionRules] = SectionRules(max_count=6, margin=0.4, min_start_gap=0.5, spawn_gap=8.0,
                                                  side_gap=0.5, lane_aware=True)
-    """At most 6 vehicles, 0.4 m between bodies, and 0.5 s between starts."""
+    """At most 6 vehicles, 0.4 m between bodies, and 0.5 s between starts in one queue."""
 
     @staticmethod
     def size(agent: NPCVehicleAgent) -> Tuple[float, float]:
@@ -537,6 +578,20 @@ class NPCSection(Section[NPCVehicleAgent]):
         :raises KeyError: If ``context`` has no space for ``agent.vehicle_type``.
         """
         return agent.trajectory(context[agent.vehicle_type], signals)
+
+    @staticmethod
+    def signal_plans(agent: NPCVehicleAgent, context: Spaces, signals: Any) -> Tuple[Any, ...]:
+        """
+        Plans of the signals controlling a lane of the route (``Section.signal_plans``).
+
+        :param NPCVehicleAgent agent: Vehicle replayed.
+        :param Spaces context: Route spaces by vehicle type.
+        :param SignalSection signals: Plans in force.
+        :returns: The plans, sorted by junction ID.
+        :rtype: Tuple[SignalPlan, ...]
+        """
+        relations = context[agent.vehicle_type].service.relations
+        return _plans_of(signals, (s for lane in agent.route.lanes for s in relations.signals_for_lane.get(lane, ())))
 
     @staticmethod
     def check_agent(agent: NPCVehicleAgent, context: Spaces) -> None:
@@ -593,6 +648,26 @@ class BicycleSection(Section[BicycleAgent]):
         return agent.trajectory(context, signals)
 
     @staticmethod
+    def signal_plans(agent: BicycleAgent, context: RouteSpace, signals: Any) -> Tuple[Any, ...]:
+        """
+        Plans of the signals controlling a map lane of the route, or a car lane a connector of it
+        rides beside (``bike_connectors.parallel_car_lanes``; ``Section.signal_plans``).
+
+        :param BicycleAgent agent: Bicycle replayed.
+        :param RouteSpace context: The bicycles' route space.
+        :param SignalSection signals: Plans in force.
+        :returns: The plans, sorted by junction ID.
+        :rtype: Tuple[SignalPlan, ...]
+        """
+        relations = context.service.relations
+        lanes = list(agent.route.lanes)
+        for lane_id in agent.route.lanes:
+            connector = context.virtual_lane(lane_id)
+            if connector is not None:
+                lanes.extend(car for cars in parallel_car_lanes(context.service, connector) for car in cars)
+        return _plans_of(signals, (s for lane in lanes for s in relations.signals_for_lane.get(lane, ())))
+
+    @staticmethod
     def check_agent(agent: BicycleAgent, context: RouteSpace) -> None:
         """
         Check ``agent`` on the bicycles' route space.
@@ -642,6 +717,25 @@ class PedestrianSection(Section[PedestrianAgent]):
         :rtype: ReplayTrajectory
         """
         return agent.trajectory(context, signals)
+
+    @staticmethod
+    def signal_plans(agent: PedestrianAgent, context: WalkNetwork, signals: Any) -> Tuple[Any, ...]:
+        """
+        Plans of the vehicle lights the walk's signalised crossings follow (``Section.signal_plans``).
+
+        :param PedestrianAgent agent: Walker replayed.
+        :param WalkNetwork context: The walk network.
+        :param SignalSection signals: Plans in force.
+        :returns: The plans, sorted by junction ID.
+        :rtype: Tuple[SignalPlan, ...]
+        """
+        controlled = set(signals.crosswalks)
+        try:
+            crossings = [context.crossing(e.kind, e.entry, e.exit) for e in agent.route.excursions]
+        except InvalidRoute:
+            return tuple(signals.plans)                 # the replay raises anyway; key on everything
+        return _plans_of(signals, (signals.parallel_signal(c) for crossing in crossings if crossing is not None
+                                   for c in crossing.crosswalks if c in controlled))
 
     @staticmethod
     def check_agent(agent: PedestrianAgent, context: WalkNetwork) -> None:

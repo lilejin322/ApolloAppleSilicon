@@ -16,7 +16,7 @@ from ...scenario import ADAgent
 from ...scenario.scenario_chromosome import Scenario, ScenarioContext, ScenarioRules, interaction
 from ...scenario.map_budget import MapBudget
 from ...scenario.sections import Section
-from ...scenario.traffic_signal import SignalTiming
+from ...scenario.traffic_signal import SignalSection, SignalTiming
 from ..ad_agent import ADOperatorConfig
 from ..bicycle import BicycleOperatorConfig
 from ..npc_agent import NPCOperatorConfig
@@ -31,7 +31,6 @@ class ScenarioOperatorConfig:
     """
     Operator bundle for generating, crossing and mutating one scenario.
 
-    :param ScenarioRules rules: Cross-type constraints.
     :param Mapping[str, SectionOperatorConfig] sections: Per section name, its ``SectionOperatorConfig``.
     :param Mapping[str, float] mutation_weights: How often a mutation event goes to the ego
         or to each section (``"ego"``, ``"npcs"``, ``"bicycles"``, ``"pedestrians"``) or to the
@@ -42,9 +41,10 @@ class ScenarioOperatorConfig:
     :param int attempts: Retries of an ego mutation that clashes with the traffic.
     :param ADOperatorConfig ad: Ego operators passed to generation, ``mut_ad_agent`` and
         ``cx_ad_agent``. ``max_start_t`` bounds a random ego's start.
+    :param bool evolve_signals: Draw random signal plans and vary them; when False every
+        scenario keeps ``SignalSection.default`` plans, which still cycle, and neither
+        mutation nor crossover touches them.
     """
-    rules: ScenarioRules = ScenarioRules()
-    """Cross-type constraints."""
     sections: Mapping[str, SectionOperatorConfig] = field(default_factory=lambda: {
         "npcs": SectionOperatorConfig(), "bicycles": SectionOperatorConfig(), "pedestrians": SectionOperatorConfig()})
     """Per section name, its ``SectionOperatorConfig``."""
@@ -59,6 +59,8 @@ class ScenarioOperatorConfig:
     """Retries of an ego mutation that clashes with the traffic."""
     ad: ADOperatorConfig = ADOperatorConfig()
     """Ego operators passed to generation, ``mut_ad_agent`` and ``cx_ad_agent``. ``max_start_t`` bounds a random ego's start."""
+    evolve_signals: bool = True
+    """Random, varied signal plans; when False, every scenario keeps the fixed default plans."""
 
 
 class ScenarioKinds:
@@ -68,7 +70,9 @@ class ScenarioKinds:
     ``context`` is the map the scenario replays on. ``rules`` are the cross-type
     constraints. ``kinds`` maps ``"npcs"``, ``"bicycles"`` and ``"pedestrians"``
     to the ``SectionKind`` built for that section. ``timings`` are the map's
-    signal timings (``context.timings``); empty means signals are not evolved.
+    signal timings (``context.timings``); empty only for a map without signals,
+    since Apollo takes a signal it gets no light for as red. To keep the signals
+    fixed, use ``ScenarioOperatorConfig(evolve_signals=False)``.
     """
 
     def __init__(self, context: ScenarioContext, rules: ScenarioRules = ScenarioRules(), *,
@@ -139,7 +143,8 @@ def random_scenario(kinds: ScenarioKinds, rng: Random, config: ScenarioOperatorC
     A random ego, then each section drawn at random, its agents fitting the ego and the sections before it.
 
     The ego is drawn again until ``ego_space.poses`` accepts its route. Sections follow ``Scenario.SECTIONS``.
-    When ``kinds.timings`` is non-empty, the signal plans are drawn by ``random_signal_section``.
+    When ``kinds.timings`` is non-empty, the signal plans are drawn by ``random_signal_section``,
+    or are ``SignalSection.default`` when ``config.evolve_signals`` is False.
 
     :param ScenarioKinds kinds: Map kinds and the cross-type fit test.
     :param Random rng: Random source for the ego and the sections.
@@ -155,9 +160,11 @@ def random_scenario(kinds: ScenarioKinds, rng: Random, config: ScenarioOperatorC
             break
         except Exception:
             continue
-    scenario: Scenario = Scenario(ego)
+    scenario: Scenario = Scenario(ego, walk_network=kinds.context.walk_network.fingerprint)
     if kinds.timings:       # Plans first: complying agents replay under them.
-        scenario = _with(scenario, "signals", random_signal_section(kinds.timings, rng))
+        signals = (random_signal_section(kinds.timings, rng) if config.evolve_signals
+                   else SignalSection.default(kinds.timings))
+        scenario = _with(scenario, "signals", signals)
     for name in Scenario.SECTIONS:
         section: Section = random_section(kinds.of(name, scenario.signals), rng, config.sections[name],
                                           kinds.fits(scenario, name))

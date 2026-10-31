@@ -16,7 +16,6 @@ Cross-type constraints (``ScenarioRules``):
   drives the ego, so its pose is unknown and nothing further is checked.
 """
 
-import shapely
 import numpy as np
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterator, Mapping, Tuple
@@ -26,7 +25,7 @@ from .map_budget import MapBudget
 from .routing import InvalidRoute, RouteSpace
 from .sections import (
     queued, spawn_distance,
-    BicycleSection, Body, InvalidSection, NPCSection, PedestrianSection, Section, SectionRules, Spaces, _corners,
+    BicycleSection, Body, InvalidSection, NPCSection, PedestrianSection, Section, SectionRules, Spaces,
     first_overlap,
 )
 from .traffic_signal import InvalidSignalPlan, SignalSection, SignalTiming
@@ -43,7 +42,7 @@ class ScenarioRules:
     :param float spawn_clearance: Metres between an agent's first pose and the ego's start body.
     :param float ego_side_clearance: Metres between the ego and a lane-aware vehicle not in its queue.
     :param float ego_clear_time: Seconds after the ego's ``start_t`` during which
-        it is taken to stand at its start.
+        it is taken to stand at its start: until Apollo has driven it off its start body.
     :param float horizon: Seconds checked; the sections' grids use the same.
     :param float dt: Sampling step in seconds.
     """
@@ -56,8 +55,15 @@ class ScenarioRules:
     ego_side_clearance: float = 1.0
     """Metres between the ego and a lane-aware vehicle (NPC) that spawns beside
     it rather than in its queue: side by side in an adjacent lane is realistic."""
-    ego_clear_time: float = 2.0
-    """Seconds after the ego's ``start_t`` during which it is taken to stand at its start."""
+    ego_clear_time: float = 4.5
+    """Seconds after the ego's ``start_t`` during which it is taken to stand at its start,
+    so traffic must keep off its start body. Measured on Apollo 9 with Sim Control
+    (``apollo/audits/cyber_bridge/2026-10-15-routing/attempt2``, Borregas Ave): the
+    ego began to move 0.6 s after LaneFollow, had moved only 0.9 m at 2 s, and its
+    rear left its start body (one ``ego_length``) at 4.47 s. That run asked for
+    5 m/s; scenarios use Apollo's default cruise speed (11.18 m/s in
+    ``planning.conf``), which pulls away no slower, so 4.5 s errs long. Shorter
+    let a car queued behind run into an ego that had barely started."""
     horizon: float = 60.0
     """Seconds checked; the sections' grids use the same."""
     dt: float = 0.1
@@ -98,7 +104,9 @@ class ScenarioContext:
     :param RouteSpace bicycle_space: ``BicycleAgent.space(service)``.
     :param WalkNetwork walk_network: ``walk_network(service)``.
     :param Mapping[str, SignalTiming] timings: ``signal_timings(service)``, in control-unit order.
-        Empty (the default) for a map without signals or when signals are not evolved.
+        Leave it empty (the default) only for a map without signals: Apollo takes a
+        signal it gets no light for as red, while agents without plans ignore signals.
+        Signals that are not evolved keep ``SignalSection.default`` plans.
     """
     ego_space: RouteSpace
     """``RouteSpace(service, ADAgent.rules(...))``."""
@@ -109,7 +117,7 @@ class ScenarioContext:
     walk_network: WalkNetwork
     """``walk_network(service)``."""
     timings: Mapping[str, SignalTiming] = field(default_factory=dict)
-    """``signal_timings(service)``, in control-unit order; empty when signals are not evolved."""
+    """``signal_timings(service)``, in control-unit order; empty only for a map without signals."""
     budget: MapBudget | None = None
     """Per-map agent count caps; None derives them from the map size (``MapBudget.of``)."""
 
@@ -139,6 +147,9 @@ class Scenario:
     :param PedestrianSection pedestrians: Pedestrians.
     :param SignalSection signals: Traffic-signal plans. Side-mounted: not a body section, not in
         ``SECTIONS``, never checked for overlap.
+    :param str | None walk_network: ``WalkNetwork.fingerprint`` of the network the pedestrians' curb
+        points were drawn on, or None if not recorded. ``validate`` refuses pedestrians on a network
+        whose sidewalks have changed since (their points would name other places).
     """
     ego: ADAgent
     """The ADS instance under test."""
@@ -150,6 +161,8 @@ class Scenario:
     """Pedestrians."""
     signals: SignalSection = field(default_factory=SignalSection)
     """Traffic-signal plans; side-mounted, not in ``SECTIONS``."""
+    walk_network: str | None = field(default=None, compare=False)
+    """Fingerprint of the walk network the pedestrians were drawn on (``WalkNetwork.fingerprint``), or None."""
 
     SECTIONS = ("npcs", "bicycles", "pedestrians")
     """Section attribute names, in the order ``validate`` checks them."""
@@ -168,11 +181,15 @@ class Scenario:
         """
         Return a JSON-compatible representation.
 
-        :returns: A mapping of ``ego``, each section name and ``signals`` to its ``to_dict``.
+        :returns: A mapping of ``ego``, each section name and ``signals`` to its ``to_dict``, and
+            ``walk_network`` when recorded.
         :rtype: Dict
         """
-        return {"ego": self.ego.to_dict(), **{name: section.to_dict() for name, section in self.sections()},
+        data = {"ego": self.ego.to_dict(), **{name: section.to_dict() for name, section in self.sections()},
                 "signals": self.signals.to_dict()}
+        if self.walk_network is not None:
+            data["walk_network"] = self.walk_network
+        return data
 
     @classmethod
     def from_dict(cls, data: Dict) -> "Scenario":
@@ -189,7 +206,7 @@ class Scenario:
         signals = SignalSection.from_dict(data["signals"]) if "signals" in data else SignalSection()
         return cls(ADAgent.from_dict(data["ego"]), NPCSection.from_dict(data["npcs"]),
                    BicycleSection.from_dict(data["bicycles"]), PedestrianSection.from_dict(data["pedestrians"]),
-                   signals)
+                   signals, data.get("walk_network"))
 
     def validate(self, context: ScenarioContext, rules: ScenarioRules = ScenarioRules()) -> None:
         """
@@ -204,6 +221,11 @@ class Scenario:
             context.ego_space.poses(self.ego.route)
         except InvalidRoute as error:
             raise InvalidSection(f"ego: {error}") from error
+        if (self.walk_network is not None and self.pedestrians.agents
+                and self.walk_network != context.walk_network.fingerprint):
+            raise InvalidSection(f"pedestrians: drawn on walk network {self.walk_network}, not "
+                                 f"{context.walk_network.fingerprint}: the sidewalks changed, so their curb "
+                                 f"points name other places")
         for name, section in self.sections():
             try:
                 section.validate(context.of(section), MapBudget.of(context).rules(rules.section_rules(section.RULES)),

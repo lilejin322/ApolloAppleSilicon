@@ -13,7 +13,7 @@ Pedestrian wrappers supply compatible walk-network distance and point mapping.
 
 from dataclasses import replace
 from random import Random
-from typing import Dict, List, Sequence, Set, Tuple, TypeVar
+from typing import Callable, Dict, List, Sequence, Set, Tuple, TypeVar
 
 from ..scenario import InvalidRoute, RouteSpace, SpeedPoint, RiderType, VehicleType, WalkerType
 from ..scenario.replay import MAX_SPEED_POINTS, point_reference
@@ -335,7 +335,8 @@ def mut_speed_point(agent: Replayed, rng: Random, config: ReplayOperatorConfig,
     return with_profile(agent, profile)
 
 
-def mut_stop(agent: Replayed, rng: Random, config: ReplayOperatorConfig) -> Replayed | None:
+def mut_stop(agent: Replayed, rng: Random, config: ReplayOperatorConfig,
+             allows: Callable[[SpeedPoint], bool] | None = None) -> Replayed | None:
     """
     Turn an inner moving point into a stop, resume a stop, or step its dwell.
 
@@ -343,18 +344,21 @@ def mut_stop(agent: Replayed, rng: Random, config: ReplayOperatorConfig) -> Repl
     in ``[0, config.max_dwell]``; a resumed stop gets a uniform speed between
     ``min(config.min_speed, max_speed)`` and the agent's maximum, with zero dwell.
     Dwell steps use ``config.sigma_t`` and are clamped to the dwell bounds.
-    Only moving points between the first and last can become stops; all points
-    keep their map positions.
+    Only moving points between the first and last can become stops, and only
+    those ``allows`` accepts (where validation lets a stop lie, e.g.
+    ``NPCVehicleAgent.stop_allowed``); all points keep their map positions.
 
     :param Replayed agent: Agent whose stops or dwell times are mutated.
     :param Random rng: Random number generator used to select an action, point, and mutation value.
     :param ReplayOperatorConfig config: Configuration defining speed bounds, dwell bounds, and dwell step size.
-    :returns: The mutant, or ``None`` if there is no inner moving point or existing
-        stop, or the replacement profile is malformed.
+    :param Callable[[SpeedPoint], bool] | None allows: Whether a stop may lie at a point's position; None allows any.
+    :returns: The mutant, or ``None`` if there is no inner moving point that may stop and no
+        existing stop, or the replacement profile is malformed.
     :rtype: Replayed | None
     """
     profile: Tuple[SpeedPoint, ...] = agent.speed_profile
-    stoppable: List[int] = [index for index, point in enumerate(profile[:-1]) if point.speed > 0 and index > 0]
+    stoppable: List[int] = [index for index, point in enumerate(profile[:-1]) if point.speed > 0 and index > 0
+                            and (allows is None or allows(point))]
     stops: List[int] = [index for index, point in enumerate(profile) if point.speed == 0]
     actions: List[str] = (["stop"] if stoppable else []) + (["go", "dwell"] if stops else [])
     if not actions:

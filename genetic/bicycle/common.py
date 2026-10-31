@@ -15,10 +15,10 @@ from typing import ClassVar, Dict, List, Mapping, Sequence, Set, Tuple
 
 from ...scenario import RIDER_SPECS, BicycleAgent, InvalidRoute, LaneRoute, RiderType, RouteSpace
 from ...scenario.bicycle import PivotKey, starts_on_bike_lane
-from ...scenario.replay import ReplayTrajectory, SpeedPoint
+from ...scenario.replay import SpeedPoint
 from ...scenario.realism import RIDER_MIX, mapped_speed
 from ...utils import require_nonnegative
-from ..common import ReplayOperatorConfig
+from ..common import LaneRouteConfig, ReplayOperatorConfig, replay_acceptable
 
 GENES: Tuple[str, ...] = ("route", "turn_dwell", "rider_type", "speed_profile", "start_t")
 """Bicycle genes, in the order each call varies them: the route first, since
@@ -27,12 +27,12 @@ whose limits it must respect."""
 
 
 @dataclass(frozen=True)
-class BicycleOperatorConfig(ReplayOperatorConfig):
+class BicycleOperatorConfig(LaneRouteConfig, ReplayOperatorConfig):
     """
     Rates, weights, bounds, and step sizes for BicycleAgent crossover and mutation.
 
     Length bounds apply to the bicycle's replay path. Parameters below include
-    all fields inherited from ``ReplayOperatorConfig`` and ``OperatorConfig``;
+    all fields inherited from ``LaneRouteConfig``, ``ReplayOperatorConfig``, and ``OperatorConfig``;
     bicycle-specific defaults are noted where those fields are overridden.
 
     :param float min_length: Minimum accepted replay-path length in metres; defaults to 30.
@@ -166,14 +166,7 @@ def acceptable(space: RouteSpace, agent: BicycleAgent, config: BicycleOperatorCo
         ``InvalidRoute`` or any length or timing bound is violated.
     :rtype: bool
     """
-    if agent.start_t > config.max_start_t:
-        return False
-    try:
-        trajectory: ReplayTrajectory = agent.trajectory(space)
-    except InvalidRoute:
-        return False
-    return (config.min_length <= trajectory.path.length <= config.max_length
-            and (not config.min_arrival_t or agent.start_t < config.min_arrival_t <= trajectory.arrival_t))
+    return replay_acceptable(agent, lambda: agent.trajectory(space), config)
 
 
 def keeps_start(space: RouteSpace, candidate: BicycleAgent, parent: BicycleAgent,
@@ -314,7 +307,7 @@ def rebalance_rider_types(population: Sequence[BicycleAgent], space: RouteSpace,
             child = None
         if child is None and redraw and donors:
             index: int = donors[0]
-            child = _fresh(space, RiderType[wanted], rng, config, starts_on_bike_lane(space, population[index].route))
+            child = fresh_agent(space, RiderType[wanted], rng, config, starts_on_bike_lane(space, population[index].route))
             if child is not None:
                 child = replace(child, lineage_id=population[index].lineage_id)   # Same slot, same lineage.
         if child is None:
@@ -327,32 +320,37 @@ def rebalance_rider_types(population: Sequence[BicycleAgent], space: RouteSpace,
         population[index] = child
 
 
-def _fresh(space: RouteSpace, rider_type: RiderType, rng: Random, config: BicycleOperatorConfig,
-           on_bike_lane: bool, attempts: int = 20) -> BicycleAgent | None:
+def fresh_agent(space: RouteSpace, rider_type: RiderType, rng: Random, config: BicycleOperatorConfig,
+                on_bike_lane: bool | None = None, attempts: int = 20) -> BicycleAgent | None:
     """
-    A random acceptable agent of ``rider_type`` starting on a bike lane or the road, or None.
+    A random bicycle of ``rider_type`` drawn within ``config``'s bounds and accepted by ``acceptable``.
+
+    Every draw of a new bicycle (generation, a section's fill and count mutation, rebalancing)
+    goes through here, so a new agent always passes the checks the operators apply.
 
     :param RouteSpace space: Bicycle route space used to generate and validate agents.
     :param RiderType rider_type: Required rider type for the new agent.
     :param Random rng: Random source used by ``BicycleAgent.random``.
-    :param BicycleOperatorConfig config: Supplies generation length bounds, maximum
-        start time, and minimum speed, plus the bounds checked by ``acceptable``.
-    :param bool on_bike_lane: Require a bike-lane start when True, or a road start
-        when False; the generated route's start kind is checked explicitly.
-    :param int attempts: Maximum calls to ``BicycleAgent.random``; defaults to 20.
-        Nonpositive values make no attempts and return None.
-    :returns: The first acceptable agent with the required start-lane kind, or None
-        if attempts are exhausted or generation raises ``RuntimeError``. A generation
-        ``RuntimeError`` stops the search immediately.
+    :param BicycleOperatorConfig config: Length, speed, dwell, turn-wait, start and arrival bounds.
+    :param bool | None on_bike_lane: Require a bike-lane start (True) or a road start (False);
+        None keeps ``BicycleAgent.random``'s default share.
+    :param int attempts: Draws before giving up; one draw already retries routes internally.
+    :returns: The first acceptable agent with the required start kind, or None if the draws are
+        exhausted or generation raises ``RuntimeError`` (it already retried internally).
     :rtype: BicycleAgent | None
     """
+    share = {} if on_bike_lane is None else {"bike_lane_start_share": float(on_bike_lane)}
     for _ in range(attempts):
         try:
-            agent: BicycleAgent = BicycleAgent.random(space, rng, rider_type=rider_type, max_start_t=config.max_start_t,
-                                        min_length=config.min_length, max_length=config.max_length,
-                                        min_speed=config.min_speed, bike_lane_start_share=float(on_bike_lane))
+            agent: BicycleAgent = BicycleAgent.random(
+                space, rng, rider_type=rider_type, max_start_t=config.max_start_t, min_length=config.min_length,
+                max_length=config.max_length, max_dwell=config.max_dwell, max_turn_dwell=config.max_turn_dwell,
+                min_speed=config.min_speed, min_arrival_t=config.min_arrival_t, **share)
+        except (InvalidRoute, ValueError):
+            continue
         except RuntimeError:
             return None
-        if acceptable(space, agent, config) and starts_on_bike_lane(space, agent.route) == on_bike_lane:
+        if acceptable(space, agent, config) and (on_bike_lane is None
+                                                 or starts_on_bike_lane(space, agent.route) == on_bike_lane):
             return agent
     return None

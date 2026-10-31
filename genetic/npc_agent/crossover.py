@@ -96,7 +96,7 @@ def cx_lane_change_s(first: NPCVehicleAgent, second: NPCVehicleAgent) -> NPCVehi
 
 def cx_vehicle_type(first: NPCVehicleAgent, second: NPCVehicleAgent, spaces: Spaces) -> NPCVehicleAgent | None:
     """
-    Give ``first`` the vehicle type of ``second``, with speeds clamped to that type's maximum.
+    Give ``first`` the vehicle type of ``second``, its speeds mapped onto that type's prior (``retyped``).
 
     :param NPCVehicleAgent first: Parent providing the route, speeds, and other attributes.
     :param NPCVehicleAgent second: Parent providing the vehicle type.
@@ -106,7 +106,7 @@ def cx_vehicle_type(first: NPCVehicleAgent, second: NPCVehicleAgent, spaces: Spa
     """
     if first.vehicle_type is second.vehicle_type or second.vehicle_type not in spaces:
         return None
-    return retyped(first, second.vehicle_type)
+    return retyped(first, second.vehicle_type, spaces)
 
 
 def cx_npc_agent(first: NPCVehicleAgent, second: NPCVehicleAgent, spaces: Spaces, rng: Random,

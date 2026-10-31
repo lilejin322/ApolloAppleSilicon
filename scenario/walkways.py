@@ -23,7 +23,8 @@ them into named elements (``WalkRoute.lanes``) and measures them, as
 ``RouteSpace`` does for lane routes.
 """
 
-import weakref
+import hashlib
+import json
 from dataclasses import dataclass, replace
 from enum import Enum
 from math import atan2, cos, hypot, isfinite, pi, radians, sin
@@ -37,11 +38,10 @@ from shapely.geometry.base import BaseGeometry
 from shapely.ops import substring, unary_union
 
 from ..map import MapService
-from ..map.geometry import curve_to_line, normalize_angle, polygon_to_shape
+from ..map.geometry import curve_to_line, normalize_angle, valid_area
 from ..message.descriptor import DescriptorBundle
 from .routing import InvalidRoute, junction_lanes, offset_line
-from typing import Dict, FrozenSet, List, Mapping, Tuple
-from google.protobuf.message import Message
+from typing import Dict, FrozenSet, List, Mapping, Optional, Tuple
 
 SIDEWALK_OFFSET = 1.5
 """Metres from the curb (the road surface's edge) to the line walkers follow
@@ -127,7 +127,6 @@ TURN_BACK_SHARE = 0.6
 _STRAY = 0.5
 """Metres of a line tolerated outside an area it must keep to."""
 _CACHE_SIZE = 4096
-_NETWORKS: "weakref.WeakKeyDictionary[MapService, WalkNetwork]" = weakref.WeakKeyDictionary()
 
 
 class ExcursionKind(Enum):
@@ -514,20 +513,15 @@ def _parts(geometry: BaseGeometry) -> List:
     return [] if geometry.is_empty else list(getattr(geometry, "geoms", [geometry]))
 
 
-def _polygons(table: Mapping[str, Message]) -> Dict[str, Polygon]:
+def _areas(areas: Mapping[str, Optional[BaseGeometry]]) -> Dict[str, BaseGeometry]:
     """
-    The valid polygons of a junction or crosswalk table, by ID; objects without a polygon are left out.
+    The usable areas of ``MapRelations.junction_areas`` or ``crosswalk_areas``, by ID.
 
-    :param Mapping[str, Message] table: Map objects keyed by ID, each providing a polygon.
-    :returns: Valid polygonal geometries keyed by map object ID.
-    :rtype: Dict[str, Polygon]
+    :param Mapping[str, Optional[BaseGeometry]] areas: Areas by map object ID; None where unusable.
+    :returns: Valid polygonal geometries keyed by map object ID; objects without an area left out.
+    :rtype: Dict[str, BaseGeometry]
     """
-    shapes = {}
-    for key, item in table.items():
-        shape = polygon_to_shape(item.polygon)
-        if shape is not None:
-            shapes[key] = shape if shape.is_valid else shape.buffer(0)
-    return shapes
+    return {key: area for key, area in areas.items() if area is not None}
 
 
 def _lane_polygons(service: MapService) -> List[Polygon]:
@@ -545,7 +539,7 @@ def _lane_polygons(service: MapService) -> List[Polygon]:
         except ValueError:
             continue
         polygon = Polygon(list(left.coords) + list(right.coords)[::-1])
-        polygon = polygon if polygon.is_valid else polygon.buffer(0)
+        polygon = valid_area(polygon)
         polygons.extend(part for part in _parts(polygon) if part.area > 0)
     return polygons
 
@@ -646,7 +640,7 @@ class WalkNetwork:
     _diagonals: Dict[str, List]
     """Cached feasible diagonal landing pairs by junction ID."""
     _checks: Dict
-    """Bounded cache of excursion and walk-element validation results."""
+    """Bounded cache of excursion checks (the crossing used, or the ``InvalidRoute``) and walk elements."""
     _gate_tree: STRtree
     """Spatial index over ``edge_gates``."""
 
@@ -662,8 +656,8 @@ class WalkNetwork:
         self.service = service
         lanes = _lane_polygons(service)
         surface = unary_union(lanes).buffer(SURFACE_CLOSING).buffer(-SURFACE_CLOSING)
-        self.junctions = _polygons(service.junction_table)
-        crosswalks = _polygons(service.crosswalk_table)
+        self.junctions = _areas(service.relations.junction_areas)
+        crosswalks = _areas(service.relations.crosswalk_areas)
         junction_area = unary_union(list(self.junctions.values())) if self.junctions else Polygon()
         crosswalk_area = unary_union(list(crosswalks.values())) if crosswalks else Polygon()
         filled, refuges, parts = [], [], []
@@ -710,6 +704,23 @@ class WalkNetwork:
         self._checks: Dict = {}
         self.edge_gates = self._edge_gates()
         self._gate_tree = STRtree(list(self.edge_gates))
+        self.fingerprint = self._fingerprint()
+
+    def _fingerprint(self) -> str:
+        """
+        A digest of the sidewalk rings: their IDs, lengths and points at eighths of their length,
+        to the centimetre. A ``CurbPoint`` is a ring and an arc length on these derived rings, so
+        it means the same place only on a network with the same fingerprint.
+
+        :returns: 16 hex digits.
+        :rtype: str
+        """
+        rings = []
+        for key in self._sidewalk_ids:
+            line = self.sidewalks[key]
+            points = [line.interpolate(k / 8, normalized=True) for k in range(8)]
+            rings.append([key, round(line.length, 2)] + [[round(p.x, 2), round(p.y, 2)] for p in points])
+        return hashlib.sha1(json.dumps(rings).encode()).hexdigest()[:16]
 
     def _edge_gates(self) -> Tuple[LineString, ...]:
         """
@@ -907,7 +918,9 @@ class WalkNetwork:
         :returns: The curb point at ``s`` metres along a ring, wrapped into ``[0, length)``.
         :rtype: CurbPoint
         """
-        return CurbPoint(sidewalk, s % self.ring_length(sidewalk))
+        length = self.ring_length(sidewalk)
+        wrapped = s % length
+        return CurbPoint(sidewalk, 0.0 if wrapped >= length else wrapped)   # (-1e-17) % L == L in floats
 
     def point(self, curb: CurbPoint) -> Point:
         """
@@ -1072,32 +1085,75 @@ class WalkNetwork:
         :param CurbPoint exit: Excursion exit position on a sidewalk.
         :raises InvalidRoute: If the entry and exit do not satisfy the requested excursion kind.
         """
+        self.crossing(kind, entry, exit)
+
+    def crossing(self, kind: ExcursionKind, entry: CurbPoint, exit: CurbPoint) -> Crossing | None:
+        """
+        The marked crossing an excursion uses: the one a ``CROSSWALK`` excursion runs on, or the
+        one a ``NEAR_CROSSWALK`` excursion runs beside. The same match ``check_excursion`` makes.
+
+        :param ExcursionKind kind: Excursion category whose geometry or constraints apply.
+        :param CurbPoint entry: Excursion entry position on a sidewalk.
+        :param CurbPoint exit: Excursion exit position on a sidewalk.
+        :returns: That crossing; ``None`` for mid-block, diagonal and roadside excursions.
+        :rtype: Crossing | None
+        :raises InvalidRoute: If the entry and exit do not satisfy the requested excursion kind.
+        """
         key = (kind, entry, exit)
         if key not in self._checks:
-            error = None
             try:
-                self._check_excursion(kind, entry, exit)
+                value = self._check_excursion(kind, entry, exit)
             except InvalidRoute as problem:
-                error = str(problem)
+                value = problem
             if len(self._checks) >= _CACHE_SIZE:
                 del self._checks[next(iter(self._checks))]
-            self._checks[key] = error
-        if self._checks[key] is not None:
-            raise InvalidRoute(self._checks[key])
+            self._checks[key] = value
+        value = self._checks[key]
+        if isinstance(value, InvalidRoute):
+            raise InvalidRoute(str(value))
+        return value
 
-    def _check_excursion(self, kind: ExcursionKind, entry: CurbPoint, exit: CurbPoint) -> None:
+    def crossing_entries(self, route: WalkRoute) -> Tuple[Tuple[Crossing, float], ...]:
+        """
+        Where a walk steps off the curb onto a marked crossing or beside one (``crossing``).
+
+        :param WalkRoute route: Walk to inspect.
+        :returns: ``(crossing, walked distance at which the excursion enters the road)`` for each such
+            excursion, in walking order; walked distances are ``WalkFrame`` metres. Cached per walk.
+        :rtype: Tuple[Tuple[Crossing, float], ...]
+        :raises InvalidRoute: If the walk is invalid.
+        """
+        key = ("entries", route)
+        if key not in self._checks:
+            frame = self.frame(route)
+            entries = []
+            for index, excursion in enumerate(route.excursions):
+                crossing = self.crossing(excursion.kind, excursion.entry, excursion.exit)
+                if crossing is None:
+                    continue
+                name = f"x{index}"
+                curb = self.curb_distance(LineString(frame.elements[frame.index[name]].coords))
+                entries.append((crossing, frame.distance(name, curb)))
+            if len(self._checks) >= _CACHE_SIZE:
+                del self._checks[next(iter(self._checks))]
+            self._checks[key] = tuple(entries)
+        return self._checks[key]
+
+    def _check_excursion(self, kind: ExcursionKind, entry: CurbPoint, exit: CurbPoint) -> Crossing | None:
         """
         Validate the geometry and kind-specific constraints of one excursion.
 
         :param ExcursionKind kind: Excursion category whose geometry or constraints apply.
         :param CurbPoint entry: Excursion entry position on a sidewalk.
         :param CurbPoint exit: Excursion exit position on a sidewalk.
+        :returns: The marked crossing a crosswalk or near-crosswalk excursion uses, else ``None``.
+        :rtype: Crossing | None
         :raises InvalidRoute: If the excursion is too short, misses the road, cuts through a block, or fails its kind-specific check.
         """
         line = self.excursion_line(kind, entry, exit)
         if kind is ExcursionKind.ROADSIDE:
             self._check_roadside(entry, exit, line)
-            return
+            return None
         if line.length < MIN_CROSSING:
             raise InvalidRoute(f"crossing of {line.length:.2f} m is shorter than {MIN_CROSSING} m")
         # Every lane piece the clearance test could measure from, not only those the line touches.
@@ -1113,9 +1169,9 @@ class WalkNetwork:
             ExcursionKind.MID_BLOCK: self._check_mid_block,
             ExcursionKind.DIAGONAL: self._check_diagonal,
         }[kind]
-        check(entry, exit, line, on_road)
+        return check(entry, exit, line, on_road)
 
-    def _check_crosswalk(self, entry: CurbPoint, exit: CurbPoint, line: LineString, on_road: BaseGeometry) -> None:
+    def _check_crosswalk(self, entry: CurbPoint, exit: CurbPoint, line: LineString, on_road: BaseGeometry) -> Crossing:
         """
         Require the crossing to connect matching landings and stay inside a marked crosswalk.
 
@@ -1123,6 +1179,8 @@ class WalkNetwork:
         :param CurbPoint exit: Excursion exit position on a sidewalk.
         :param LineString line: Line geometry in map metres.
         :param BaseGeometry on_road: Part of the crossing geometry lying on road or refuge surfaces.
+        :returns: The crossing it runs on.
+        :rtype: Crossing
         :raises InvalidRoute: If the crossing cannot be matched to compatible marked-crosswalk geometry.
         """
         a, b = self.point(entry), self.point(exit)
@@ -1135,10 +1193,10 @@ class WalkNetwork:
                 if abs(crossing.lateral(a)) > half + 1e-6 or abs(crossing.lateral(b)) > half + 1e-6:
                     continue
                 if on_road.difference(crossing.polygon.buffer(CROSSWALK_TOLERANCE)).length <= _STRAY:
-                    return
+                    return crossing
         raise InvalidRoute("the crossing does not run inside a crosswalk")
 
-    def _check_near_crosswalk(self, entry: CurbPoint, exit: CurbPoint, line: LineString, on_road: BaseGeometry) -> None:
+    def _check_near_crosswalk(self, entry: CurbPoint, exit: CurbPoint, line: LineString, on_road: BaseGeometry) -> Crossing:
         """
         Require the crossing to run beside and roughly parallel to a marked crosswalk.
 
@@ -1146,6 +1204,8 @@ class WalkNetwork:
         :param CurbPoint exit: Excursion exit position on a sidewalk.
         :param LineString line: Line geometry in map metres.
         :param BaseGeometry on_road: Part of the crossing geometry lying on road or refuge surfaces.
+        :returns: The crossing it runs beside.
+        :rtype: Crossing
         :raises InvalidRoute: If the crossing is not suitably positioned beside a marked crosswalk.
         """
         middle = on_road.interpolate(0.5, normalized=True) if on_road.length else line.interpolate(0.5, normalized=True)
@@ -1156,7 +1216,7 @@ class WalkNetwork:
                 continue
             outside = abs(crossing.lateral(middle)) - crossing.width / 2
             if NEAR_RANGE[0] <= outside <= NEAR_RANGE[1] and 0 <= crossing.along(middle) <= crossing.axis.length:
-                return
+                return crossing
         raise InvalidRoute("the crossing is not beside a crosswalk")
 
     def _check_mid_block(self, entry: CurbPoint, exit: CurbPoint, line: LineString, on_road: BaseGeometry) -> None:
@@ -1769,8 +1829,4 @@ def walk_network(service: MapService) -> WalkNetwork:
     :rtype: WalkNetwork
     :raises RuntimeError: If the map was loaded without its routing graph or lane index.
     """
-    network = _NETWORKS.get(service)
-    if network is None:
-        network = WalkNetwork(service)
-        _NETWORKS[service] = network
-    return network
+    return service.derived("walk_network", WalkNetwork)

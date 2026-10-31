@@ -17,7 +17,7 @@ from typing import Dict, Iterable, Iterator, List, Sequence, Set, Tuple, TypeAli
 from networkx import DiGraph
 
 from ..scenario.routing import InvalidRoute, LaneRoute, RouteSpace, Transition, lane_changes, RouteLeg
-from .common import OperatorConfig, gauss_step
+from .common import LaneRouteConfig, OperatorConfig, gauss_step
 
 BRIDGE_LENGTH_SLACK: float = 0.1
 """Share of the longer parent by which a bridged child's target length may leave the parents' range."""
@@ -80,7 +80,7 @@ def cx_shared_lane(first: LaneRoute, second: LaneRoute, space: RouteSpace, rng: 
 
 
 def cx_bridge(first: LaneRoute, second: LaneRoute, space: RouteSpace, rng: Random,
-              config: OperatorConfig = OperatorConfig(), *,
+              config: LaneRouteConfig = LaneRouteConfig(), *,
               lane_change_s: Tuple[float, ...] | None = None) -> LaneRoute | None:
     """
     Join ``first``'s head to ``second``'s tail through a lane path between them.
@@ -99,7 +99,7 @@ def cx_bridge(first: LaneRoute, second: LaneRoute, space: RouteSpace, rng: Rando
     :param LaneRoute second: Parent providing the route tail and end position.
     :param RouteSpace space: Route space used to find connecting paths and evaluate lengths.
     :param Random rng: Random number generator used for target length, tie-breaking, and path selection.
-    :param OperatorConfig config: Configuration defining reachability distance,
+    :param LaneRouteConfig config: Configuration defining reachability distance,
         candidate path count, and optional parental length bounds.
     :param Tuple[float, ...] | None lane_change_s: Lane-change start positions on
         ``first``'s source lanes, in metres, used to estimate lane entries and
@@ -154,7 +154,7 @@ def cx_bridge(first: LaneRoute, second: LaneRoute, space: RouteSpace, rng: Rando
 
 
 def mut_reroute(route: LaneRoute, space: RouteSpace, rng: Random,
-                config: OperatorConfig = OperatorConfig(), *,
+                config: LaneRouteConfig = LaneRouteConfig(), *,
                 lane_change_s: Tuple[float, ...] | None = None) -> LaneRoute | None:
     """
     Replace the stretch between two lanes of the route with another lane path
@@ -166,7 +166,7 @@ def mut_reroute(route: LaneRoute, space: RouteSpace, rng: Random,
     :param LaneRoute route: Route whose randomly selected stretch is replaced.
     :param RouteSpace space: Route space used to find alternatives and measure stretch lengths.
     :param Random rng: Random number generator used to select the stretch and a replacement path.
-    :param OperatorConfig config: Configuration defining path search limits,
+    :param LaneRouteConfig config: Configuration defining path search limits,
         candidate path count, and the maximum relative detour.
     :param Tuple[float, ...] | None lane_change_s: Lane-change start positions on
         the route's source lanes, in metres, used to determine lane entries and
@@ -312,7 +312,7 @@ def mut_extend_or_truncate(route: LaneRoute, space: RouteSpace, rng: Random,
 
 
 def mut_lane_change(route: LaneRoute, space: RouteSpace, rng: Random,
-                    config: OperatorConfig = OperatorConfig(), *,
+                    config: LaneRouteConfig = LaneRouteConfig(), *,
                     lane_change_s: Tuple[float, ...] | None = None,
                     acceptance: float | None = None) -> LaneRoute | None:
     """
@@ -336,7 +336,7 @@ def mut_lane_change(route: LaneRoute, space: RouteSpace, rng: Random,
     :param LaneRoute route: Route whose lane-change count is mutated.
     :param RouteSpace space: Route space supplying neighbouring lanes, paths, and endpoint constraints.
     :param Random rng: Random number generator used for action, lane, path, and continuation selection.
-    :param OperatorConfig config: Configuration defining connecting-path limits and lane-change acceptance odds.
+    :param LaneRouteConfig config: Configuration defining connecting-path limits and lane-change acceptance odds.
     :param Tuple[float, ...] | None lane_change_s: Existing lane-change start positions
         on source lanes, in metres, or ``None`` for default placement.
     :param float | None acceptance: Uniform draw in [0, 1) reused across mutation
@@ -368,7 +368,7 @@ def mut_lane_change(route: LaneRoute, space: RouteSpace, rng: Random,
     return child
 
 
-def _insert_lane_change(route: LaneRoute, space: RouteSpace, rng: Random, config: OperatorConfig,
+def _insert_lane_change(route: LaneRoute, space: RouteSpace, rng: Random, config: LaneRouteConfig,
                         i: int, neighbor: str, *,
                         lane_change_s: Tuple[float, ...] | None = None) -> LaneRoute | None:
     """
@@ -380,7 +380,7 @@ def _insert_lane_change(route: LaneRoute, space: RouteSpace, rng: Random, config
     :param LaneRoute route: Route receiving the lane change.
     :param RouteSpace space: Route space supplying transitions, paths, and endpoint constraints.
     :param Random rng: Random number generator used for rejoin and continuation choices.
-    :param OperatorConfig config: Configuration defining connecting-path search limits and candidate count.
+    :param LaneRouteConfig config: Configuration defining connecting-path search limits and candidate count.
     :param int i: Index of the source lane in ``route``.
     :param str neighbor: Neighbouring lane reached by the inserted lane change.
     :param Tuple[float, ...] | None lane_change_s: Existing lane-change start positions
@@ -410,14 +410,12 @@ def _insert_lane_change(route: LaneRoute, space: RouteSpace, rng: Random, config
     # far as the route did (ending right on the neighbour truncated it).
     remaining: float = _cumulative(space, route, lane_change_s)[-1] - _cumulative(space, route, lane_change_s)[i]
     tail: Tuple[str, ...]
-    end_s: float | None
+    end_s: float
     tail, steps, end_s = _drive_on(space, rng, lanes[:i + 1] + (neighbor,), remaining)
-    if end_s is None:
-        return None
-    return _route(tail, transitions[:i] + (step,) + steps, route.start_s, end_s)
+    return _ended(space, _route(tail, transitions[:i] + (step,) + steps, route.start_s, end_s), end_s)
 
 
-def _remove_lane_change(route: LaneRoute, space: RouteSpace, rng: Random, config: OperatorConfig,
+def _remove_lane_change(route: LaneRoute, space: RouteSpace, rng: Random, config: LaneRouteConfig,
                         i: int, *, lane_change_s: Tuple[float, ...] | None = None) -> LaneRoute | None:
     """
     Replace a stretch with fewer lane changes, or continue forward before the change.
@@ -428,7 +426,7 @@ def _remove_lane_change(route: LaneRoute, space: RouteSpace, rng: Random, config
     :param LaneRoute route: Route whose lane-change stretch is replaced.
     :param RouteSpace space: Route space supplying connecting paths and forward continuation.
     :param Random rng: Random number generator used for rejoin, path, and continuation choices.
-    :param OperatorConfig config: Configuration defining connecting-path search limits and candidate count.
+    :param LaneRouteConfig config: Configuration defining connecting-path search limits and candidate count.
     :param int i: Source-lane index of the lane change to remove.
     :param Tuple[float, ...] | None lane_change_s: Existing lane-change start positions
         in metres, or ``None`` for default placement.
@@ -451,29 +449,27 @@ def _remove_lane_change(route: LaneRoute, space: RouteSpace, rng: Random, config
     remaining: float = _cumulative(space, route, lane_change_s)[-1] - _cumulative(space, route, lane_change_s)[i]
     tail: Tuple[str, ...]
     steps: Tuple[Transition, ...]
-    end_s: float | None
+    end_s: float
     tail, steps, end_s = _drive_on(space, rng, lanes[:i + 1], remaining)
-    if end_s is None:
-        return None
-    return _route(tail, transitions[:i] + steps, route.start_s, end_s)
+    return _ended(space, _route(tail, transitions[:i] + steps, route.start_s, end_s), end_s)
 
 
 def _drive_on(space: RouteSpace, rng: Random, lanes: Sequence[str], remaining: float,
-              ) -> Tuple[Tuple[str, ...], Tuple[Transition, ...], float | None]:
+              ) -> Tuple[Tuple[str, ...], Tuple[Transition, ...], float]:
     """
     Continue a lane sequence through forward successors for approximately the requested distance.
 
     Measure ``remaining`` from the start of the input sequence's last lane.
-    Stop at that distance or when no unvisited forward successor is available,
-    then choose the nearest allowed endpoint if the space restricts endpoints.
+    Stop at that distance or when no unvisited forward successor is available.
+    The returned position is the raw one: callers repair it on the whole route (``_ended``).
 
     :param RouteSpace space: Route space supplying lane lengths, forward edges, and endpoint ranges.
     :param Random rng: Random number generator used to select forward successors.
     :param Sequence[str] lanes: Nonempty lane sequence to continue without repeating lanes.
     :param float remaining: Desired distance from the start of the last input lane, in metres.
     :returns: The complete lane Tuple, transitions added after the input sequence,
-        and final lane position in metres, or ``None`` for that position if no endpoint is allowed.
-    :rtype: Tuple[Tuple[str, ...], Tuple[Transition, ...], float | None]
+        and the final lane position in metres, clamped to the lane.
+    :rtype: Tuple[Tuple[str, ...], Tuple[Transition, ...], float]
     """
     steps: List[Transition]
     lanes, steps = list(lanes), []
@@ -485,9 +481,21 @@ def _drive_on(space: RouteSpace, rng: Random, lanes: Sequence[str], remaining: f
         remaining -= space.lane_length(lanes[-1])
         lanes.append(rng.choice(options))
         steps.append(Transition.FORWARD)
-    s: float = min(max(remaining, 0.0), space.lane_length(lanes[-1]))
-    end_s: float | None = space.nearest_endpoint(lanes[-1], s) if space.restricts_endpoints else s
-    return tuple(lanes), tuple(steps), end_s
+    return tuple(lanes), tuple(steps), min(max(remaining, 0.0), space.lane_length(lanes[-1]))
+
+
+def _ended(space: RouteSpace, route: LaneRoute | None, s: float) -> LaneRoute | None:
+    """
+    ``route`` with its end at the allowed position nearest to ``s`` (``RouteSpace.nearest_end``).
+
+    :param RouteSpace space: Route space supplying the allowed ends.
+    :param LaneRoute | None route: Route to end, or ``None``.
+    :param float s: Desired end position on its last lane, in metres.
+    :returns: The ended route, or ``None`` if ``route`` is ``None`` or its last lane allows no end.
+    :rtype: LaneRoute | None
+    """
+    end_s: float | None = None if route is None else space.nearest_end(route, s)
+    return None if end_s is None else replace(route, end_s=end_s)
 
 
 def mut_s(route: LaneRoute, space: RouteSpace, rng: Random,
@@ -496,7 +504,10 @@ def mut_s(route: LaneRoute, space: RouteSpace, rng: Random,
     Move the start s, the end s, or both by a normal step, staying on their lanes.
 
     Where the space keeps endpoints away from junctions, a step that lands too
-    close to one moves to the nearest allowed position on the lane.
+    close to one moves to the nearest allowed position on the lane. The end then
+    moves, as little as it must, to stay an allowed end of the mutated route
+    (``RouteSpace.nearest_end``): beyond where it enters its last lane, which a
+    later start can delay.
 
     :param LaneRoute route: Route whose endpoint positions are mutated.
     :param RouteSpace space: Route space supplying lane lengths and allowed endpoint positions.
@@ -513,11 +524,13 @@ def mut_s(route: LaneRoute, space: RouteSpace, rng: Random,
         start_s = gauss_step(rng, start_s, config.sigma_s, space.lane_length(route.lanes[0]))
         if space.restricts_endpoints:
             start_s = space.nearest_endpoint(route.lanes[0], start_s)
+    if start_s is None:
+        return None
     if which in ("end", "both"):
         end_s = gauss_step(rng, end_s, config.sigma_s, space.lane_length(route.lanes[-1]))
-        if space.restricts_endpoints:
-            end_s = space.nearest_endpoint(route.lanes[-1], end_s)
-    if start_s is None or end_s is None:
+    # A later start delays the earliest lane change, which can move the last lane's entry past the end.
+    end_s = space.nearest_end(replace(route, start_s=start_s), end_s)
+    if end_s is None:
         return None
     return replace(route, start_s=start_s, end_s=end_s)
 
@@ -597,7 +610,7 @@ def _entries(space: RouteSpace, route: LaneRoute, lane_change_s: Tuple[float, ..
     return [leg.start_s for leg in space.legs(route, lane_change_s=lane_change_s)]
 
 
-def _paths(space: RouteSpace, config: OperatorConfig, source: str, target: str, entry_s: float,
+def _paths(space: RouteSpace, config: LaneRouteConfig, source: str, target: str, entry_s: float,
            *avoid: Iterable[str], k: int | None = None) -> List[Path]:
     """
     Find cheap connecting paths that avoid all supplied lane collections.
@@ -606,7 +619,7 @@ def _paths(space: RouteSpace, config: OperatorConfig, source: str, target: str, 
     paths intersecting ``avoid``. Discarded paths are not replaced by further searches.
 
     :param RouteSpace space: Route space used to search for lane paths.
-    :param OperatorConfig config: Configuration defining default candidate count and maximum path cost.
+    :param LaneRouteConfig config: Configuration defining default candidate count and maximum path cost.
     :param str source: Starting lane ID.
     :param str target: Destination lane ID.
     :param float entry_s: Entry position on the source lane, in metres.

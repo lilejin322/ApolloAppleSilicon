@@ -191,7 +191,7 @@ def mut_bicycle(agent: BicycleAgent, space: RouteSpace, rng: Random,
         "rider_type": rider_type,
         "speed": lambda child: mut_speed(child, rng, config, space),
         "speed_point": lambda child: mut_speed_point(child, rng, config, space, point_action),
-        "stop": lambda child: mut_stop(child, rng, config),
+        "stop": lambda child: mut_stop(child, rng, config, allows=child.stop_rule(space)),
         "drive_style": lambda child: mut_drive_style(child, rng),
         "start_t": lambda child: mut_start_t(child, rng, config),
     }

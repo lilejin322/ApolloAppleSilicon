@@ -8,34 +8,37 @@ lane: the curb-side driving lane (``curb_lanes``), near its right edge
 (``BIKE_LANE_START_SHARE``) and may carry on along the road where it ends;
 on maps without, every route rides the road. Its route, the waits of its two-stage
 left turns, its rider type, its speed profile and its start time are genes.
-Like an NPC vehicle it ignores signals and the ego: it waits at its start
-pose until ``start_t``, follows its speed profile within the rider's limits,
-stops at each pivot of its connectors for its wait, and stops at the end of
-its route, where it stays. A bicycle manager will publish ``state_at(t)``.
+Like an NPC vehicle it ignores the ego: it waits at its start pose until
+``start_t``, follows its speed profile within the rider's limits, stops at each
+pivot of its connectors for its wait, and stops at the end of its route, where it
+stays. With ``obeys_signals`` it also waits at reds: stop lines of road lanes, and
+on a connector across a signalised junction the light of the car movement beside
+it (``signal_compliance``). ``manager/obstacle_manager.py`` publishes ``state_at(t)``.
 """
 
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from random import Random
+from functools import lru_cache
 from types import MappingProxyType
-from typing import Any, Iterable, Mapping, Dict, FrozenSet, List, Set, Tuple, Self
+from typing import Any, Callable, Iterable, Mapping, Dict, FrozenSet, List, Set, Tuple, Self
 
 from .bike_connectors import DEFAULT_KINDS, ConnectorKind, bike_connectors
 from .obstacle_ids import BICYCLE_ID_BASE, check_id, new_lineage_id
-from .signal_compliance import COMPLIANCE_RATES, active, comply, crosswalk_stops, lane_signal_stops
+from .signal_compliance import COMPLIANCE_RATES, active, comply, connector_signal_stops, lane_signal_stops
 from .replay import (
-    ReplayLayout, ReplayTrajectory, RouteFrame, Span, SpeedPoint, anchored, check_profile, check_turning_radius,
-    curvature_spans, drawn_speeds, placed_stops, random_draws, rebased, refit_end, replay_layout, replay_path, speed_grid,
+    arrives_in_window, ReplayLayout, ReplayTrajectory, RouteFrame, Span, SpeedPoint, anchored, check_profile, check_turning_radius,
+    LENGTH_FITS, curvature_spans, drawn_speeds, length_target, memo_layout, placed_stops, random_draws, rebased,
+    refit_end, replay_layout, replay_path,
+    speed_grid,
 )
-from .traffic_constraints import check_footprint, check_stops
+from .traffic_constraints import check_footprint, check_stops, stop_blocks, stop_problem
 from .realism import RIDER_MIX, comfort_limits, draw_type
 from .routing import ENDPOINT_JUNCTION_MARGIN, InvalidRoute, LaneRoute, RouteRules, RouteSpace, junction_lanes
 from ..map import MapService
 from ..message.descriptor import DescriptorBundle
-from ..utils import require_nonnegative
+from ..utils import require_nonnegative, require_unit_interval
 
-_LENGTH_FITS = 4
-"""Times ``random`` refits a route's end to bring its replayed length within bounds."""
 
 CURB_CLEARANCE = 0.8
 """Metres from a driving lane's right edge to a cyclist's centreline: riders keep
@@ -87,8 +90,10 @@ class RiderSpec:
     :param float max_deceleration: m/s^2, positive.
     :param float max_lateral_acceleration: m/s^2; cap on speed squared times
         the curvature of the replayed heading profile.
-    :param float comfortable_deceleration: m/s^2, positive; how hard the rider
-        brakes for stops, pivots, curves and the route end.
+
+
+    Comfortable acceleration and braking come from ``realism.COMFORT`` by the
+    agent's ``drive_style`` (``realism.comfort_limits``), within these hard limits.
     """
 
     length: float
@@ -109,28 +114,38 @@ class RiderSpec:
     """m/s^2, positive."""
     max_lateral_acceleration: float
     """m/s^2; cap on speed squared times the curvature of the replayed heading profile."""
-    comfortable_deceleration: float
-    """m/s^2, positive; how hard the rider brakes for stops, pivots, curves and the route end."""
 
 
 RIDER_SPECS = MappingProxyType({
-    RiderType.BICYCLE: RiderSpec(1.8, 0.6, 1.7, "ST_CYCLIST", 2.0, 8.0, 1.0, 3.0, 2.0, 1.5),
-    RiderType.E_BIKE: RiderSpec(1.9, 0.7, 1.7, "ST_CYCLIST", 2.5, 11.0, 1.5, 3.5, 2.5, 2.0),
+    RiderType.BICYCLE: RiderSpec(1.8, 0.6, 1.7, "ST_CYCLIST", 2.0, 8.0, 1.0, 3.0, 2.0),
+    RiderType.E_BIKE: RiderSpec(1.9, 0.7, 1.7, "ST_CYCLIST", 2.5, 11.0, 1.5, 3.5, 2.5),
 })
 """Dimensions and replay limits per rider type; not calibrated rider dynamics."""
 
 
-def _lane_type_numbers(service: MapService) -> Dict[str, int]:
+def _lane_type_numbers(service: MapService) -> Mapping[str, int]:
     """
-    Read Apollo lane-type enum numbers from the map descriptor.
+    Read Apollo lane-type enum numbers from the map descriptor, once per descriptor file.
 
     :param MapService service: Loaded map service supplying geometry, descriptors, and spatial indexes.
     :returns: Apollo lane-type names mapped to their enum numbers.
-    :rtype: Dict[str, int]
+    :rtype: Mapping[str, int]
     """
-    values = DescriptorBundle(service.descriptor_path).message(
+    return _lane_types_of(str(service.descriptor_path))
+
+
+@lru_cache(maxsize=None)
+def _lane_types_of(descriptor_path: str) -> Mapping[str, int]:
+    """
+    ``_lane_type_numbers`` for one descriptor file; read-only.
+
+    :param str descriptor_path: Descriptor set path.
+    :returns: Apollo lane-type names mapped to their enum numbers.
+    :rtype: Mapping[str, int]
+    """
+    values = DescriptorBundle(descriptor_path).message(
         "apollo.hdmap.Lane").DESCRIPTOR.fields_by_name["type"].enum_type.values_by_name
-    return {name: value.number for name, value in values.items()}
+    return MappingProxyType({name: value.number for name, value in values.items()})
 
 
 def curb_lanes(service: MapService) -> FrozenSet[str]:
@@ -290,7 +305,7 @@ class BicycleAgent:
     lineage_id: str = field(default_factory=new_lineage_id, compare=False)
     """GA identity (uuid4 hex): kept by mutation, crossover and renumbering. Labels, not genes: both are left out of ``==`` and ``hash``."""
     obeys_signals: bool = True
-    """Gene: whether the agent waits at red stop lines / crosswalks without WALK (``signal_compliance``)."""
+    """Gene: whether the agent waits at red stop lines (``signal_compliance``)."""
 
     def __post_init__(self) -> None:
         """
@@ -303,8 +318,7 @@ class BicycleAgent:
         for dwell in self.turn_dwell:
             require_nonnegative(turn_dwell=dwell)
         require_nonnegative(start_t=self.start_t)
-        if not 0 <= self.drive_style <= 1:
-            raise ValueError(f"drive_style must be within [0, 1], got {self.drive_style}")
+        require_unit_interval(drive_style=self.drive_style)
 
     @property
     def limits(self) -> RiderSpec:
@@ -408,6 +422,18 @@ class BicycleAgent:
         :rtype: Tuple[ReplayLayout, List[Span], List[float]]
         :raises InvalidRoute: If route geometry, topology, point placement, or map constraints fail the checks performed here.
         """
+        return memo_layout(space, ("bicycle", self.route, len(self.turn_dwell), self.speed_profile, self.rider_type),
+                           lambda: self._build_layout(space))
+
+    def _build_layout(self, space: RouteSpace) -> Tuple[ReplayLayout, List[Span], List[float]]:
+        """
+        ``_validated_layout``, uncached (only the number of turn waits matters, not their values).
+
+        :param RouteSpace space: Route space supplying bicycle routing geometry and topology.
+        :returns: As ``_validated_layout``.
+        :rtype: Tuple[ReplayLayout, List[Span], List[float]]
+        :raises InvalidRoute: As ``_validated_layout``.
+        """
         space.validate(self.route)
         if self.route.lane_changes:
             raise InvalidRoute("bicycles do not change lanes")
@@ -419,7 +445,7 @@ class BicycleAgent:
         spans = curvature_spans(layout.path, layout.pivots)
         check_turning_radius(spans, self.spec.min_turn_radius, self.rider_type.name)
         positions = layout.positions(space, self.speed_profile)
-        check_stops(space, layout, self.speed_profile, positions)
+        check_stops(space, layout, self.speed_profile)
         check_footprint(space, layout.path, self.spec.length, self.spec.width, pivots=layout.pivots)
         return layout, spans, positions
 
@@ -456,7 +482,8 @@ class BicycleAgent:
 
         :param RouteSpace space: As in ``validate``.
         :param SignalSection | None signals: Signal plans in force. When the agent obeys signals,
-            it dwells at every red stop line it reaches (``signal_compliance.comply``).
+            it waits at every red it reaches: stop lines of road lanes, and on bike-lane connectors the
+            light of the car movement beside it (``signal_compliance``).
         :returns: The trajectory describing the agent motion over scenario time.
         :rtype: ReplayTrajectory
         :raises InvalidRoute: If the agent is invalid in this space.
@@ -469,7 +496,9 @@ class BicycleAgent:
         pivots = dict(zip(layout.pivots, self.turn_dwell))
         if not active(signals, self):
             return build(pivots)
-        stops = lane_signal_stops(space.service, self.route.lanes, layout.path, signals, self.spec.length / 2)
+        half = self.spec.length / 2
+        stops = (lane_signal_stops(space.service, self.route.lanes, layout.path, signals, half)
+                 + connector_signal_stops(space, self.route.lanes, layout, signals, half))
         return comply(build, pivots, stops, signals, layout.path.length)
 
     def with_route(self, route: LaneRoute, space: RouteSpace, rng: Random, *,
@@ -543,9 +572,9 @@ class BicycleAgent:
             raise ValueError(f"bike_lane_start_share must be within [0, 1], got {bike_lane_start_share}")
         if not len(space.graph):
             raise RuntimeError("the map has no lanes a bicycle may ride")
-        starts = space.start_lanes()
-        bike = [lane_id for lane_id in starts if is_bike_lane(space, lane_id)]
-        road = [lane_id for lane_id in starts if not is_bike_lane(space, lane_id)]
+        bike, road = [], []
+        for lane_id in space.start_lanes():
+            (bike if is_bike_lane(space, lane_id) else road).append(lane_id)
         pools: List[List[str] | None] = [None]
         if bike and road:
             # One draw per call: redrawing per attempt would favour whichever
@@ -606,8 +635,8 @@ class BicycleAgent:
                 # Fit the last leg to the length bounds, as for NPC vehicles,
                 # then validate the complete path.
                 path = replay_path(space, route, ()).path
-                target = min(max(space.length(route), min_length), max_length)
-                for _ in range(_LENGTH_FITS):
+                target = length_target(space.length(route), min_length, max_length)
+                for _ in range(LENGTH_FITS):
                     if min_length <= path.length <= max_length:
                         break
                     route = refit_end(space, route, path.length, target)
@@ -619,8 +648,7 @@ class BicycleAgent:
                 last_problem = str(problem)
                 continue
             if min_length <= path.length <= max_length:
-                if min_arrival_t and (agent.start_t >= min_arrival_t
-                                      or agent.trajectory(space).arrival_t < min_arrival_t):
+                if not arrives_in_window(agent.start_t, agent.trajectory(space).arrival_t, min_arrival_t):
                     last_problem = f"route must start before and finish at or after {min_arrival_t} s"
                     continue
                 return agent
@@ -639,11 +667,26 @@ class BicycleAgent:
         """
         return rebased(space, self.route, (), self.speed_profile, route, ())
 
+    def stop_rule(self, space: RouteSpace) -> Callable[[SpeedPoint], bool]:
+        """
+        Whether an ordinary stop may lie at a point's position on this agent's route: the rule
+        validation applies (``traffic_constraints.stop_blocks``), for operators that add stops.
+
+        :param RouteSpace space: Route space supplying bicycle routing geometry and topology.
+        :returns: The predicate; it allows nothing on a route that has no layout.
+        :rtype: Callable[[SpeedPoint], bool]
+        """
+        try:
+            blocks = stop_blocks(space, replay_layout(space, self.route, ()))
+        except InvalidRoute:
+            return lambda point: False
+        return lambda point: stop_problem(blocks, point.lane_id, point.s) is None
+
     def _placed_stops(self, space: RouteSpace) -> Self:
         """
-        This agent with each stop moved, if it lies on a connector or a
-        junction lane, to the nearest riding position off them between its
-        neighbours (``placed_stops``). Stops without such a position stay.
+        This agent with each stop that validation would reject (``traffic_constraints.stop_blocks``:
+        connectors, junction lanes and polygons) moved to the nearest allowed riding position between
+        its neighbours, or dropped where there is none (``replay.placed_stops``).
 
         :param RouteSpace space: Route space supplying bicycle routing geometry and topology.
         :returns: A copy of this agent with ordinary stops moved to valid riding positions.
@@ -652,19 +695,9 @@ class BicycleAgent:
         if not any(point.speed == 0 for point in self.speed_profile):
             return self
         frame = RouteFrame(space, self.route, ())
-
-        def blocked(lane_id: str) -> bool:
-            """
-            Check whether a lane is a connector or a junction where ordinary stops are forbidden.
-
-            :param str lane_id: ID of a map lane or virtual connector.
-            :returns: ``True`` if the lane is a virtual connector or junction lane.
-            :rtype: bool
-            """
-            return space.virtual_lane(lane_id) is not None or space.is_junction_lane(lane_id)
-
+        blocks = stop_blocks(space, replay_layout(space, self.route, ()))
         try:
-            return replace(self, speed_profile=placed_stops(frame, self.speed_profile, (), blocked))
+            return replace(self, speed_profile=placed_stops(frame, self.speed_profile, blocks))
         except ValueError:
             return self
 
@@ -678,8 +711,7 @@ class BicycleAgent:
         return {
             "route": self.route.to_dict(),
             "turn_dwell": list(self.turn_dwell),
-            "speed_profile": [{"lane_id": point.lane_id, "s": point.s, "speed": point.speed, "dwell": point.dwell}
-                              for point in self.speed_profile],
+            "speed_profile": [point.to_dict() for point in self.speed_profile],
             "start_t": self.start_t,
             "rider_type": self.rider_type.name,
             "drive_style": self.drive_style,
@@ -702,7 +734,7 @@ class BicycleAgent:
         return cls(
             LaneRoute.from_dict(data["route"]),
             tuple(data["turn_dwell"]),
-            tuple(SpeedPoint(**point) for point in data["speed_profile"]),
+            tuple(SpeedPoint.from_dict(point) for point in data["speed_profile"]),
             data["start_t"],
             RiderType[data["rider_type"]],
             data.get("drive_style", 0.5),

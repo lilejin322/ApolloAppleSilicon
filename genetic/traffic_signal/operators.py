@@ -10,6 +10,7 @@ from random import Random
 from typing import List, Mapping, Tuple
 
 from ...scenario.traffic_signal import SignalPlan, SignalSection, SignalTiming
+from ..common import reflect
 
 MUTATION_ACTIONS: Tuple[str, ...] = ("demand", "offset")
 """``mut_signal_section`` actions: step one phase's demand, or shift the junction offset."""
@@ -33,23 +34,6 @@ class SignalOperatorConfig:
     """Standard deviation of an offset step, as a fraction of the cycle."""
     swap_rate: float = 0.5
     """Chance per junction that crossover swaps its plans."""
-
-
-def _reflect(value: float, low: float, high: float) -> float:
-    """
-    ``value`` folded into [low, high]; symmetric steps folded this way keep a uniform law uniform.
-
-    :param float value: The stepped quantity.
-    :param float low: Lower end of the interval.
-    :param float high: Upper end of the interval.
-    :returns: ``low`` when the interval is empty; otherwise ``value`` folded into ``[low, high]``.
-    :rtype: float
-    """
-    if high <= low:
-        return low
-    span: float = high - low
-    u: float = (value - low) % (2 * span)
-    return low + (u if u <= span else 2 * span - u)
 
 
 def _phase(plan: SignalPlan) -> float:
@@ -105,7 +89,7 @@ def mut_demand(plan: SignalPlan, timing: SignalTiming, rng: Random,
     high: float
     low, high = timing.demand_bounds(index)
     demand: List[float] = list(plan.demand)
-    demand[index] = round(_reflect(demand[index] + rng.gauss(0, config.demand_step * (high - low)), low, high), 1)
+    demand[index] = round(reflect(demand[index] + rng.gauss(0, config.demand_step * (high - low)), low, high), 1)
     return timing.plan(tuple(demand), _phase(plan))
 
 

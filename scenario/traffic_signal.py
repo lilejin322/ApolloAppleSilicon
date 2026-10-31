@@ -18,15 +18,16 @@ from a hidden demand gene:
   of the critical flow ratios ``q_i / s``, with ``q_i`` the demand gene
   (veh/h/lane) of phase i's critical lane;
 - greens: Webster's split of ``C0 - L`` in proportion to ``y_i``. Each green is
-  then clamped to the region's minimum and maximum green and to the pedestrian
-  WALK + flashing DON'T WALK of the crosswalks the phase serves.
+  then clamped to the region's minimum and maximum green, and to the time a
+  pedestrian needs to start and finish each crosswalk the phase serves.
 
 The GA mutates demand and offset only and recomputes every timing, so each
 offspring is Webster-consistent by construction (``SignalTiming.plan``).
 
 Colours are pure functions of the absolute scenario time ``t`` held by the
-scenario runner. Pedestrian heads (``ped_state``) are pure functions of ``t``
-too.
+scenario runner. The maps carry vehicle heads only (three round lamps), so a
+signalised crosswalk has no pedestrian head: its walkers follow the vehicle light
+of the phase whose traffic runs parallel to it (``parallel_signal``).
 """
 
 import networkx as nx
@@ -38,10 +39,8 @@ from shapely.geometry.base import BaseGeometry
 from dataclasses import dataclass, field
 from math import atan2, ceil, cos, hypot, pi, sin
 from typing import Any, Dict, Mapping, Sequence, Tuple, Self, List
-from weakref import WeakKeyDictionary
 
 from ..map import MapService
-from ..map.geometry import polygon_to_shape
 
 EPS = 1e-6
 """Absolute tolerance for float comparisons of timings, speeds and demands."""
@@ -59,18 +58,6 @@ class SignalColor(IntEnum):
     """Yellow of the running phase, after its green."""
     GREEN = 3
     """Green of the running phase."""
-
-
-class PedState(IntEnum):
-    """
-    Pedestrian signal head state.
-    """
-    DONT_WALK = 0
-    """Steady DON'T WALK, outside this crosswalk's WALK and clearance."""
-    WALK = 1
-    """Steady WALK, from the start of the phase's green."""
-    FLASHING_DONT_WALK = 2
-    """Flashing DON'T WALK: the clearance, ending as yellow begins."""
 
 
 @dataclass(frozen=True)
@@ -151,10 +138,10 @@ class RegionProfile:
     :param Tuple[float, float] minor_green: Minimum and maximum green of a minor phase, in seconds.
     :param float major_ratio: A phase whose road-class weight is below this fraction of
         the largest weight is minor; the others are major.
-    :param float ped_speed: Walking speed for the pedestrian clearance, in m/s
+    :param float ped_speed: Walking speed for the crossing time in a minimum green, in m/s
         (MUTCD 4E.06: 3.5 ft/s).
-    :param float min_walk: Shortest WALK interval, in seconds (MUTCD 4E.06: 7 s).
-    :param bool countdown: Whether pedestrian heads show a countdown (informational).
+    :param float min_walk: Start-up time a pedestrian gets before the crossing time in a minimum
+        green, in seconds (MUTCD 4E.06's shortest WALK: 7 s).
     """
     name: str = "US-MUTCD"
     """Profile name."""
@@ -195,24 +182,21 @@ class RegionProfile:
     major_ratio: float = 0.8
     """A phase whose road-class weight is below this fraction of the largest weight is minor; the others are major."""
     ped_speed: float = 1.07
-    """Walking speed for the pedestrian clearance, in m/s (MUTCD 4E.06: 3.5 ft/s)."""
+    """Walking speed for the crossing time in a minimum green, in m/s (MUTCD 4E.06: 3.5 ft/s)."""
     min_walk: float = 7.0
-    """Shortest WALK interval, in seconds (MUTCD 4E.06: 7 s)."""
-    countdown: bool = True
-    """Whether pedestrian heads show a countdown (informational)."""
+    """Start-up time before the crossing time in a minimum green, in seconds (MUTCD 4E.06's shortest WALK: 7 s)."""
 
 
 US_MUTCD = RegionProfile(cycle_tiers=CYCLE_TIERS)
 """US practice (MUTCD 2009 and ITE): yellow 3 to 6 s, all-red 1 to 2.5 s, walking
-speed 1.07 m/s (3.5 ft/s), shortest WALK 7 s, countdown pedestrian heads. Other
-fields keep ``RegionProfile`` defaults; cycle length follows ``CYCLE_TIERS``."""
+speed 1.07 m/s (3.5 ft/s), pedestrian start-up 7 s. Other fields keep
+``RegionProfile`` defaults; cycle length follows ``CYCLE_TIERS``."""
 TAIWAN = RegionProfile(
     name="TW-MOTC", cycle_tiers=CYCLE_TIERS, yellow_bounds=(3.0, 4.0), all_red_bounds=(1.0, 2.0), default_speed=11.11,
-    saturation_flow=1900.0, ped_speed=1.0, min_walk=7.0, countdown=True,
+    saturation_flow=1900.0, ped_speed=1.0, min_walk=7.0,
 )
 """Taiwan practice (MOTC Traffic Engineering Manual; Rules for Road Traffic Signs, Markings and
-Signals): yellow 3 s up to 50 km/h and 4 s above, all-red 1 to 2 s, walking speed 1.0 m/s,
-countdown pedestrian heads."""
+Signals): yellow 3 s up to 50 km/h and 4 s above, all-red 1 to 2 s, walking speed 1.0 m/s."""
 
 MAP_REGIONS: Dict[str, RegionProfile] = {
     "borregas_ave": US_MUTCD, "borregas_ave_fix": US_MUTCD, "san_mateo": US_MUTCD,
@@ -293,18 +277,18 @@ def _clamp(value: float, bounds: Tuple[float, float]) -> float:
 @dataclass(frozen=True)
 class Crosswalk:
     """
-    A crosswalk at a junction, with the phase whose green it walks in.
+    A crosswalk at a junction, with the phase whose traffic runs parallel to it.
 
     :param str crosswalk_id: Map crosswalk ID.
     :param float length: Crossing distance along the walk axis, in metres.
-    :param int phase: Index of the phase whose green this crosswalk walks in.
+    :param int phase: Index of the phase whose light this crosswalk's walkers follow.
     """
     crosswalk_id: str
     """Map crosswalk ID."""
     length: float
     """Crossing distance along the walk axis, in metres."""
     phase: int
-    """Index of the phase whose green this crosswalk walks in."""
+    """Index of the phase whose light this crosswalk's walkers follow."""
 
 
 @dataclass(frozen=True)
@@ -322,7 +306,8 @@ class SignalPlan:
     :param float yellow: Yellow after every green, in seconds.
     :param float all_red: All-red after every yellow, in seconds.
     :param float offset: Seconds into the cycle at t = 0, in [0, cycle).
-    :param Tuple[Tuple[str, int, float, float], ...] walks: (crosswalk ID, phase, WALK, FLASHING DON'T WALK) per crosswalk.
+    :param Tuple[Tuple[str, int], ...] crosswalks: (crosswalk ID, phase) per signalised crosswalk: its walkers
+        follow that phase's light.
     """
     junction_id: str
     """Junction, or ``+``-joined junctions sharing signals, or a lone signal ID."""
@@ -338,25 +323,25 @@ class SignalPlan:
     """All-red after every yellow, in seconds."""
     offset: float
     """Seconds into the cycle at t = 0, in [0, cycle)."""
-    walks: Tuple[Tuple[str, int, float, float], ...] = ()
-    """(crosswalk ID, phase, WALK, FLASHING DON'T WALK) per crosswalk."""
+    crosswalks: Tuple[Tuple[str, int], ...] = ()
+    """(crosswalk ID, phase) per signalised crosswalk: its walkers follow that phase's light."""
 
     def __post_init__(self) -> None:
         """
         Freeze the sequences, reject a plan that cannot run, and index its switch points.
 
-        ``phases``, ``demand``, ``green`` and ``walks`` become tuples, and ``demand`` and ``green`` become floats.
-        Every switch point (green, yellow and all-red onsets, WALK and clearance ends) is stored as a cycle
-        position rounded to 1 us, the grid ``phase_at`` reads the cycle on, so a switch never lags by a float step.
+        ``phases``, ``demand``, ``green`` and ``crosswalks`` become tuples, and ``demand`` and ``green`` become floats.
+        Every switch point (green, yellow and all-red onsets) is stored as a cycle position rounded to 1 us,
+        the grid ``phase_at`` reads the cycle on, so a switch never lags by a float step.
 
         :raises ValueError: Unless there is one positive green and one demand per phase, ``yellow`` is positive,
             ``all_red`` is nonnegative, ``offset`` lies in ``[0, cycle)``, no signal is in two phases,
-            and every crosswalk walks in one of the phases.
+            and every crosswalk follows one of the phases.
         """
         object.__setattr__(self, "phases", tuple(tuple(group) for group in self.phases))
         object.__setattr__(self, "demand", tuple(float(q) for q in self.demand))
         object.__setattr__(self, "green", tuple(float(g) for g in self.green))
-        object.__setattr__(self, "walks", tuple(tuple(w) for w in self.walks))
+        object.__setattr__(self, "crosswalks", tuple(tuple(c) for c in self.crosswalks))
         if not self.phases or len(self.green) != len(self.phases) or len(self.demand) != len(self.phases):
             raise ValueError("need one green and one demand per phase")
         if min(self.green) <= 0 or self.yellow <= 0 or self.all_red < 0:
@@ -374,16 +359,15 @@ class SignalPlan:
             onsets.append(round(start, 6))
             ends.append((round(start + green, 6), round(start + green + self.yellow, 6)))
             start += green + self.yellow + self.all_red
-        walk_ends: Dict[str, Tuple[int, float, float]] = {}
-        for cid, phase, walk, clearance in self.walks:
-            if not 0 <= phase < len(self.phases):
-                raise ValueError(f"crosswalk {cid} walks in no phase")
-            walk_ends.setdefault(cid, (phase, round(onsets[phase] + walk, 6),
-                                       round(onsets[phase] + walk + clearance, 6)))
+        parallel: Dict[str, str] = {}
+        for cid, phase in self.crosswalks:
+            if not 0 <= phase < len(self.phases) or not self.phases[phase]:
+                raise ValueError(f"crosswalk {cid} follows no phase")
+            parallel.setdefault(cid, min(self.phases[phase]))
         object.__setattr__(self, "_phase_of", phase_of)
         object.__setattr__(self, "_onsets", tuple(onsets))
         object.__setattr__(self, "_ends", tuple(ends))
-        object.__setattr__(self, "_walk_ends", walk_ends)
+        object.__setattr__(self, "_parallel", parallel)
 
     @property
     def cycle(self) -> float:
@@ -460,22 +444,17 @@ class SignalPlan:
         index, color, _ = self.phase_at(t)
         return color if index == phase else SignalColor.RED
 
-    def ped_state(self, crosswalk_id: str, t: float) -> PedState:
+    def parallel_signal(self, crosswalk_id: str) -> str:
         """
-        The crosswalk's pedestrian head at time ``t``. It shows WALK from the start of its
-        phase's green, then FLASHING DON'T WALK ending at the onset of yellow, then DON'T WALK.
+        The signal a crosswalk's walkers follow: one of the phase whose traffic runs parallel to it
+        (all signals of a phase show one colour). The maps have no pedestrian heads.
 
         :param str crosswalk_id: A crosswalk of this plan.
-        :param float t: Absolute scenario time, in seconds.
-        :returns: WALK during the WALK interval, FLASHING DON'T WALK during the clearance, otherwise DON'T WALK.
-        :rtype: PedState
+        :returns: The smallest signal ID of that phase.
+        :rtype: str
         :raises KeyError: If ``crosswalk_id`` is not one of this plan's crosswalks.
         """
-        phase, walk_end, clearance_end = self._walk_ends[crosswalk_id]
-        index, u = self._position(t)
-        if index != phase or u >= clearance_end:
-            return PedState.DONT_WALK
-        return PedState.WALK if u < walk_end else PedState.FLASHING_DONT_WALK
+        return self._parallel[crosswalk_id]
 
     def remaining(self, signal_id: str, t: float) -> float:
         """
@@ -514,45 +493,25 @@ class SignalPlan:
             return t
         return t + self._wait(self._onsets[phase], u)
 
-    def next_walk(self, crosswalk_id: str, t: float) -> float | None:
-        """
-        First instant at or after ``t`` at which the crosswalk shows WALK.
-
-        WALK starts with its phase's green, so a wait ends at the next start of that green.
-
-        :param str crosswalk_id: A crosswalk of this plan.
-        :param float t: Absolute scenario time, in seconds.
-        :returns: ``t`` during WALK, otherwise the next start of WALK; ``None`` if the crosswalk has no WALK interval.
-        :rtype: float | None
-        :raises KeyError: If ``crosswalk_id`` is not one of this plan's crosswalks.
-        """
-        phase, walk_end, _ = self._walk_ends[crosswalk_id]
-        if walk_end <= self._onsets[phase]:
-            return None
-        index, u = self._position(t)
-        if index == phase and u < walk_end:
-            return t
-        return t + self._wait(self._onsets[phase], u)
-
     def to_dict(self) -> Dict[str, Any]:
         """
         A JSON-compatible mapping of this plan.
 
-        Tuples become lists. The keys are ``junction_id``, ``phases``, ``demand``, ``green``, ``yellow``, ``all_red``, ``offset`` and ``walks``.
+        Tuples become lists. The keys are ``junction_id``, ``phases``, ``demand``, ``green``, ``yellow``, ``all_red``, ``offset`` and ``crosswalks``.
 
         :returns: A new mapping that ``from_dict`` can rebuild.
         :rtype: Dict[str, Any]
         """
         return {"junction_id": self.junction_id, "phases": [list(p) for p in self.phases],
                 "demand": list(self.demand), "green": list(self.green), "yellow": self.yellow,
-                "all_red": self.all_red, "offset": self.offset, "walks": [list(w) for w in self.walks]}
+                "all_red": self.all_red, "offset": self.offset, "crosswalks": [list(c) for c in self.crosswalks]}
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> Self:
         """
         Build a plan from ``to_dict`` output.
 
-        ``walks`` may be absent and then defaults to no crosswalks. The other keys are required.
+        ``crosswalks`` may be absent and then defaults to none. The other keys are required.
 
         :param Dict[str, Any] data: Serialized mapping previously produced by ``to_dict``.
         :returns: The reconstructed plan.
@@ -561,7 +520,7 @@ class SignalPlan:
         :raises ValueError: If the rebuilt plan fails ``__post_init__``.
         """
         return cls(data["junction_id"], data["phases"], data["demand"], data["green"], data["yellow"],
-                   data["all_red"], data["offset"], data.get("walks", ()))
+                   data["all_red"], data["offset"], data.get("crosswalks", ()))
 
 
 class InvalidSignalPlan(ValueError):
@@ -701,8 +660,7 @@ class SignalTiming:
         The plan for ``demand`` (veh/h/lane per phase) with offset ``phase`` x cycle.
 
         Webster greens are clamped to each phase's minimum and maximum, then fitted
-        back inside the cycle bounds. Each crosswalk's WALK is its green minus the
-        crossing time, and its flashing DON'T WALK is that crossing time.
+        back inside the cycle bounds. Each crosswalk follows its phase's light.
 
         :param Sequence[float] demand: Critical-lane demand of each phase, in veh/h/lane.
         :param float phase: Offset as a fraction of the cycle, wrapped into [0, 1).
@@ -712,10 +670,19 @@ class SignalTiming:
         _, greens = self.webster(demand)
         greens = self._fit([_clamp(g, (lo, hi)) for g, lo, hi in zip(greens, self.min_green, self.max_green)])
         cycle = sum(greens) + self.clearance
-        walks = tuple((c.crosswalk_id, c.phase, round(greens[c.phase] - c.length / self.region.ped_speed, 3),
-                       round(c.length / self.region.ped_speed, 3)) for c in self.crosswalks)
         return SignalPlan(self.junction_id, self.phases, tuple(demand), greens, self.yellow, self.all_red,
-                          (phase % 1.0) * cycle, walks)
+                          (phase % 1.0) * cycle, tuple((c.crosswalk_id, c.phase) for c in self.crosswalks))
+
+    def default_plan(self) -> SignalPlan:
+        """
+        The plan used when signals are not evolved: every phase's demand at the
+        middle of its range, rounded to 0.1 veh/h/lane like the genes, offset 0.
+
+        :returns: The junction's Webster plan for that demand.
+        :rtype: SignalPlan
+        """
+        demand = tuple(round(sum(self.demand_bounds(i)) / 2, 1) for i in range(len(self.phases)))
+        return self.plan(demand, 0.0)
 
     def _fit(self, greens: List[float]) -> Tuple[float, ...]:
         """
@@ -769,7 +736,7 @@ class SignalTiming:
 
         :param SignalPlan plan: A plan for this junction.
         :raises InvalidSignalPlan: If the plan is not this junction's Webster plan for its own
-            genes, or a demand, green, clearance or pedestrian interval leaves its bounds.
+            genes, or a demand, green or clearance leaves its bounds.
         """
         if plan.junction_id != self.junction_id or plan.phases != self.phases:
             raise InvalidSignalPlan(f"{plan.junction_id}: phases differ from the junction's EQ groups")
@@ -779,7 +746,7 @@ class SignalTiming:
                 raise InvalidSignalPlan(f"{plan.junction_id}: demand {q} outside {lo}..{hi}")
         expected = self.plan(plan.demand, plan.offset / plan.cycle)
         if (expected.green != plan.green or abs(expected.yellow - plan.yellow) > EPS
-                or abs(expected.all_red - plan.all_red) > EPS or expected.walks != plan.walks):
+                or abs(expected.all_red - plan.all_red) > EPS or expected.crosswalks != plan.crosswalks):
             raise InvalidSignalPlan(f"{plan.junction_id}: timings are not the Webster plan of its demand")
         for green, lo, hi in zip(plan.green, self.min_green, self.max_green):
             if not lo - 0.05 - EPS <= green <= hi + 0.05 + EPS:
@@ -787,9 +754,6 @@ class SignalTiming:
         low, high = self.bounds
         if not low - EPS <= plan.cycle <= min(high, self.region.max_cycle_cap) + EPS:
             raise InvalidSignalPlan(f"{plan.junction_id}: cycle {plan.cycle:.1f} outside {low}..{high} ({self.tier})")
-        for cid, phase, walk, clearance in plan.walks:
-            if walk < self.region.min_walk - 0.05 - EPS or walk + clearance > plan.green[phase] + EPS:
-                raise InvalidSignalPlan(f"{plan.junction_id}: crosswalk {cid} does not fit its green")
 
     def is_valid(self, plan: SignalPlan) -> bool:
         """
@@ -811,32 +775,32 @@ class SignalTiming:
 CROSSWALK_DISTANCE = 3.0
 """Metres between a crosswalk and a junction polygon for the crosswalk to belong to the junction."""
 CROSSWALK_PARALLEL = cos(pi / 4)
-"""|cos| between a crosswalk's walking axis and a phase's approach above which it walks in that phase."""
+"""|cos| between a crosswalk's walking axis and a phase's approach axis above which its walkers follow that phase."""
 DEFAULT_WIDTH = 20.0
 """Junction extent in metres when the junction has no usable polygon."""
 
-_TIMINGS: WeakKeyDictionary[MapService, Dict[RegionProfile, Dict[str, SignalTiming]]] = WeakKeyDictionary()
-"""Cache of ``signal_timings``: a map service to ``{RegionProfile: {unit id: SignalTiming}}``. The service is a weak key, so the entry disappears with the map."""
 
 
-def _circular_mean(angles: Sequence[float]) -> float | None:
+def _axis(angles: Sequence[float]) -> float | None:
     """
-    Mean of angles on a circle, in radians.
+    Mean axis of directions, in radians: a direction and its opposite lie on one axis.
 
-    Each angle becomes a unit vector, and the result is the direction of their
-    sum. Opposing angles that cancel, and an empty sequence, have no direction.
+    A phase usually serves two opposing approaches, whose unit vectors cancel. Doubling
+    each angle maps both onto the same vector, and half the direction of the doubled
+    sum is their common axis. Perpendicular axes that cancel, and an empty sequence,
+    have no axis.
 
-    :param Sequence[float] angles: Angles in radians.
-    :returns: The mean angle, or ``None`` when the vector sum is shorter than ``1e-9``.
+    :param Sequence[float] angles: Directions in radians.
+    :returns: The mean axis in ``(-pi/2, pi/2]``, or ``None`` when the doubled-vector sum is shorter than ``1e-9``.
     :rtype: float | None
     """
-    x, y = sum(map(cos, angles)), sum(map(sin, angles))
-    return None if hypot(x, y) < 1e-9 else atan2(y, x)
+    x, y = sum(cos(2 * a) for a in angles), sum(sin(2 * a) for a in angles)
+    return None if hypot(x, y) < 1e-9 else atan2(y, x) / 2
 
 
 def _extent(area: BaseGeometry | None, heading: float | None) -> float:
     """
-    Junction extent in metres, along ``heading`` when it is known.
+    Junction extent in metres, along the ``heading`` axis when it is known.
 
     With a heading, the result is the span of the polygon's exterior projected
     onto that direction. Without one, it is the longer side of the minimum
@@ -844,7 +808,7 @@ def _extent(area: BaseGeometry | None, heading: float | None) -> float:
     yields ``DEFAULT_WIDTH``.
 
     :param BaseGeometry | None area: Junction polygon, possibly a multi-polygon, or ``None``.
-    :param float | None heading: Approach direction in radians, or ``None``.
+    :param float | None heading: Approach axis in radians (either direction along it), or ``None``.
     :returns: The extent in metres.
     :rtype: float
     """
@@ -921,37 +885,36 @@ def signal_timings(service: MapService, region: RegionProfile = US_MUTCD) -> Dic
     ``SignalTiming`` of every control unit of the map (cached per map and region).
 
     Phases come from ``control_units``. Yellow, all-red, green bounds, crosswalks
-    and the cycle tier come from the junction geometry and ``region``. A service
-    that cannot be a weak key is not cached.
+    and the cycle tier come from the junction geometry and ``region``. Built once per
+    map and region (``MapService.derived``), shared by every handle of the map.
 
     :param MapService service: Map service, as in ``control_units``.
     :param RegionProfile region: Timing practice. Defaults to ``US_MUTCD``.
     :returns: ``{unit id: SignalTiming}`` in ``control_units`` order. A later call
-        with the same service and region returns the cached mapping.
+        on the same map and region returns the same mapping.
     :rtype: Dict[str, SignalTiming]
     """
-    try:
-        cache = _TIMINGS.setdefault(service, {})
-    except TypeError:
-        cache = {}
-    if region in cache:
-        return cache[region]
+    return service.derived(("signal_timings", region), lambda view: _build_timings(view, region))
+
+
+def _build_timings(service: MapService, region: RegionProfile) -> Dict[str, SignalTiming]:
+    """
+    ``signal_timings``, uncached.
+
+    :param MapService service: The map's own view (``MapService.derived``).
+    :param RegionProfile region: Timing practice.
+    :returns: As ``signal_timings``.
+    :rtype: Dict[str, SignalTiming]
+    """
     relations = service.relations
-    areas = relations._junction_areas
-    crosswalk_shapes = {}
-    for cid, crosswalk in service.crosswalk_table.items():
-        try:
-            shape = polygon_to_shape(crosswalk.polygon)
-        except ValueError:
-            shape = None
-        if shape is not None and not shape.is_empty and shape.area > 0:
-            crosswalk_shapes[cid] = shape
+    areas = relations.junction_areas
+    crosswalk_shapes = {cid: area for cid, area in relations.crosswalk_areas.items() if area is not None}
     result = {}
     for unit, phases in control_units(service).items():
         parts = [areas.get(j) for j in unit.split("+") if j in areas]
         parts = [a for a in parts if a is not None]
         area = union_all(parts) if parts else None
-        speeds, widths, weights, headings = [], [], [], []
+        speeds, widths, weights, axes = [], [], [], []
         lane_count = 0
         for group in phases:
             lanes = sorted({lane for s in group for lane in relations.lanes_controlled_by_signal[s]})
@@ -959,10 +922,10 @@ def signal_timings(service: MapService, region: RegionProfile = US_MUTCD) -> Dic
             limits = [v for v in limits if v and v > 0.5]
             speed = max(limits) if limits else region.default_speed
             approaches = [a for a in (relations._approach(s) for s in group) if a is not None]
-            heading = _circular_mean(approaches) if approaches else None
+            axis = _axis(approaches)
             speeds.append(speed)
-            headings.append(heading)
-            widths.append(_extent(area, heading))
+            axes.append(axis)
+            widths.append(_extent(area, axis))
             weights.append(max(1, len(lanes)) * speed)
             lane_count += len(lanes)
         yellow = _clamp(_round_up(max(region.reaction_time + v / (2 * region.deceleration) for v in speeds)),
@@ -976,11 +939,11 @@ def signal_timings(service: MapService, region: RegionProfile = US_MUTCD) -> Dic
             for cid, shape in sorted(crosswalk_shapes.items()):
                 if shape.distance(area) > CROSSWALK_DISTANCE:
                     continue
-                length, axis = _walk_axis(shape)
+                length, walk = _walk_axis(shape)
                 best, score = None, CROSSWALK_PARALLEL
-                for index, heading in enumerate(headings):
-                    if heading is not None and abs(cos(axis - heading)) > score:
-                        best, score = index, abs(cos(axis - heading))
+                for index, axis in enumerate(axes):
+                    if axis is not None and abs(cos(walk - axis)) > score:
+                        best, score = index, abs(cos(walk - axis))
                 if best is not None:
                     crosswalks.append(Crosswalk(cid, round(length, 2), best))
         min_green, max_green = [], []
@@ -996,7 +959,6 @@ def signal_timings(service: MapService, region: RegionProfile = US_MUTCD) -> Dic
                                     tuple(round(w, 2) for w in widths), yellow, all_red,
                                     tuple(min_green), tuple(max_green), tuple(crosswalks), region,
                                     tier, bounds)
-    cache[region] = result
     return result
 
 
@@ -1029,7 +991,19 @@ class SignalSection:
                     raise ValueError(f"signal {s} in two plans")
                 index[s] = plan
         object.__setattr__(self, "_by_signal", index)
-        object.__setattr__(self, "_by_crosswalk", {w[0]: p for p in self.plans for w in p.walks})
+        object.__setattr__(self, "_by_crosswalk", {c[0]: p for p in self.plans for c in p.crosswalks})
+
+    @classmethod
+    def default(cls, timings: Mapping[str, SignalTiming]) -> "SignalSection":
+        """
+        Every control unit's ``SignalTiming.default_plan``, in unit order: the
+        lights of a scenario whose signals are not evolved. They still cycle,
+        and Apollo and the replayed agents see the same ones.
+
+        :param Mapping[str, SignalTiming] timings: ``signal_timings(service)``.
+        :rtype: SignalSection
+        """
+        return cls(tuple(timing.default_plan() for timing in timings.values()))
 
     def __len__(self) -> int:
         """
@@ -1097,36 +1071,21 @@ class SignalSection:
         """
         return self._by_signal[signal_id].next_green(signal_id, t)
 
-    def next_walk(self, crosswalk_id: str, t: float) -> float | None:
+    def parallel_signal(self, crosswalk_id: str) -> str:
         """
-        First instant at or after ``t`` at which a signalised crosswalk shows WALK.
+        The signal a signalised crosswalk's walkers follow (``SignalPlan.parallel_signal``).
 
         :param str crosswalk_id: A crosswalk of this section.
-        :param float t: Absolute scenario time, in seconds.
-        :returns: As ``SignalPlan.next_walk``.
-        :rtype: float | None
+        :returns: A signal of the phase whose traffic runs parallel to the crosswalk.
+        :rtype: str
         :raises KeyError: If ``crosswalk_id`` is not one of this section's crosswalks.
         """
-        return self._by_crosswalk[crosswalk_id].next_walk(crosswalk_id, t)
-
-    def ped_state(self, crosswalk_id: str, t: float) -> PedState:
-        """
-        Pedestrian head of a signalised crosswalk at time ``t``.
-
-        The intervals are those of the crosswalk's plan (``SignalPlan.ped_state``).
-
-        :param str crosswalk_id: A crosswalk of this section.
-        :param float t: Absolute scenario time, in seconds.
-        :returns: That plan's pedestrian state.
-        :rtype: PedState
-        :raises KeyError: If ``crosswalk_id`` is not one of this section's crosswalks.
-        """
-        return self._by_crosswalk[crosswalk_id].ped_state(crosswalk_id, t)
+        return self._by_crosswalk[crosswalk_id].parallel_signal(crosswalk_id)
 
     @property
     def crosswalks(self) -> Tuple[str, ...]:
         """
-        Crosswalk IDs that have a pedestrian head in this section.
+        Signalised crosswalk IDs of this section: their walkers follow ``parallel_signal``.
 
         :returns: The IDs, sorted.
         :rtype: Tuple[str, ...]

@@ -8,9 +8,10 @@ from random import Random
 from typing import List, Sequence, Tuple, Type
 
 from ...scenario import PedestrianAgent, WalkNetwork, WalkerType, random_walker_type
-from ...scenario.routing import InvalidRoute
 from ...scenario.sections import PedestrianSection, SectionRules
+from ...scenario.signal_compliance import COMPLIANCE_RATES
 from ..pedestrian import PedestrianOperatorConfig, cx_pedestrian, mut_pedestrian, rebalance_crossing_kinds
+from ..pedestrian.common import fresh_agent
 from .base import SectionKind
 
 
@@ -27,6 +28,9 @@ class PedestrianKind(SectionKind[PedestrianAgent]):
     :param PedestrianOperatorConfig config: Pedestrian operators. Defaults to ``PedestrianOperatorConfig()``.
     :param SectionRules | None rules: In-type constraints. None uses ``PedestrianSection.RULES``.
     """
+
+    compliance_rate: float = COMPLIANCE_RATES["pedestrian"]
+    """Share of its agents that obey signals."""
 
     SECTION: Type[PedestrianSection] = PedestrianSection
     """Pedestrian section class."""
@@ -45,18 +49,14 @@ class PedestrianKind(SectionKind[PedestrianAgent]):
 
     def random_agent(self, rng: Random) -> PedestrianAgent | None:
         """
-        Draw one pedestrian, or None when the draw fails.
+        Draw one pedestrian within the kind's operator bounds (``pedestrian.fresh_agent``), or None when the draw fails.
 
         :param Random rng: Random source for the walker type and the agent.
         :returns: The agent, or None.
         :rtype: PedestrianAgent | None
         """
         walker_type: WalkerType = random_walker_type(rng, self.config.walker_type_weights)
-        try:
-            return PedestrianAgent.random(self.context, rng, walker_type=walker_type,
-                                          max_start_t=self.config.max_start_t)
-        except (InvalidRoute, ValueError, RuntimeError):
-            return None
+        return fresh_agent(self.context, walker_type, rng, self.config, attempts=1)
 
     def mutate_agent(self, agent: PedestrianAgent, rng: Random) -> PedestrianAgent:
         """

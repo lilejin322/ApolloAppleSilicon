@@ -15,28 +15,28 @@ from enum import Enum
 from math import hypot
 from random import Random
 from types import MappingProxyType
-from typing import Any, Mapping, Sequence, Self
+from typing import Any, Callable, Dict, List, Mapping, Sequence, Self, Tuple
 from shapely.geometry import LineString
 
 from .obstacle_ids import NPC_ID_BASE, check_id, new_lineage_id
-from .signal_compliance import COMPLIANCE_RATES, active, comply, crosswalk_stops, lane_signal_stops
+from .signal_compliance import COMPLIANCE_RATES, active, comply, lane_signal_stops
 from .replay import (
-    STOP_CLEARANCE, ReplayTrajectory, RouteFrame, SpeedPoint, anchored, check_profile, check_turning_radius,
-    curvature_spans, ordered_points, placed_stops, random_draws, rebased, refit_end, replay_layout, replay_path,
-    speed_grid, speed_limit, drawn_speeds,
+    arrives_in_window, ReplayTrajectory, RouteFrame, SpeedPoint, anchored, check_profile, check_turning_radius,
+    LENGTH_FITS, curvature_spans, length_target, memo_layout, placed_stops, random_draws, rebased, refit_end,
+    replay_layout,
+    replay_path, speed_grid, speed_limit, drawn_speeds,
 )
-from .traffic_constraints import check_footprint, check_stops
+from .traffic_constraints import check_footprint, check_stops, stop_blocks, stop_problem
 from .realism import VEHICLE_MIX, comfort_limits, draw_type
 from .routing import ENDPOINT_JUNCTION_MARGIN, InvalidRoute, LaneRoute, RouteRules, RouteSpace
-from ..utils import require_nonnegative
-from typing import Dict, List, Tuple
+from ..utils import require_nonnegative, require_unit_interval
 
 LANE_CHANGE_TIME = 3.5
 """Seconds a lane change takes at the NPC's desired speed; sets its length."""
 MAX_LANE_CHANGE_DISTANCE = 80.0
 """Longest lane change in metres; the shortest is the route rules' minimum."""
-_LENGTH_FITS = 4
-"""Times ``random`` refits a route's end to bring its replayed length within bounds."""
+_PLACEMENT_ROUNDS = 3
+"""Times ``_placed_stops`` re-places stops after they changed the lane changes' lengths."""
 
 
 class VehicleType(Enum):
@@ -77,9 +77,10 @@ class VehicleSpec:
     :param float max_deceleration: m/s^2, positive.
     :param float max_lateral_acceleration: m/s^2; cap on speed squared times
         the curvature of the replayed heading profile.
-    :param float comfortable_deceleration: m/s^2, positive; how hard the NPC
-        brakes for stops, curves, limits and the route end. Never above
-        ``max_deceleration``, which stays the hard limit.
+
+
+    Comfortable acceleration and braking come from ``realism.COMFORT`` by the
+    agent's ``drive_style`` (``realism.comfort_limits``), within these hard limits.
     """
 
     length: float
@@ -100,8 +101,6 @@ class VehicleSpec:
     """m/s^2, positive."""
     max_lateral_acceleration: float = 2.5
     """m/s^2; cap on speed squared times the curvature of the replayed heading profile."""
-    comfortable_deceleration: float = 2.5
-    """m/s^2, positive; how hard the NPC brakes for stops, curves, limits and the route end. Never above ``max_deceleration``, which stays the hard limit."""
 
 
 VEHICLE_SPECS = MappingProxyType({
@@ -152,7 +151,7 @@ class NPCVehicleAgent:
     lineage_id: str = field(default_factory=new_lineage_id, compare=False)
     """GA identity (uuid4 hex): kept by mutation, crossover and renumbering. Labels, not genes: both are left out of ``==`` and ``hash``."""
     obeys_signals: bool = True
-    """Gene: whether the agent waits at red stop lines / crosswalks without WALK (``signal_compliance``)."""
+    """Gene: whether the agent waits at red stop lines (``signal_compliance``)."""
 
     def __post_init__(self) -> None:
         """
@@ -166,8 +165,7 @@ class NPCVehicleAgent:
         check_profile(self.route, self.speed_profile, self.spec.max_speed, self.vehicle_type.name)
         check_id(self.obstacle_id, NPC_ID_BASE, "NPC vehicle")
         require_nonnegative(start_t=self.start_t)
-        if not 0 <= self.drive_style <= 1:
-            raise ValueError(f"drive_style must be within [0, 1], got {self.drive_style}")
+        require_unit_interval(drive_style=self.drive_style)
 
     @property
     def spec(self) -> VehicleSpec:
@@ -251,6 +249,20 @@ class NPCVehicleAgent:
         if space.rules.min_turn_radius < self.spec.min_turn_radius:
             raise ValueError(f"the space allows U-turns down to {space.rules.min_turn_radius} m; a "
                              f"{self.vehicle_type.name} needs NPCVehicleAgent.rules({self.vehicle_type})")
+        return memo_layout(space, ("npc", self.route, self.lane_change_s, self.speed_profile, self.vehicle_type),
+                           lambda: self._build_layout(space))
+
+    def _build_layout(self, space: RouteSpace) -> Tuple[
+            LineString, List[Tuple[float, float, float]], List[Tuple[float, float, float]], List[float]]:
+        """
+        ``_validated_layout``, uncached.
+
+        :param RouteSpace space: Route space supplying lane geometry, topology,
+            and vehicle-specific constraints.
+        :returns: As ``_validated_layout``.
+        :rtype: Tuple[LineString, List[Tuple[float, float, float]], List[Tuple[float, float, float]], List[float]]
+        :raises InvalidRoute: As ``_validated_layout``.
+        """
         space.validate(self.route, lane_change_s=self.lane_change_s)
         frame = RouteFrame(space, self.route, self.lane_change_s)
         frame.check_windows(self.speed_profile)
@@ -258,7 +270,7 @@ class NPCVehicleAgent:
         spans = curvature_spans(layout.path)
         check_turning_radius(spans, self.spec.min_turn_radius, self.vehicle_type.name)
         positions = layout.positions(space, self.speed_profile)
-        check_stops(space, layout, self.speed_profile, positions)
+        check_stops(space, layout, self.speed_profile)
         check_footprint(space, layout.path, self.spec.length, self.spec.width)
         return layout.path, spans, layout.limits, positions
 
@@ -430,10 +442,10 @@ class NPCVehicleAgent:
                 # Fit the final leg to the original length target when possible,
                 # then validate the complete path. Never shift lane-change genes.
                 path = replay_path(space, route, positions, agent._lane_change_distances(space)).path
-                target = min(max(space.length(route), min_length), max_length)
+                target = length_target(space.length(route), min_length, max_length)
                 # Smoothing and lane-change lengths depend slightly on the end:
                 # refit a few times until the replayed length is in bounds.
-                for _ in range(_LENGTH_FITS):
+                for _ in range(LENGTH_FITS):
                     if min_length <= path.length <= max_length:
                         break
                     route = refit_end(space, route, path.length, target)
@@ -445,8 +457,7 @@ class NPCVehicleAgent:
                 last_problem = str(problem)
                 continue
             if min_length <= path.length <= max_length:
-                if min_arrival_t and (agent.start_t >= min_arrival_t
-                                      or agent.trajectory(space).arrival_t < min_arrival_t):
+                if not arrives_in_window(agent.start_t, agent.trajectory(space).arrival_t, min_arrival_t):
                     last_problem = f"route must start before and finish at or after {min_arrival_t} s"
                     continue
                 return agent
@@ -516,30 +527,50 @@ class NPCVehicleAgent:
         """
         return rebased(space, self.route, self.lane_change_s, self.speed_profile, route, lane_change_s)
 
+    def stop_rule(self, space: RouteSpace) -> Callable[[SpeedPoint], bool]:
+        """
+        Whether an ordinary stop may lie at a point's position on this agent's route: the rule
+        validation applies (``traffic_constraints.stop_blocks``), for operators that add stops.
+
+        :param RouteSpace space: Route space supplying lane geometry, topology,
+            and vehicle-specific constraints.
+        :returns: The predicate; it allows nothing on a route that has no layout.
+        :rtype: Callable[[SpeedPoint], bool]
+        """
+        try:
+            frame = RouteFrame(space, self.route, self.lane_change_s)
+            blocks = stop_blocks(space, replay_layout(space, self.route, self.lane_change_s,
+                                                      self._lane_change_distances(space, frame)))
+        except InvalidRoute:
+            return lambda point: False
+        return lambda point: stop_problem(blocks, point.lane_id, point.s) is None
+
     def _placed_stops(self, space: RouteSpace) -> Self:
         """
-        This agent with each stop moved, if it lies on a junction lane or within
-        a lane change's expected length, to the nearest driven position off
-        junction lanes and outside lane changes between its neighbours. Stops
-        without such a position stay where they are.
+        This agent with each stop that validation would reject (``traffic_constraints.stop_blocks``:
+        junction lanes and polygons, the replayed lane changes) moved to the nearest allowed driven
+        position between its neighbours, or dropped where there is none (``replay.placed_stops``).
+        A moved stop can change the lane changes' lengths, so placement repeats until it settles.
 
         :param RouteSpace space: Route space supplying lane geometry, topology,
             and vehicle-specific constraints.
         :returns: A copy of this agent with ordinary stops moved to valid driven positions.
         :rtype: NPCVehicleAgent
         """
-        if not any(point.speed == 0 for point in self.speed_profile):
-            return self
+        agent = self
         frame = RouteFrame(space, self.route, self.lane_change_s)
-        excluded = []
-        for index, distance in zip(self.route.lane_change_indices, self._lane_change_distances(space, frame)):
-            start = frame.offsets[index] + frame.ends[index] - frame.starts[index]
-            excluded.append((start - STOP_CLEARANCE, start + distance + STOP_CLEARANCE))
-        try:
-            return replace(self, speed_profile=placed_stops(frame, self.speed_profile, excluded,
-                                                            space.is_junction_lane))
-        except ValueError:
-            return self
+        for _ in range(_PLACEMENT_ROUNDS):
+            if not any(point.speed == 0 for point in agent.speed_profile):
+                return agent
+            layout = replay_layout(space, agent.route, agent.lane_change_s, agent._lane_change_distances(space, frame))
+            try:
+                placed = replace(agent, speed_profile=placed_stops(frame, agent.speed_profile, stop_blocks(space, layout)))
+            except ValueError:
+                return agent
+            if placed.speed_profile == agent.speed_profile:
+                return agent
+            agent = placed
+        return agent
 
     def to_dict(self) -> Dict:
         """
@@ -552,8 +583,7 @@ class NPCVehicleAgent:
             "version": SPEED_PROFILE_VERSION,
             "route": self.route.to_dict(),
             "lane_change_s": list(self.lane_change_s),
-            "speed_profile": [{"lane_id": point.lane_id, "s": point.s, "speed": point.speed, "dwell": point.dwell}
-                              for point in self.speed_profile],
+            "speed_profile": [point.to_dict() for point in self.speed_profile],
             "start_t": self.start_t,
             "vehicle_type": self.vehicle_type.name,
             "drive_style": self.drive_style,
@@ -563,101 +593,26 @@ class NPCVehicleAgent:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict, space: RouteSpace | None = None) -> Self:
+    def from_dict(cls, data: Dict) -> Self:
         """
         Build an agent from ``to_dict`` output.
 
-        Version 1 dicts (no ``version``; speed points by ``fraction`` of the
-        replay path) need the agent type's ``space``: each fraction is placed on
-        the replay path the old format implied, and that map point is anchored
-        to the nearest lane of the path section there, at its projected ``s``
-        clamped to the lane's driven stretch. A point inside the minimum stretch
-        of a lane change snaps to the nearer end of that stretch.
-
         :param Dict data: Serialized mapping previously produced by ``to_dict``.
-        :param RouteSpace | None space: Required for version 1 dicts only.
         :returns: The reconstructed object.
         :rtype: NPCVehicleAgent
-        :raises ValueError: For a version 1 dict without ``space``, or an unknown version.
+        :raises ValueError: For a version 1 dict (no ``version``; speed points by fraction of the
+            path, no longer read) or an unknown version.
         :raises KeyError: If a required serialized field is absent or ``vehicle_type``
             names an unknown vehicle type.
         """
         version = data.get("version", 1)
+        if version == 1:
+            raise ValueError("version 1 NPC dicts (speed points by fraction of the path) are no longer read")
         route = LaneRoute.from_dict(data["route"])
         lane_change_s = tuple(data["lane_change_s"])
         vehicle_type = VehicleType[data["vehicle_type"]]
-        if version == 1:
-            if space is None:
-                raise ValueError("a version 1 NPC dict (speed points by fraction) needs its RouteSpace to load")
-            draws = [(point["fraction"], point["speed"], point.get("dwell", 0.0)) for point in data["speed_profile"]]
-            return cls(route, lane_change_s, _from_fractions(space, route, lane_change_s, draws, vehicle_type),
-                       data["start_t"], vehicle_type, data.get("drive_style", 0.5), obstacle_id=data.get("obstacle_id"), lineage_id=data.get("lineage_id") or new_lineage_id(),
-                   obeys_signals=data.get("obeys_signals", True))
         if version != SPEED_PROFILE_VERSION:
             raise ValueError(f"unknown NPC dict version {version!r}")
-        return cls(route, lane_change_s, tuple(SpeedPoint(**point) for point in data["speed_profile"]),
+        return cls(route, lane_change_s, tuple(SpeedPoint.from_dict(point) for point in data["speed_profile"]),
                    data["start_t"], vehicle_type, data.get("drive_style", 0.5), obstacle_id=data.get("obstacle_id"), lineage_id=data.get("lineage_id") or new_lineage_id(),
                    obeys_signals=data.get("obeys_signals", True))
-
-
-def _from_fractions(space: RouteSpace, route: LaneRoute, lane_change_s: Tuple[float, ...],
-                    draws: Sequence[Tuple[float, float, float]], vehicle_type: VehicleType,
-                    ) -> Tuple[SpeedPoint, ...]:
-    """
-    Version 1 speed points (fraction of the replay path, speed, dwell) as map
-    anchors: the replay path is rebuilt as version 1 did (lane-change lengths
-    from the speed the fractions target), each fraction's map point is found
-    on it and anchored to the nearest lane of its section (``from_dict``).
-
-    :param RouteSpace space: Route space supplying lane geometry, topology,
-        and vehicle-specific constraints.
-    :param LaneRoute route: Route to inspect, validate, or convert.
-    :param Tuple[float, ...] lane_change_s: Lane-change start positions on source
-        lanes, in route order.
-    :param Sequence[Tuple[float, float, float]] draws: Fraction-of-distance,
-        speed, and dwell triples to anchor on the route.
-    :param VehicleType vehicle_type: Vehicle category selecting dimensions and motion limits.
-    :returns: Version-1 speed points converted to lane-anchored speed points.
-    :rtype: Tuple[SpeedPoint, ...]
-    """
-    frame = RouteFrame(space, route, lane_change_s)
-    spec = VEHICLE_SPECS[vehicle_type]
-    fractions = [fraction for fraction, _, _ in draws]
-
-    def target(fraction: float) -> float:
-        """
-        Evaluate the legacy speed profile at a fraction of the replay path.
-
-        :param float fraction: Fraction of the total travelled distance.
-        :returns: The desired moving speed at the requested replay-path fraction.
-        :rtype: float
-        """
-        index = max(bisect_right(fractions, fraction) - 1, 0)
-        return next((speed for _, speed, _ in draws[index:] if speed > 0), draws[-1][1])
-
-    minimum = space.rules.min_lane_change_distance
-    distances = []
-    for index in route.lane_change_indices:
-        start = frame.offsets[index] + frame.ends[index] - frame.starts[index]
-        speed = min(target(start / frame.total if frame.total > 0 else 0.0), spec.max_speed)
-        limit = speed_limit(space, (route.lanes[index], route.lanes[index + 1]))
-        if limit is not None:
-            speed = min(speed, limit)
-        distances.append(min(max(LANE_CHANGE_TIME * speed, minimum), max(MAX_LANE_CHANGE_DISTANCE, minimum)))
-    layout = replay_layout(space, route, lane_change_s, tuple(distances))
-    placed = []
-    for rank, (fraction, speed, dwell) in enumerate(draws):
-        position = fraction * layout.path.length
-        point = layout.path.interpolate(position)
-        best = None
-        for lane_id in layout.lanes_at(position):
-            line = space.service.get_lane_central_curve_by_id(lane_id)
-            low, high = frame.window(lane_id)
-            s = min(max(line.project(point), low), high)
-            gap = line.interpolate(s).distance(point)
-            if best is None or gap < best[0]:
-                best = (gap, lane_id, s)
-        _, lane_id, s = best
-        placed.append((frame.distance(lane_id, s), rank, SpeedPoint(lane_id, s, speed, dwell)))
-    moving = next((speed for _, speed, _ in draws if speed > 0), draws[-1][1])
-    return ordered_points(placed, SpeedPoint(route.lanes[0], route.start_s, moving))

@@ -24,7 +24,7 @@ pedestrians leave the sidewalk.
 These are plausible literature-range defaults, not calibrated to measured data.
 """
 
-from dataclasses import replace
+from dataclasses import dataclass
 from math import erf, exp, pi, sqrt
 from random import Random
 from typing import Mapping, TYPE_CHECKING, Tuple, TypeVar
@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from .pedestrian import WalkerSpec
 
 ComfortSpec = TypeVar("ComfortSpec", "VehicleSpec", "RiderSpec", "WalkerSpec")
-"""Motion specification type preserved by ``comfort_limits``."""
+"""Motion specification types whose hard limits ``comfort_limits`` reads."""
 
 DEFAULT_SPEED_LIMIT = 13.4
 """m/s (30 mph) assumed where a lane has no speed limit."""
@@ -230,20 +230,49 @@ def speed_step(rng: Random, kind: str, speed: float, reference: float, low: floa
     return proposal
 
 
-def comfort_limits(spec: ComfortSpec, kind: str, style: float) -> ComfortSpec:
+@dataclass(frozen=True)
+class ComfortLimits:
     """
-    ``spec`` with the acceleration and comfortable braking of ``style``.
+    The motion limits one agent replays with (``replay.MotionLimits``): its type's hard limits,
+    with the acceleration and comfortable braking of its style (``comfort_limits``).
 
-    :param ComfortSpec spec: Immutable motion specification whose comfortable limits are adjusted.
+    :param float max_speed: m/s.
+    :param float max_acceleration: The style's acceleration, m/s^2.
+    :param float max_deceleration: The type's hard braking limit, m/s^2.
+    :param float max_lateral_acceleration: m/s^2.
+    :param float comfortable_deceleration: The style's braking for stops, curves, limits and the end, m/s^2.
+    :param float min_turn_radius: Metres.
+    """
+    max_speed: float
+    """m/s."""
+    max_acceleration: float
+    """The style's acceleration, m/s^2."""
+    max_deceleration: float
+    """The type's hard braking limit, m/s^2."""
+    max_lateral_acceleration: float
+    """m/s^2."""
+    comfortable_deceleration: float
+    """The style's braking for stops, curves, limits and the end, m/s^2."""
+    min_turn_radius: float
+    """Metres."""
+
+
+def comfort_limits(spec: ComfortSpec, kind: str, style: float) -> ComfortLimits:
+    """
+    The limits an agent of ``spec``'s type replays with at ``style``: acceleration and comfortable
+    braking from ``COMFORT[kind]`` (the only source of comfortable braking), capped by the
+    type's hard limits.
+
+    :param ComfortSpec spec: The type's hard limits.
     :param str kind: Agent type name selecting the comfortable motion limits.
     :param float style: Style value in [0, 1] selecting comfortable acceleration and braking.
-    :returns: A replacement specification of the same type with adjusted comfortable limits.
-    :rtype: ComfortSpec
+    :returns: The agent's motion limits.
+    :rtype: ComfortLimits
     """
     (a0, a1), (d0, d1) = COMFORT[kind]
-    acceleration = min(a0 + (a1 - a0) * style, spec.max_acceleration)
-    braking = min(d0 + (d1 - d0) * style, spec.max_deceleration)
-    return replace(spec, max_acceleration=acceleration, comfortable_deceleration=braking)
+    return ComfortLimits(spec.max_speed, min(a0 + (a1 - a0) * style, spec.max_acceleration), spec.max_deceleration,
+                         spec.max_lateral_acceleration, min(d0 + (d1 - d0) * style, spec.max_deceleration),
+                         spec.min_turn_radius)
 
 
 def style_step(rng: Random, style: float, sigma: float = STYLE_SIGMA) -> float:

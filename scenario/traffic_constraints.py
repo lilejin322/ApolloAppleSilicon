@@ -8,14 +8,13 @@ known conflicts, but cannot certify areas the map does not describe.
 import numpy as np
 import shapely
 from math import ceil, hypot, pi
-from weakref import WeakKeyDictionary
-from shapely.geometry import LineString
-from typing import TYPE_CHECKING, Sequence, List
+from shapely.geometry import LineString, Point
+from typing import Dict, List, Sequence, Tuple
 
 from ..map import MapService
 from ..map.types import LaneMarking
 from ..map.geometry import CenterlineProfile, normalize_angle
-from .routing import InvalidRoute, RouteSpace, _junction_info
+from .routing import InvalidRoute, RouteSpace
 from .replay import ReplayLayout, SpeedPoint
 
 FOOTPRINT_LATERAL_TOLERANCE = 0.2
@@ -31,37 +30,102 @@ TURN_SWEEP_CURVATURE = 1 / 40
 bodies may sweep over painted lines, as long vehicles' overhangs do in tight turns;
 curbs still count."""
 
-_FOOTPRINT_CACHE = WeakKeyDictionary()
-"""At most 128 validation results per immutable loaded map; no trajectory arrays retained."""
+_FOOTPRINT_CACHE_SIZE = 128
+"""Footprint validation results kept per map (``MapService.derived``); no trajectory arrays retained."""
 
 
-def check_stops(space: RouteSpace, layout: ReplayLayout, profile: Sequence[SpeedPoint],
-                positions: Sequence[float]) -> None:
+StopBlocks = Dict[str, Tuple[Tuple[float, float, str], ...] | None]
+"""Per lane of a replay layout, ``(low, high, reason)`` lane-metre spans where an ordinary stop may not lie;
+``None`` forbids the whole lane."""
+
+
+def stop_blocks(space: RouteSpace, layout: ReplayLayout) -> StopBlocks:
     """
-    Reject ordinary stops on junctions, connectors or lane-change stretches.
+    Where an ordinary stop may not lie on a replay layout, by lane: the one rule stop placement
+    (``replay.placed_stops``) and validation (``check_stops``) share.
+
+    A whole connector or junction lane; on other lanes, every stretch inside a junction polygon
+    (partial overlap need not make the whole lane a junction lane), and every stretch the replayed
+    lane changes run along, ``STOP_CLEARANCE`` wider at each end. A lane change's stretch is its
+    piece of the layout projected onto its source and target lanes, so it is as long as the change
+    the agent actually drives.
+
+    :param RouteSpace space: Route space the layout was built on.
+    :param ReplayLayout layout: The route's replay layout.
+    :returns: Blocked spans by lane ID.
+    :rtype: StopBlocks
+    """
+    from .replay import STOP_CLEARANCE
+
+    blocks: Dict[str, List[Tuple[float, float, str]] | None] = {}
+    area = space.junction_area
+    for lanes, line, _ in layout.pieces:
+        for lane_id in lanes:
+            if lane_id not in blocks:
+                if space.virtual_lane(lane_id) is not None or space.is_junction_lane(lane_id):
+                    blocks[lane_id] = None
+                    continue
+                spans: List[Tuple[float, float, str]] = []
+                centerline = space.centerline(lane_id)
+                if area is not None and area.intersects(centerline):
+                    for part in _parts(centerline.intersection(area)):
+                        ends = [centerline.project(Point(xy)) for xy in part.coords]
+                        spans.append((min(ends), max(ends), "ordinary stop lies inside a junction polygon"))
+                blocks[lane_id] = spans
+            if len(lanes) > 1 and blocks[lane_id] is not None:
+                centerline = space.centerline(lane_id)
+                ends = [centerline.project(Point(line.coords[0])), centerline.project(Point(line.coords[-1]))]
+                blocks[lane_id].append((min(ends) - STOP_CLEARANCE, max(ends) + STOP_CLEARANCE,
+                                        "ordinary stop lies in or too close to a lane change"))
+    return {lane_id: None if spans is None else tuple(spans) for lane_id, spans in blocks.items()}
+
+
+def stop_problem(blocks: StopBlocks, lane_id: str, s: float) -> str | None:
+    """
+    Why an ordinary stop may not lie at ``s`` on ``lane_id`` (``stop_blocks``), or None.
+
+    :param StopBlocks blocks: The layout's blocked spans.
+    :param str lane_id: The stop's lane.
+    :param float s: The stop's position on it, in metres.
+    :returns: The reason, or None where a stop may lie.
+    :rtype: str | None
+    """
+    spans = blocks.get(lane_id, ())
+    if spans is None:
+        return "ordinary stop lies on a junction lane or bicycle connector"
+    return next((reason for low, high, reason in spans if low <= s <= high), None)
+
+
+def check_stops(space: RouteSpace, layout: ReplayLayout, profile: Sequence[SpeedPoint]) -> None:
+    """
+    Reject ordinary stops where ``stop_blocks`` forbids them.
 
     :param RouteSpace space: Route space supplying lane geometry, topology, and route-specific constraints.
     :param ReplayLayout layout: Replay layout containing the path and route-to-path mappings.
     :param Sequence['SpeedPoint'] profile: Ordered target-speed points anchored to route lanes.
-    :param Sequence[float] positions: Path positions corresponding to ``profile``, in metres.
     :raises InvalidRoute: If an ordinary stop lies on a virtual or junction lane,
         inside a junction polygon, or in or too close to a lane-change stretch.
     """
-    from .replay import STOP_CLEARANCE
+    if not any(point.speed == 0 for point in profile):
+        return
+    blocks = stop_blocks(space, layout)
+    for point in profile:
+        if point.speed == 0:
+            problem = stop_problem(blocks, point.lane_id, point.s)
+            if problem:
+                raise InvalidRoute(problem)
 
-    changes = [(layout.moved(offset), layout.moved(offset + line.length))
-               for lanes, line, offset in layout.pieces if len(lanes) > 1]
-    for point, position in zip(profile, positions):
-        if point.speed != 0:
-            continue
-        if space.virtual_lane(point.lane_id) is not None or space.is_junction_lane(point.lane_id):
-            raise InvalidRoute("ordinary stop lies on a junction lane or bicycle connector")
-        if any(low - STOP_CLEARANCE <= position <= high + STOP_CLEARANCE for low, high in changes):
-            raise InvalidRoute("ordinary stop lies in or too close to a lane change")
-        # Partial junction overlap need not classify the whole lane as a junction.
-        area = _junction_info(space.service, space._no_turn)["union"]
-        if area is not None and area.intersects(layout.path.interpolate(position)):
-            raise InvalidRoute("ordinary stop lies inside a junction polygon")
+
+def _parts(geometry) -> List:
+    """
+    The line parts of a shapely geometry.
+
+    :param geometry: A (multi)line, collection or point geometry.
+    :returns: Its parts with length.
+    :rtype: List
+    """
+    parts = list(getattr(geometry, "geoms", [geometry]))
+    return [part for part in parts if part.geom_type in ("LineString", "LinearRing") and part.length > 0]
 
 
 def _boxes(x: Sequence[float] | np.ndarray, y: Sequence[float] | np.ndarray, headings: np.ndarray, length: float, width: float) -> np.ndarray:
@@ -101,7 +165,7 @@ def check_footprint(space: RouteSpace, path: LineString, length: float, width: f
     :raises InvalidRoute: If a sampled footprint crosses a prohibiting marking or
         an endpoint footprint overlaps a junction under endpoint restrictions.
     """
-    cache = _FOOTPRINT_CACHE.setdefault(space.service, {})
+    cache = space.service.derived("footprint_checks", lambda view: {})
     key = (path.wkb, length, width, tuple(pivots), space.restricts_endpoints)
     if key not in cache:
         error = None
@@ -109,7 +173,7 @@ def check_footprint(space: RouteSpace, path: LineString, length: float, width: f
             _check_footprint(space, path, length, width, pivots)
         except InvalidRoute as problem:
             error = str(problem)
-        if len(cache) >= 128:
+        if len(cache) >= _FOOTPRINT_CACHE_SIZE:
             del cache[next(iter(cache))]
         cache[key] = error
     if cache[key] is not None:
@@ -148,7 +212,7 @@ def _check_footprint(space: RouteSpace, path: LineString, length: float, width: 
     """
     reach = hypot(length, width) / 2
     markings = _nearby_prohibiting_markings(space.service, path, reach)
-    area = _junction_info(space.service, space._no_turn)["union"]
+    area = space.junction_area
     if not markings and (area is None or not space.restricts_endpoints):
         return
     from .replay import _pieces
