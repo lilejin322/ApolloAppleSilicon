@@ -18,6 +18,7 @@ from ...scenario.map_budget import MapBudget
 from ...scenario.sections import Section
 from ...scenario.traffic_signal import SignalSection, SignalTiming
 from ..ad_agent import ADOperatorConfig
+from ..encounter import EgoEnvelope
 from ..bicycle import BicycleOperatorConfig
 from ..npc_agent import NPCOperatorConfig
 from ..pedestrian import PedestrianOperatorConfig
@@ -112,16 +113,24 @@ class ScenarioKinds:
         """
         return self.kinds[name]
 
-    def of(self, name: str, signals: Any) -> SectionKind[Any]:
+    def of(self, name: str, signals: Any, ego: ADAgent | None = None) -> SectionKind[Any]:
         """
-        The section kind named ``name`` whose replays obey ``signals``.
+        The section kind named ``name`` whose replays obey ``signals`` and, given
+        the ``ego``, whose new agents are drawn to meet it (``SectionKind.toward``).
 
         :param str name: ``"npcs"``, ``"bicycles"`` or ``"pedestrians"``.
         :param SignalSection | None signals: The scenario's signal plans.
-        :returns: ``self[name].with_signals(signals)``.
+        :param ADAgent | None ego: The scenario's ego; None draws new agents at random.
+        :returns: ``self[name].with_signals(signals)``, toward the ego.
         :rtype: SectionKind[Any]
         """
-        return self.kinds[name].with_signals(signals)
+        kind = self.kinds[name].with_signals(signals)
+        if ego is None:
+            return kind
+        try:
+            return kind.toward(EgoEnvelope.of(ego, self.context.ego_space))
+        except Exception:  # An ego the route space cannot path: draw at random, as before.
+            return kind
 
     def fits(self, scenario: Scenario, name: str) -> Callable[[Any], bool]:
         """
@@ -166,8 +175,8 @@ def random_scenario(kinds: ScenarioKinds, rng: Random, config: ScenarioOperatorC
                    else SignalSection.default(kinds.timings))
         scenario = _with(scenario, "signals", signals)
     for name in Scenario.SECTIONS:
-        section: Section = random_section(kinds.of(name, scenario.signals), rng, config.sections[name],
-                                          kinds.fits(scenario, name))
+        kind = kinds.of(name, scenario.signals, scenario.ego)
+        section: Section = random_section(kind, rng, config.sections[name], kinds.fits(scenario, name))
         scenario = _with(scenario, name, section)
     return scenario
 

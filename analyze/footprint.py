@@ -3,8 +3,8 @@ Bodies of the ego and the obstacles, as map-frame rectangles.
 
 Apollo's localization pose is the vehicle's reference point, and its vehicle
 parameters give each edge's distance from that point. A perception obstacle
-gives its centre, heading, length and width; our managers send no polygon
-points, so the box is the obstacle's body.
+gives its centre, heading, length and width; our managers also send that
+box's corners as its polygon points, so the box is the obstacle's body.
 """
 
 from math import cos, sin

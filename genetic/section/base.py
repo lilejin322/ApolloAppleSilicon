@@ -10,11 +10,13 @@ passes its cross-type ones).
 """
 
 from copy import copy
+from math import inf
 from dataclasses import dataclass, field, replace
 from random import Random
 from typing import Any, Callable, Dict, Generic, List, Mapping, Sequence, Tuple, Type, TypeVar
 
 from ...scenario.map_budget import count_for, density_for
+from ..encounter import EgoEnvelope, encounter_score
 from ...scenario.sections import Section, SectionRules
 
 T = TypeVar("T")
@@ -52,6 +54,11 @@ class SectionOperatorConfig:
     """Chance that an agent mutation flips the ``obeys_signals`` gene instead of ``mutate_agent``."""
     compliance_swap_rate: float = 0.5
     """Chance that an agent crossover swaps the two children's ``obeys_signals`` genes."""
+    focus: float = 0.75
+    """Chance that a new agent is the one of ``candidates`` that best meets the ego (``genetic.encounter``),
+    when the kind knows the ego (``SectionKind.toward``); the rest are drawn at random, as background traffic."""
+    candidates: int = 6
+    """Fitting agents drawn to choose a focused one from."""
 
     def prior(self, rules: SectionRules) -> Dict[int, float]:
         """
@@ -97,6 +104,8 @@ class SectionKind(Generic[T]):
         self.signals: Any = None
         """Signal plans the replays obey (``with_signals``); None replays without signals."""
         self.rules: SectionRules = rules or section.RULES
+        self.envelope: EgoEnvelope | None = None
+        """Where the ego may be (``toward``), for drawing new agents that meet it; None draws at random."""
 
     SECTION: Type[Section] = Section
     """The ``Section`` subclass this kind builds."""
@@ -195,6 +204,26 @@ class SectionKind(Generic[T]):
         bound.signals = signals
         return bound
 
+    def toward(self, envelope: EgoEnvelope | None) -> "SectionKind[T]":
+        """
+        A shallow copy of this kind that draws new agents to meet the ego in ``envelope``.
+
+        :param EgoEnvelope | None envelope: Where the ego may be; None draws at random.
+        :rtype: SectionKind[T]
+        """
+        if envelope is self.envelope:
+            return self
+        bound = copy(self)
+        bound.envelope = envelope
+        return bound
+
+    def encounter(self, agent: T) -> float:
+        """How near ``agent`` comes to where the ego may be (``encounter_score``); ``inf`` without an envelope."""
+        if self.envelope is None:
+            return inf
+        body = self.section.body(agent, self.context, self.rules, self.signals)
+        return encounter_score(body, self.rules.times, self.envelope)
+
     def conflict(self, agent: T, others: Sequence[T]) -> str | None:
         """
         Why ``agent`` conflicts with ``others`` inside this section, or None.
@@ -263,11 +292,16 @@ def fill(kind: SectionKind[T], agents: Sequence[T], size: int, rng: Random, conf
     agents: List[T] = list(agents)
     misses: int = 0
     while len(agents) < size and misses < config.attempts * max(1, size):
-        agent: T | None = kind.random_agent(rng)
-        if agent is not None and _fits(kind, agent, agents, fits):
-            agents.append(agent)
-        else:
-            misses += 1
+        wanted = config.candidates if kind.envelope is not None and rng.random() < config.focus else 1
+        drawn: List[T] = []
+        while len(drawn) < wanted and misses < config.attempts * max(1, size):
+            agent: T | None = kind.random_agent(rng)
+            if agent is not None and _fits(kind, agent, agents, fits):
+                drawn.append(agent)
+            else:
+                misses += 1
+        if drawn:  # The one that best meets the ego; the first of equals, so a single draw stays random.
+            agents.append(min(drawn, key=kind.encounter) if len(drawn) > 1 else drawn[0])
     return agents
 
 

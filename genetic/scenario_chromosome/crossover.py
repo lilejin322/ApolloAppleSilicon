@@ -51,8 +51,8 @@ def cx_scenario(first: Scenario, second: Scenario, kinds: ScenarioKinds, rng: Ra
         children = [_with(children[0], "signals", signals[0]), _with(children[1], "signals", signals[1])]
     for name in Scenario.SECTIONS:
         crossed: Tuple[Section, Section] = cx_section(getattr(first, name), getattr(second, name),
-                                                      (kinds.of(name, children[0].signals),
-                                                       kinds.of(name, children[1].signals)), rng,
+                                                      (kinds.of(name, children[0].signals, children[0].ego),
+                                                       kinds.of(name, children[1].signals, children[1].ego)), rng,
                                                       config.sections[name],
                                                       (kinds.fits(children[0], name), kinds.fits(children[1], name)))
         children = [_with(children[0], name, crossed[0]), _with(children[1], name, crossed[1])]

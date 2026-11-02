@@ -1,9 +1,9 @@
 """
 Replay a record: its messages in time order, and the world they describe.
 
-The record's receive times are the one clock every channel shares: the
-messages our managers send carry scenario time in their headers, Apollo's
-carry wall time. ``Replay`` sorts the messages by receive time and keeps a
+The record's receive times are the one clock every channel shares; headers
+are on the wall clock too (our managers stamp the run's start plus scenario
+time), but each sender stamps them its own way. ``Replay`` sorts the messages by receive time and keeps a
 ``World``, the latest state of the ego, the obstacles, the lights and
 Planning, which every oracle reads instead of keeping its own copies.
 """
@@ -18,13 +18,14 @@ from ..manager.routing import planned_lanes
 from .record import RecordReader
 
 __all__ = ["CHASSIS", "COMMAND_STATUS", "EgoState", "LOCALIZATION", "OBSTACLES", "Obstacle", "PLANNING",
-           "PLANNING_COMMAND", "Replay", "TRAFFIC_LIGHT", "World"]
+           "PLANNING_COMMAND", "PREDICTION", "Replay", "TRAFFIC_LIGHT", "World"]
 
 LOCALIZATION = "/apollo/localization/pose"
 CHASSIS = "/apollo/canbus/chassis"
 OBSTACLES = "/apollo/perception/obstacles"
 TRAFFIC_LIGHT = "/apollo/perception/traffic_light"
 PLANNING = "/apollo/planning"
+PREDICTION = "/apollo/prediction"
 PLANNING_COMMAND = "/apollo/planning/command"
 COMMAND_STATUS = "/apollo/planning/command_status"
 _WORLD_CHANNELS = (LOCALIZATION, OBSTACLES, TRAFFIC_LIGHT, PLANNING, PLANNING_COMMAND, COMMAND_STATUS)

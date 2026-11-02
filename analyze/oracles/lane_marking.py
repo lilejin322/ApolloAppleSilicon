@@ -19,6 +19,8 @@ __all__ = ["LaneMarkingOracle"]
 
 _SAME_LINE = 0.3
 """Metres (Hausdorff) within which two lanes' markings are one painted line."""
+_OUTSIDE = {"left": 1.0, "right": -1.0}
+"""The side of a curb away from its lane, as ``_side`` signs it: boundaries run in the lane's direction."""
 
 
 class LaneMarkingOracle(Oracle):
@@ -29,9 +31,12 @@ class LaneMarkingOracle(Oracle):
     Uncrossable is ``LaneMarking.prohibits_crossing``: a real solid white,
     solid yellow, double yellow or curb marking; dotted, unknown and virtual
     boundaries never count. The depth is how far the body reaches into the
-    far side of the line, seen from the ego's reference point, alongside the
-    line only: a body passing a line's end, as when turning off a lane, does
-    not cross it.
+    far side of the line, alongside the line only: a body passing a line's
+    end, as when turning off a lane, does not cross it. A curb's far side is
+    the one away from its lane, wherever the ego is: a wide turn on Borregas
+    Ave put the reference point itself past one. Any other line's far side is
+    the one away from the ego's reference point, since a line two opposite
+    lanes share may be crossed either way.
     Apollo plans with lane widths rather than the boundary curves, and a body
     has round corners, so a normal drive hugging a curb reaches a few
     centimetres past it (3.2 cm on Borregas Ave); ``min_depth`` keeps that out.
@@ -67,7 +72,8 @@ class LaneMarkingOracle(Oracle):
         holding: Dict[LaneMarking, float] = {}
         for marking in self.map.get_lane_markings(body):
             if marking.prohibits_crossing:
-                depth = _depth(marking.geometry, reference, body, self._reach)
+                outside = _OUTSIDE[marking.side] if "CURB" in marking.types else None
+                depth = _depth(marking.geometry, reference, body, self._reach, outside)
                 if depth >= self.min_depth:
                     line = self._line(marking)
                     holding[line] = max(depth, holding.get(line, 0.0))
@@ -103,16 +109,20 @@ def _side(line: LineString, point: Point) -> float:
     return (b.x - a.x) * (point.y - a.y) - (b.y - a.y) * (point.x - a.x)
 
 
-def _depth(line: LineString, reference: Point, body: Polygon, reach: float) -> float:
+def _depth(line: LineString, reference: Point, body: Polygon, reach: float, outside: float | None = None) -> float:
     """
-    How far ``body`` reaches past ``line``, on the side away from ``reference``.
+    How far ``body`` reaches past ``line``, on its ``outside`` (``1.0`` left,
+    ``-1.0`` right), or by default on the side away from ``reference``.
 
     The far side is a strip ``reach`` wide alongside the line, with flat ends,
     so nothing beyond the line's ends counts. A reference point on the line
     has both sides as far sides.
     """
     here = _side(line, reference)
-    sides = (-1.0, 1.0) if here == 0 else (-copysign(1.0, here),)
+    if outside is not None:
+        sides = (outside,)
+    else:
+        sides = (-1.0, 1.0) if here == 0 else (-copysign(1.0, here),)
     deepest = 0.0
     for side in sides:
         part = body.intersection(line.buffer(side * reach, single_sided=True))

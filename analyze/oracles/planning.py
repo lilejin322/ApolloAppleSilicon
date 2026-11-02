@@ -129,3 +129,4 @@ class PlanningFailureOracle(Oracle):
             if episode.duration >= self.max_error:
                 self.report_episode(episode, "planning", f"Planning failed the command for {episode.duration:.1f} s: "
                                                          f"{self._message}")
+

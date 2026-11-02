@@ -99,7 +99,7 @@ def mut_scenario(scenario: Scenario, kinds: ScenarioKinds, rng: Random,
         return mut_ego(scenario, kinds, rng, config)
     if target == "signals":
         return mut_signals(scenario, kinds, rng, config)
-    section: Section = mut_section(getattr(scenario, target), kinds.of(target, scenario.signals), rng,
+    section: Section = mut_section(getattr(scenario, target), kinds.of(target, scenario.signals, scenario.ego), rng,
                                    config.sections[target],
                                    kinds.fits(scenario, target))
     return scenario if section is getattr(scenario, target) else _with(scenario, target, section)
