@@ -19,14 +19,16 @@ in at 1.75 m/s sideways is perceived so as it turns towards the ego's lane,
 0.2 s before Annex 3's point (0.375 m at 1.75 m/s): a little stricter on the ego.
 
 The careful driver brakes along the ego's recorded path; the other moves as
-recorded (replayed agents do not react). Road users behind the ego are not
-considered: one running into the braking ego is to blame for it.
+recorded (replayed agents do not react). Braking so, it must not run into any
+other road user (5.1.1: avoiding one collision by causing another is no safe
+avoidance), but one running into its back is to blame for that: road users
+behind the ego are not considered.
 """
 
 from bisect import bisect_right
 from dataclasses import dataclass
-from math import atan2, cos, sin
-from typing import List, Sequence, Tuple
+from math import atan2, cos, pi, sin
+from typing import Callable, Dict, List, Sequence, Tuple
 
 from shapely.geometry import Polygon
 from shapely.ops import unary_union
@@ -35,7 +37,7 @@ from ..footprint import box
 from .unstructured import normalize_angle
 
 __all__ = ["DECELERATION", "DECISION", "EVALUATION", "HORIZON", "JERK_TIME", "Prevention", "careful_driver_avoids",
-           "careful_driver_gap", "perceived"]
+           "careful_driver_gap", "careful_driver_runs_into", "perceived"]
 
 EVALUATION = 0.4
 """Seconds to evaluate a perceived risk (R157 Annex 3, Table 1)."""
@@ -46,7 +48,7 @@ JERK_TIME = 0.6
 DECELERATION = 0.774 * 9.81
 """m/s^2 of full deceleration, road friction 1.0 (Table 1)."""
 HORIZON = 10.0
-"""Seconds after the touch the braked ego is checked against the other."""
+"""Seconds after the touch, or the danger's end, the braked ego is checked against the road users."""
 
 
 @dataclass(frozen=True)
@@ -62,11 +64,16 @@ class Pose:
 
 @dataclass(frozen=True)
 class Prevention:
-    """What the careful driver would have done: perceived the risk at ``perceived``, braked from ``brake``."""
+    """
+    What the careful driver would have done: perceived the risk at
+    ``perceived``, braked from ``brake``; whether that avoided the touch
+    without running into another road user, else the one it ran into (``into``).
+    """
 
     perceived: float
     brake: float
     avoided: bool
+    into: str | None = None
 
 
 def perceived(ego_bodies: Sequence[Tuple[float, Polygon]], other: Sequence[Tuple[float, Polygon]],
@@ -100,7 +107,7 @@ def perceived(ego_bodies: Sequence[Tuple[float, Polygon]], other: Sequence[Tuple
 def careful_driver_avoids(poses: Sequence[Pose], length: float, width: float,
                           other: Sequence[Tuple[float, Polygon]], brake: float, until: float, *,
                           deceleration: float = DECELERATION, jerk_time: float = JERK_TIME,
-                          behind: bool = False) -> bool:
+                          on_path: bool = False) -> bool:
     """
     Whether the ego, braking from ``brake`` as the careful driver does along
     its recorded path, keeps clear of the other's recorded bodies until ``until``.
@@ -113,15 +120,16 @@ def careful_driver_avoids(poses: Sequence[Pose], length: float, width: float,
     :param float until: The last time to check.
     :param float deceleration: m/s^2 of full deceleration, positive.
     :param float jerk_time: Seconds to full deceleration; 0 for all of it at once.
-    :param bool behind: Never past where the ego was: braking cannot take it further than it went.
+    :param bool on_path: Look for a touch only while the braked ego is on its recorded path: past its end
+        the record shows no road, so nothing there proves one.
     """
     return careful_driver_gap(poses, length, width, other, brake, until, stop_at_touch=True,
-                              deceleration=deceleration, jerk_time=jerk_time, behind=behind) > 0.0
+                              deceleration=deceleration, jerk_time=jerk_time, on_path=on_path) > 0.0
 
 
 def careful_driver_gap(poses: Sequence[Pose], length: float, width: float, other: Sequence[Tuple[float, Polygon]],
                        brake: float, until: float, *, stop_at_touch: bool = False,
-                       deceleration: float = DECELERATION, jerk_time: float = JERK_TIME, behind: bool = False) -> float:
+                       deceleration: float = DECELERATION, jerk_time: float = JERK_TIME, on_path: bool = False) -> float:
     """
     The least distance between the careful driver's body, braking from
     ``brake`` along the ego's recorded path, and the other's recorded bodies,
@@ -130,7 +138,58 @@ def careful_driver_gap(poses: Sequence[Pose], length: float, width: float, other
     :param bool stop_at_touch: Return at the first touch.
     :param float deceleration: As for ``careful_driver_avoids``.
     :param float jerk_time: As for ``careful_driver_avoids``.
-    :param bool behind: As for ``careful_driver_avoids``.
+    :param bool on_path: As for ``careful_driver_avoids``.
+    """
+    pose = _braking(poses, brake, deceleration, jerk_time)
+    gap = float("inf")
+    for t, body in other:
+        if t < brake - 1e-6 or t > until + 1e-6:
+            continue
+        x, y, heading, recorded = pose(t)
+        if on_path and not recorded:
+            continue
+        gap = min(gap, box(x, y, heading, length, width).distance(body))
+        if gap == 0.0 and stop_at_touch:
+            break
+    return gap
+
+
+def careful_driver_runs_into(poses: Sequence[Pose], length: float, width: float,
+                             traffic: Sequence[Tuple[float, Polygon, str]], brake: float, until: float, *,
+                             deceleration: float = DECELERATION, jerk_time: float = JERK_TIME) -> str | None:
+    """
+    The first of ``traffic`` the ego, braking from ``brake`` as the careful
+    driver does along its recorded path, touches until ``until``; None when
+    none. One first touching it at its back ran into the braking ego, and
+    replayed it then passes through: it does not count.
+
+    :param traffic: Road users' bodies and names, in time order, several at a time.
+    :param float deceleration: As for ``careful_driver_avoids``.
+    :param float jerk_time: As for ``careful_driver_avoids``.
+    """
+    pose = _braking(poses, brake, deceleration, jerk_time)
+    braked: Dict[float, Tuple[float, float, float, Polygon]] = {}
+    behind = set()
+    for t, body, name in traffic:
+        if t < brake - 1e-6 or t > until + 1e-6 or name in behind:
+            continue
+        if t not in braked:
+            x, y, heading, _ = pose(t)
+            braked[t] = x, y, heading, box(x, y, heading, length, width)
+        x, y, heading, mine = braked[t]
+        if mine.intersects(body):
+            centre = body.centroid
+            if abs(normalize_angle(atan2(centre.y - y, centre.x - x) - heading)) < 3 * pi / 4:
+                return name
+            behind.add(name)
+    return None
+
+
+def _braking(poses: Sequence[Pose], brake: float, deceleration: float,
+             jerk_time: float) -> Callable[[float], Tuple[float, float, float, bool]]:
+    """
+    The careful driver's centre and heading at a time from ``brake`` on, along
+    the recorded path, and whether it is still on it.
     """
     times = [p.t for p in poses]
     arc = [0.0]
@@ -138,18 +197,11 @@ def careful_driver_gap(poses: Sequence[Pose], length: float, width: float, other
         arc.append(arc[-1] + ((b.x - a.x) ** 2 + (b.y - a.y) ** 2) ** 0.5)
     start = _interpolate(times, arc, brake)
     speed = _interpolate(times, [p.speed for p in poses], brake)
-    gap = float("inf")
-    for t, body in other:
-        if t < brake - 1e-6 or t > until + 1e-6:
-            continue
+
+    def pose(t: float) -> Tuple[float, float, float, bool]:
         s = start + _braked(speed, t - brake, deceleration, jerk_time)
-        if behind:
-            s = min(s, _interpolate(times, arc, t))
-        x, y, heading = _along(poses, arc, s)
-        gap = min(gap, box(x, y, heading, length, width).distance(body))
-        if gap == 0.0 and stop_at_touch:
-            break
-    return gap
+        return (*_along(poses, arc, s), s <= arc[-1] + 1e-6)
+    return pose
 
 
 def _braked(speed: float, elapsed: float, deceleration: float = DECELERATION, jerk_time: float = JERK_TIME) -> float:

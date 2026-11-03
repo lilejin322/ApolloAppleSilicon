@@ -29,7 +29,7 @@ from .constellations import Party, RssMap, relative_constellation, unstructured_
 from .formulas import lon_stated_braking
 from .physics import SPEED_MAX, stopping_distance
 from .preventable import (DECISION, EVALUATION, HORIZON, Pose, Prevention, careful_driver_avoids, careful_driver_gap,
-                          perceived)
+                          careful_driver_runs_into, perceived)
 from .structured import IntersectionChecker, NonIntersectionChecker
 from .types import (CANONICAL, ConstellationType, LatPosition, LatResponse, LonPosition, LonResponse, ObjectType,
                     RelativeConstellation, RssParameters, RssState, UnstructuredResponse, is_dangerous)
@@ -108,7 +108,10 @@ class _Side:
     structured: NonIntersectionChecker = field(default_factory=NonIntersectionChecker)
     intersection: IntersectionChecker = field(default_factory=IntersectionChecker)
     unstructured: UnstructuredChecker = field(default_factory=UnstructuredChecker)
-    ids: Dict[ConstellationType, int] = field(default_factory=dict)
+    constellation_id: int = 0
+    """The id of its current constellation, which the checkers keep their history by."""
+    checked: int | None = None
+    """The time index it was last checked at."""
     kind: ConstellationType | None = None
     last: float | None = None
     """Its previous frame, while it is seen frame after frame."""
@@ -192,6 +195,7 @@ class RssJudge:
         # Per obstacle, the least margin of the ego failing RSS against it, held until the danger's end: a
         # failure that a touch then shows made no difference (``_braking_in_vain``) does not count.
         self._held: Dict[int, Tuple[float, str, Moment]] = {}
+        self._contacts: Dict[int, float] | None = None  # When each obstacle first touched the ego (``_traffic``).
 
     def add(self, world: World) -> None:
         """Take one obstacle frame."""
@@ -340,11 +344,14 @@ class RssJudge:
             side.calm(None)  # Not relevant, which the library takes as safe.
             return None
         kind = constellation.constellation_type
-        if kind != side.kind:
-            # A new constellation starts the checkers without history (digest §4.1), but what the party
-            # owed and failed in the danger goes on: a light changing colour does not undo it.
-            side.kind, side.lateral = kind, []
-        constellation = replace(constellation, constellation_id=side.ids.setdefault(kind, len(side.ids) + 1))
+        if kind != side.kind or side.checked != time_index - 1:
+            # A new constellation where the last time index had none of its type, as
+            # RssConstellationIdProvider.cpp drops ids unused then: the checkers start it without history
+            # (digest §4.1), but what the party owed and failed in the danger goes on: a light changing
+            # colour does not undo it.
+            side.kind, side.lateral, side.constellation_id = kind, [], side.constellation_id + 1
+        side.checked = time_index
+        constellation = replace(constellation, constellation_id=side.constellation_id)
         if kind == ConstellationType.UNSTRUCTURED:
             state = side.unstructured.check(constellation, time_index)
         elif kind.is_intersection:
@@ -535,7 +542,8 @@ class RssJudge:
             else:
                 kind = "collision_by_other"
                 detail = (f"{cause}; {lapse or 'the ego responded properly'}, and {careful} could not have "
-                          f"avoided it either")
+                          + ("avoided it either" if prevention.into is None else
+                             f"avoided it without running into {prevention.into} (UN R157 5.1.1)"))
         self.verdicts.append(Verdict(name, frame.t, kind, detail, frame.ego.x, frame.ego.y, _name(ego_side.kind),
                                      _part(frame.ego, frame.obstacles[oid])))
 
@@ -567,19 +575,26 @@ class RssJudge:
         bodies = [(f.t, f.obstacles[oid].body) for f in window]
         careful = min([careful_driver_gap(poses, ego.length, ego.width, bodies, brake, window[-1].t)]
                       + [g for g, t in gaps if t < brake - 1e-6])
-        if careful > gap + SHORTFALL:
-            name = window[0].names[oid]
-            at = next(f for f in window if f.t == closest)
-            self._lower(gap, f"at t={closest:.2f} s the ego came within {gap:.1f} m of {name}, which {episode.cause}; "
-                             f"a competent and careful driver braking from t={brake:.2f} s would have kept "
-                             f"{careful:.1f} m", _moment(at, oid, "near miss"))
+        if careful <= gap + SHORTFALL:
+            return
+        until = window[-1].t + HORIZON
+        if careful_driver_runs_into(poses, ego.length, ego.width, self._traffic(oid, brake, until), brake, until):
+            return  # Keeping clearer so, it would have run into another road user: no safer driving to hold it to.
+        name = window[0].names[oid]
+        at = next(f for f in window if f.t == closest)
+        self._lower(gap, f"at t={closest:.2f} s the ego came within {gap:.1f} m of {name}, which {episode.cause}; "
+                         f"a competent and careful driver braking from t={brake:.2f} s would have kept "
+                         f"{careful:.1f} m", _moment(at, oid, "near miss"))
 
     def _braking_in_vain(self, index: int, oid: int, ego_side: _Side, other_side: _Side) -> float | None:
         """
         When the ego owed braking, if it failed nothing else, the other failed
         or left RSS's bounds, and braking at its ``brake_min`` from then along
         its path would still have left it touched by the other as recorded:
-        its failure did not cause the touch. None otherwise.
+        its failure did not cause the touch. None otherwise, also where only
+        past the end of its recorded path: the record shows nothing there.
+        Braking so is not capped at where the ego went: braking later but
+        harder it may have stopped short where braking as owed went on by.
         """
         owed = ego_side.owed.get("lon")
         if set(ego_side.failed) != {"lon"} or owed is None or not (other_side.failure or other_side.bounds):
@@ -590,11 +605,15 @@ class RssJudge:
         poses = [Pose(f.t, f.ego.x, f.ego.y, f.ego.heading, f.ego.speed) for f in self._frames]
         bodies = [(f.t, f.obstacles[oid].body) for f in self._frames if oid in f.obstacles]
         avoided = careful_driver_avoids(poses, frame.ego.length, frame.ego.width, bodies, owed.due, frame.t + HORIZON,
-                                        deceleration=-self.params.ego.alpha_lon.brake_min, jerk_time=0.0, behind=True)
+                                        deceleration=-self.params.ego.alpha_lon.brake_min, jerk_time=0.0, on_path=True)
         return None if avoided else owed.due
 
     def _prevention(self, index: int, oid: int, side: _Side) -> Prevention:
-        """What a competent and careful driver in the ego's place would have done about the touch at ``index``."""
+        """
+        What a competent and careful driver in the ego's place would have done
+        about the touch at ``index``: it avoided it only without running into
+        another road user (UN R157 5.1.1).
+        """
         touch = self._frames[index].t
         before = [f for f in self._frames[:index + 1] if oid in f.obstacles and f.t >= touch - LOOKBACK - 1e-6]
         sweeps = []
@@ -609,8 +628,26 @@ class RssJudge:
         ego = self._frames[index].ego
         poses = [Pose(f.t, f.ego.x, f.ego.y, f.ego.heading, f.ego.speed) for f in self._frames]
         bodies = [(f.t, f.obstacles[oid].body) for f in self._frames if oid in f.obstacles]
-        return Prevention(when, brake, careful_driver_avoids(poses, ego.length, ego.width, bodies, brake,
-                                                             touch + HORIZON))
+        until = touch + HORIZON
+        if not careful_driver_avoids(poses, ego.length, ego.width, bodies, brake, until):
+            return Prevention(when, brake, False)
+        into = careful_driver_runs_into(poses, ego.length, ego.width, self._traffic(oid, brake, until), brake, until)
+        return Prevention(when, brake, into is None, into)
+
+    def _traffic(self, oid: int, since: float, until: float) -> List[Tuple[float, Polygon, str]]:
+        """
+        The bodies and names of the road users but ``oid`` from ``since`` to
+        ``until``, each up to its first touch with the ego: after a touch the
+        replayed bodies pass through each other.
+        """
+        if self._contacts is None:
+            self._contacts = {}
+            for f in self._frames:
+                for o, other in f.obstacles.items():
+                    if o not in self._contacts and f.ego.body.intersects(other.body):
+                        self._contacts[o] = f.t
+        return [(f.t, other.body, f.names[o]) for f in self._frames if since - 1e-6 <= f.t <= until + 1e-6
+                for o, other in f.obstacles.items() if o != oid and f.t < self._contacts.get(o, float("inf"))]
 
 
 def _moment(frame: _Frame, oid: int, constellation: str) -> Moment:
