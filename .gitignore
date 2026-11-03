@@ -235,3 +235,6 @@ cython_debug/
 
 # Apollo ROOT dir
 apollo/
+
+### Scenario search ###
+runs/

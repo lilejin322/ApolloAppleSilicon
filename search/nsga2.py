@@ -7,12 +7,12 @@ parents by DEAP's dominance-and-crowding tournament, crosses pairs
 offspring's section mixes, evaluates them, and keeps the best ``population``
 of parents and offspring by NSGA-II's order, a duplicate of a better one's
 findings last (``select``). Before each selection every individual's rarity
-(f3, ``objectives.rarity``) is computed anew from all the search's runs so far;
-the Pareto archive keeps the values of each evaluation, rarity 0, so that it
-holds the margins and kinds found. Every evaluation is logged and
-checkpointed in the search's ``RunStore``; started on a store that holds a
-checkpoint, a search goes on from it and evaluates what the uninterrupted
-search would have.
+(f3, ``objectives.rarity``) is computed anew from all the search's runs so far,
+one evaluated again after a kill once; the Pareto archive keeps the values of
+each evaluation, rarity 0, so that it holds the margins and kinds found. Every
+evaluation is logged and checkpointed in the search's ``RunStore``; started on
+a store that holds a checkpoint, a search goes on from it and evaluates what
+the uninterrupted search would have.
 """
 
 import logging
@@ -20,7 +20,7 @@ import time
 from collections import Counter
 from dataclasses import dataclass
 from random import Random
-from typing import Any, Callable, Dict, List, NamedTuple, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, NamedTuple, Sequence, Tuple
 
 from deap import base, tools
 
@@ -157,11 +157,9 @@ def run_nsga2(kinds: ScenarioKinds, evaluate: Evaluate, store: RunStore, config:
     """
     rng = Random(config.seed)
     pareto = tools.ParetoFront()
-    findings: Dict[str, Dict[str, Any]] = {}
-    counts: Counter = Counter()  # Runs that had each finding's key and each of Planning's changes, for rarity.
-    for entry in store.evaluations():  # The log has every evaluation, also those selection dropped.
-        _found(findings, entry)
-        counts.update(set(entry.get("signature", ())) | set(entry.get("transitions", ())))
+    # Every evaluation, also those selection dropped, by name: one logged again after a kill replaces its
+    # first line, which the checkpoint never took (``RunStore``).
+    logged: Dict[str, Dict[str, Any]] = {entry["name"]: entry for entry in store.evaluations()}
     checkpoint = store.load_checkpoint()
     if checkpoint is None:
         generation, population, seconds = 0, [], 0.0
@@ -199,16 +197,16 @@ def run_nsga2(kinds: ScenarioKinds, evaluate: Evaluate, store: RunStore, config:
             individual.name = evaluation.name
             individual.signature = evaluation.signature
             individual.transitions = evaluation.transitions
-            counts.update(set(evaluation.signature) | set(evaluation.transitions))
+            logged[evaluation.name] = evaluation.to_json()
             store.save_scenario(evaluation.name, individual.scenario)
-            store.log(evaluation.to_json())
+            store.log(logged[evaluation.name])
             pareto.update([individual])  # Every evaluation, so that a stop in a generation keeps its finds.
             store.save_pareto([{"name": i.name, "margin": i.fitness.values[0], "kinds": round(i.fitness.values[1])}
                                for i in pareto])
-            _found(findings, evaluation.to_json())
-            store.save_findings([{"key": key, **best} for key, best in sorted(findings.items())])
+            store.save_findings(_findings(logged.values()))
             save()
             _logger.info("%s", evaluation.summary())
+        counts = _counts(logged.values())
         for individual in population + offspring:
             margin, violated = individual.fitness.values[:2]
             individual.fitness.values = margin, violated, rarity(individual.signature, individual.transitions, counts)
@@ -281,13 +279,25 @@ def select(individuals: Sequence[Individual], k: int) -> List[Individual]:
     return (unique + duplicates)[:k]
 
 
-def _found(findings: Dict[str, Dict[str, Any]], entry: Dict[str, Any]) -> None:
-    """Keep, for each key an evaluation's findings have, the best that found it: least margin, then most kinds."""
-    best = {"name": entry["name"], "margin": entry["margin"], "kinds": entry["kinds"]}
-    for key in entry.get("signature", ()):
-        known = findings.get(key)
-        if known is None or (best["margin"], -best["kinds"]) < (known["margin"], -known["kinds"]):
-            findings[key] = best
+def _counts(entries: Iterable[Dict[str, Any]]) -> Counter:
+    """For each finding's key and each of Planning's changes, the logged evaluations that had it, for rarity."""
+    return Counter(key for entry in entries
+                   for key in set(entry.get("signature", ())) | set(entry.get("transitions", ())))
+
+
+def _findings(entries: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    For each key the logged evaluations' findings have, by key, the best that
+    found it: least margin, then most kinds, then the first.
+    """
+    findings: Dict[str, Dict[str, Any]] = {}
+    for entry in entries:
+        best = {"name": entry["name"], "margin": entry["margin"], "kinds": entry["kinds"]}
+        for key in entry.get("signature", ()):
+            known = findings.get(key)
+            if known is None or (best["margin"], -best["kinds"]) < (known["margin"], -known["kinds"]):
+                findings[key] = best
+    return [{"key": key, **best} for key, best in sorted(findings.items())]
 
 
 def _tournament(individuals: Sequence[Individual], rng: Random) -> List[Individual]:

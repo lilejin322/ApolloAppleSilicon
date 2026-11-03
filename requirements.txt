@@ -3,5 +3,6 @@
 shapely>=2.0,<3
 networkx>=3.2,<4
 protobuf==7.36.2
-docker==7.2
 websocket-client>=1.8,<2
+# The scenario search's NSGA-II (search/nsga2.py).
+deap>=1.4,<2
