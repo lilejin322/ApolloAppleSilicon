@@ -8,7 +8,6 @@ trajectory sets who must brake, who may continue and when to drive away.
 
 from math import atan2, pi
 from typing import Dict, Tuple
-
 from shapely.geometry.base import BaseGeometry
 
 from .physics import feq
@@ -22,22 +21,44 @@ DRIVE_AWAY_STOPPED_MAX_SPEED = 0.1
 """m/s up to which a road user counts as stopped (checker line 21)."""
 
 Sets = Tuple[BaseGeometry, BaseGeometry]
+"""A road user's ``(brake, continue_forward)`` trajectory sets (``trajectories.sets``)."""
 
 
 def normalize_angle(angle: float) -> float:
-    """``normalizeAngleSigned``: into (-pi, pi]."""
+    """
+    ``normalizeAngleSigned``: into (-pi, pi].
+
+    :param float angle: Radians.
+    :returns: The same direction in radians, in (-pi, pi].
+    :rtype: float
+    """
     angle = (angle + pi) % (2 * pi) - pi
     return pi if angle == -pi else angle
 
 
 def drive_away_range(ego: Tuple[float, float], other: Tuple[float, float], max_angle: float) -> Tuple[float, float]:
-    """Headings that lead away from ``other``, within ``max_angle`` of its opposite (checker 376-390)."""
+    """
+    Headings that lead away from ``other``, within ``max_angle`` of its opposite (checker 376-390).
+
+    :param Tuple[float, float] ego: The ego's ``(x, y)``, map frame.
+    :param Tuple[float, float] other: The other's ``(x, y)``.
+    :param float max_angle: Radians either side of straight away from the other (``drive_away_max_angle``).
+    :returns: ``(begin, end)`` in radians, each in (-pi, pi]; ``end < begin`` where it wraps through pi.
+    :rtype: Tuple[float, float]
+    """
     away = atan2(ego[1] - other[1], ego[0] - other[0])
     return normalize_angle(away - max_angle), normalize_angle(away + max_angle)
 
 
 def inside_heading_range(angle: float, heading_range: Tuple[float, float]) -> bool:
-    """Whether ``angle`` lies in ``[begin, end]``, wrapping through pi when ``end < begin``."""
+    """
+    Whether ``angle`` lies in ``[begin, end]``, wrapping through pi when ``end < begin``.
+
+    :param float angle: Radians, in (-pi, pi].
+    :param Tuple[float, float] heading_range: ``(begin, end)`` in radians (``drive_away_range``).
+    :returns: True if it lies in the range, its ends included.
+    :rtype: bool
+    """
     begin, end = heading_range
     if end >= begin:
         return begin <= angle <= end
@@ -45,7 +66,14 @@ def inside_heading_range(angle: float, heading_range: Tuple[float, float]) -> bo
 
 
 def _collides(a: BaseGeometry, b: BaseGeometry) -> bool:
-    """Return whether two reachable sets intersect; boundary contact counts as collision."""
+    """
+    Return whether two reachable sets intersect; boundary contact counts as collision.
+
+    :param BaseGeometry a: One trajectory set.
+    :param BaseGeometry b: Another.
+    :returns: True if they share any point.
+    :rtype: bool
+    """
     return not a.disjoint(b)  # Touching counts.
 
 
@@ -55,23 +83,42 @@ class UnstructuredChecker:
     other had to brake at the last safe time, and a drive-away until it is
     safe, the other moves or the ego steers out of the range.
     """
+    _time: int | None
+    """The time index being checked; None before the first."""
+    _last: Dict[int, bool]
+    """Per constellation id, whether the other had to brake at the last safe time, as of the previous time index."""
+    _new: Dict[int, bool]
+    """The same, as of the current time index: what the next one remembers."""
+    _drive_away: Dict[int, Tuple[Tuple[float, float], Tuple[float, float]]]
+    """
+    Per constellation id, the drive-away heading range given and the other's ``(x, y)`` then, kept until it is
+    safe, the other moves or the ego steers out of the range.
+    """
+    _ego_sets: Sets | None
+    """The ego's sets at the current time index, computed once; None until needed."""
 
     def __init__(self) -> None:
-        """Initialize per-object safety history, drive-away positions and the per-frame ego-set cache."""
-        self._time: int | None = None
-        self._last: Dict[int, bool] = {}
-        self._new: Dict[int, bool] = {}
-        self._drive_away: Dict[int, Tuple[Tuple[float, float], Tuple[float, float]]] = {}
-        self._ego_sets: Sets | None = None
+        """
+        Initialize per-object safety history, drive-away positions and the per-frame ego-set cache.
+        """
+        self._time = None
+        self._last = {}
+        self._new = {}
+        self._drive_away = {}
+        self._ego_sets = None
 
     def check(self, constellation: RelativeConstellation, time_index: int, *, ego_sets: Sets | None = None,
               other_sets: Sets | None = None) -> RssState | None:
         """
         The ego's state and proper response.
 
-        :param ego_sets: The ego's ``(brake, continue_forward)`` sets; computed once per time index by default.
-        :param other_sets: The other's; computed by default.
+        :param RelativeConstellation constellation: An unstructured constellation.
+        :param int time_index: Its time index: not lower than the last call's.
+        :param Sets | None ego_sets: The ego's ``(brake, continue_forward)`` sets; computed once per time index by
+            default.
+        :param Sets | None other_sets: The other's; computed by default.
         :returns: The state, or None when the sets cannot be calculated or are empty.
+        :rtype: RssState | None
         """
         c = constellation
         if time_index != self._time:

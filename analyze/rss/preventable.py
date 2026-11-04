@@ -29,7 +29,6 @@ from bisect import bisect_right
 from dataclasses import dataclass
 from math import atan2, cos, pi, sin
 from typing import Callable, Dict, List, Sequence, Tuple
-
 from shapely.geometry import Polygon
 from shapely.ops import unary_union
 
@@ -53,13 +52,25 @@ HORIZON = 10.0
 
 @dataclass(frozen=True)
 class Pose:
-    """The ego's body centre at one frame."""
+    """
+    The ego's body centre at one frame.
 
+    :param float t: Seconds since the record began.
+    :param float x: Body centre, map frame.
+    :param float y: Body centre.
+    :param float heading: Radians.
+    :param float speed: m/s.
+    """
     t: float
+    """Seconds since the record began."""
     x: float
+    """Body centre, map frame."""
     y: float
+    """Body centre."""
     heading: float
+    """Radians."""
     speed: float
+    """m/s."""
 
 
 @dataclass(frozen=True)
@@ -68,12 +79,20 @@ class Prevention:
     What the careful driver would have done: perceived the risk at
     ``perceived``, braked from ``brake``; whether that avoided the touch
     without running into another road user, else the one it ran into (``into``).
-    """
 
+    :param float perceived: Seconds since the record began: when it perceived the risk (``perceived``).
+    :param float brake: Seconds since the record began: when it began braking, ``EVALUATION + DECISION`` later.
+    :param bool avoided: Whether braking so kept it clear of the other without running into another road user.
+    :param str | None into: The road user it ran into avoiding the touch, e.g. ``"VEHICLE 1003"``; None otherwise.
+    """
     perceived: float
+    """Seconds since the record began: when it perceived the risk (``perceived``)."""
     brake: float
+    """Seconds since the record began: when it began braking, ``EVALUATION + DECISION`` later."""
     avoided: bool
+    """Whether braking so kept it clear of the other without running into another road user."""
     into: str | None = None
+    """The road user it ran into avoiding the touch, e.g. ``"VEHICLE 1003"``; None otherwise."""
 
 
 def perceived(ego_bodies: Sequence[Tuple[float, Polygon]], other: Sequence[Tuple[float, Polygon]],
@@ -83,10 +102,12 @@ def perceived(ego_bodies: Sequence[Tuple[float, Polygon]], other: Sequence[Tuple
     other's ground braking at ``brake_min`` meets the ground the ego's body
     covers from then until the touch (the last of ``ego_bodies``).
 
-    :param ego_bodies: The ego's bodies up to the touch, by time.
-    :param other: At the same frames, the ground the other covers braking at its ``brake_min``.
-    :param since: When it first behaved against RSS; None when it was not seen to.
-    :returns: The time; the touch's when never before.
+    :param Sequence[Tuple[float, Polygon]] ego_bodies: The ego's bodies up to the touch, ``(t, body)`` by time.
+    :param Sequence[Tuple[float, Polygon]] other: At the same frames, the ground the other covers braking at its
+        ``brake_min`` (``judge._sweep``).
+    :param float | None since: When it first behaved against RSS; None when it was not seen to.
+    :returns: Seconds since the record began; the touch's time when never before.
+    :rtype: float
     """
     covered: List[Polygon] = []
     ground = Polygon()
@@ -112,16 +133,18 @@ def careful_driver_avoids(poses: Sequence[Pose], length: float, width: float,
     Whether the ego, braking from ``brake`` as the careful driver does along
     its recorded path, keeps clear of the other's recorded bodies until ``until``.
 
-    :param poses: The ego's recorded poses, by time.
-    :param float length: The ego's length.
-    :param float width: The ego's width.
-    :param other: The other's bodies, by time.
-    :param float brake: When the careful driver starts braking.
-    :param float until: The last time to check.
+    :param Sequence[Pose] poses: The ego's recorded poses, by time.
+    :param float length: The ego's length, m.
+    :param float width: The ego's width, m.
+    :param Sequence[Tuple[float, Polygon]] other: The other's bodies, ``(t, body)`` by time.
+    :param float brake: Seconds since the record began: when the careful driver starts braking.
+    :param float until: Seconds since the record began: the last time to check.
     :param float deceleration: m/s^2 of full deceleration, positive.
     :param float jerk_time: Seconds to full deceleration; 0 for all of it at once.
     :param bool on_path: Look for a touch only while the braked ego is on its recorded path: past its end
         the record shows no road, so nothing there proves one.
+    :returns: True if the braked ego never touches the other's bodies from ``brake`` to ``until``.
+    :rtype: bool
     """
     return careful_driver_gap(poses, length, width, other, brake, until, stop_at_touch=True,
                               deceleration=deceleration, jerk_time=jerk_time, on_path=on_path) > 0.0
@@ -135,10 +158,18 @@ def careful_driver_gap(poses: Sequence[Pose], length: float, width: float, other
     ``brake`` along the ego's recorded path, and the other's recorded bodies,
     from ``brake`` to ``until``; 0 at a touch.
 
+    :param Sequence[Pose] poses: The ego's recorded poses, by time.
+    :param float length: The ego's length, m.
+    :param float width: The ego's width, m.
+    :param Sequence[Tuple[float, Polygon]] other: The other's bodies, ``(t, body)`` by time.
+    :param float brake: Seconds since the record began: when the careful driver starts braking.
+    :param float until: Seconds since the record began: the last time to check.
     :param bool stop_at_touch: Return at the first touch.
     :param float deceleration: As for ``careful_driver_avoids``.
     :param float jerk_time: As for ``careful_driver_avoids``.
     :param bool on_path: As for ``careful_driver_avoids``.
+    :returns: Metres; 0 at a touch; infinite when none of the other's bodies is checked in the window.
+    :rtype: float
     """
     pose = _braking(poses, brake, deceleration, jerk_time)
     gap = float("inf")
@@ -163,9 +194,17 @@ def careful_driver_runs_into(poses: Sequence[Pose], length: float, width: float,
     none. One first touching it at its back ran into the braking ego, and
     replayed it then passes through: it does not count.
 
-    :param traffic: Road users' bodies and names, in time order, several at a time.
+    :param Sequence[Pose] poses: The ego's recorded poses, by time.
+    :param float length: The ego's length, m.
+    :param float width: The ego's width, m.
+    :param Sequence[Tuple[float, Polygon, str]] traffic: Road users' ``(t, body, name)``, in time order, several
+        at a time.
+    :param float brake: Seconds since the record began: when the careful driver starts braking.
+    :param float until: Seconds since the record began: the last time to check.
     :param float deceleration: As for ``careful_driver_avoids``.
     :param float jerk_time: As for ``careful_driver_avoids``.
+    :returns: The name of the first it runs into, e.g. ``"VEHICLE 1003"``; None when none.
+    :rtype: str | None
     """
     pose = _braking(poses, brake, deceleration, jerk_time)
     braked: Dict[float, Tuple[float, float, float, Polygon]] = {}
@@ -190,6 +229,13 @@ def _braking(poses: Sequence[Pose], brake: float, deceleration: float,
     """
     The careful driver's centre and heading at a time from ``brake`` on, along
     the recorded path, and whether it is still on it.
+
+    :param Sequence[Pose] poses: The ego's recorded poses, by time.
+    :param float brake: Seconds since the record began: when it starts braking, from its recorded place and speed.
+    :param float deceleration: m/s^2 of full deceleration, positive.
+    :param float jerk_time: Seconds to full deceleration; 0 for all of it at once.
+    :returns: Its pose at a time: ``(x, y, heading, on_path)``.
+    :rtype: Callable[[float], Tuple[float, float, float, bool]]
     """
     times = [p.t for p in poses]
     arc = [0.0]
@@ -199,14 +245,30 @@ def _braking(poses: Sequence[Pose], brake: float, deceleration: float,
     speed = _interpolate(times, [p.speed for p in poses], brake)
 
     def pose(t: float) -> Tuple[float, float, float, bool]:
-        """Return a braked pose along the recorded path and whether it remains within that path."""
+        """
+        Return a braked pose along the recorded path and whether it remains within that path.
+
+        :param float t: Seconds since the record began, from ``brake`` on.
+        :returns: ``(x, y, heading, on_path)``: its body centre, map frame, its heading in radians, and whether
+            it has not yet passed the end of the recorded path.
+        :rtype: Tuple[float, float, float, bool]
+        """
         s = start + _braked(speed, t - brake, deceleration, jerk_time)
         return (*_along(poses, arc, s), s <= arc[-1] + 1e-6)
     return pose
 
 
 def _braked(speed: float, elapsed: float, deceleration: float = DECELERATION, jerk_time: float = JERK_TIME) -> float:
-    """Metres covered in ``elapsed`` seconds from ``speed``, jerking to full ``deceleration`` in ``jerk_time``."""
+    """
+    Metres covered in ``elapsed`` seconds from ``speed``, jerking to full ``deceleration`` in ``jerk_time``.
+
+    :param float speed: m/s when braking starts.
+    :param float elapsed: Seconds since.
+    :param float deceleration: m/s^2 of full deceleration, positive.
+    :param float jerk_time: Seconds to full deceleration; 0 or less for all of it at once.
+    :returns: Metres, no further than where it stops.
+    :rtype: float
+    """
     if jerk_time <= 0.0:
         rest = min(elapsed, speed / deceleration)
         return speed * rest - deceleration * rest * rest / 2
@@ -226,7 +288,15 @@ def _braked(speed: float, elapsed: float, deceleration: float = DECELERATION, je
 
 
 def _interpolate(times: Sequence[float], values: Sequence[float], t: float) -> float:
-    """Linearly interpolate a nonempty sampled series, clamping queries outside its time range."""
+    """
+    Linearly interpolate a nonempty sampled series, clamping queries outside its time range.
+
+    :param Sequence[float] times: The sample times, ascending.
+    :param Sequence[float] values: The value at each.
+    :param float t: The time asked for.
+    :returns: The value at ``t``; the first or last value outside the samples' range.
+    :rtype: float
+    """
     i = bisect_right(times, t)
     if i == 0:
         return values[0]
@@ -237,7 +307,16 @@ def _interpolate(times: Sequence[float], values: Sequence[float], t: float) -> f
 
 
 def _along(poses: Sequence[Pose], arc: Sequence[float], s: float) -> Tuple[float, float, float]:
-    """The pose ``s`` metres along the recorded path; straight on past its end."""
+    """
+    The pose ``s`` metres along the recorded path; straight on past its end.
+
+    :param Sequence[Pose] poses: The ego's recorded poses, by time.
+    :param Sequence[float] arc: Metres along the path at each pose.
+    :param float s: Metres along the path.
+    :returns: ``(x, y, heading)``: the body centre, map frame, interpolated between poses, and the heading in
+        radians; past the end, on along the last heading.
+    :rtype: Tuple[float, float, float]
+    """
     i = bisect_right(arc, s)
     if i >= len(arc):
         last = poses[-1]

@@ -37,7 +37,7 @@ from .unstructured import UnstructuredChecker, inside_heading_range, normalize_a
 __all__ = ["KINDS", "MARGIN_CAP", "Moment", "RssJudge", "Verdict"]
 
 MARGIN_CAP = 50.0
-"""Metres; the margin when the ego failed no obligation."""
+"""Metres: the margin when nothing lowered it; a failure leaving more room than this does not count."""
 TOLERANCE = 0.3
 """m/s^2 of record noise allowed against an owed deceleration."""
 STANDING = 0.1
@@ -54,15 +54,22 @@ reporting it standing, and the speed jumps back; a median over 5 frames leaves m
 SHORTFALL = 0.5
 """Metres by which a careful driver must have kept clearer for a danger the other caused to lower the margin."""
 KINDS = ("collision", "collision_preventable", "collision_by_other")
-"""The ego failed RSS; the other did or none did, but the ego could have prevented it; it could not."""
+"""
+The verdict kinds: ``collision``, the ego failed RSS (unless braking as owed would still have left it
+touched); else ``collision_preventable``, a competent and careful driver would have avoided it; else
+``collision_by_other``.
+"""
 NEAR = 10.0
 """Metres within which a pair the lanes relate in no way is judged in the plane, as unstructured."""
 SLACK = 0.02
 """m/s of record noise allowed on a speed change, however short the window."""
 _TYPES = {"VEHICLE": ObjectType.OTHER_VEHICLE, "BICYCLE": ObjectType.BICYCLE, "PEDESTRIAN": ObjectType.PEDESTRIAN}
+"""Each recorded obstacle type's RSS object type; any other type is ``OTHER_OBJECT``."""
 
 Checked = Tuple[RelativeConstellation, RssState]
+"""A party's constellation and RSS state at one frame (``RssJudge._check``)."""
 Samples = List[Tuple[float, float]]
+"""``(t, value)`` in time order, ``t`` in seconds since the record began."""
 
 
 @dataclass(frozen=True)
@@ -101,7 +108,8 @@ class Verdict:
         """
         Whether the ego answers for it: it failed RSS, or could have prevented it.
 
-        :returns: True if the ego is to blame, False otherwise.
+        :returns: True unless it is ``collision_by_other``: even where RSS does not blame the ego, it answers
+            for a collision it could have prevented.
         :rtype: bool
         """
         return self.kind != "collision_by_other"
@@ -113,14 +121,15 @@ class _Owed:
     One obligation: from ``start`` (the last frame it was not owed) the party
     may accelerate up to ``accel_max``, from ``due`` it must apply it.
 
-    :param float start: Seconds since the record began: the party's previous frame, or the first frame it was owed
-        when it was not seen before.
-    :param float due: Seconds since the record began: the first frame it was owed, plus the party's response time.
+    :param float start: Seconds since the record began: the party's previous frame, or the first frame owed if it
+        was not seen before.
+    :param float due: Seconds since the record began: the first frame owed, plus the party's response time.
     """
     start: float
     """Seconds since the record began: the party's previous frame, or the first frame owed if it was not seen before."""
     due: float
     """Seconds since the record began: the first frame owed, plus the party's response time."""
+
 
 @dataclass
 class _Side:
@@ -132,7 +141,7 @@ class _Side:
     :param IntersectionChecker intersection: Checks it in one of the three intersection constellations.
     :param UnstructuredChecker unstructured: Checks it in an unstructured constellation.
     :param int constellation_id: The id of its current constellation, which the checkers keep their history by.
-    :param int | None checked: The time index it was last checked at.
+    :param int | None checked: The time index it was last checked at: its frame's index plus one.
     :param ConstellationType | None kind: The type of its current constellation; None while it has none.
     :param float | None last: Its previous frame, while it is seen frame after frame.
     :param float | None threshold: The danger threshold of the current episode: its last safe frame.
@@ -154,7 +163,7 @@ class _Side:
     constellation_id: int = 0
     """The id of its current constellation, which the checkers keep their history by."""
     checked: int | None = None
-    """The time index it was last checked at."""
+    """The time index it was last checked at: its frame's index plus one."""
     kind: ConstellationType | None = None
     """The type of its current constellation; None while it has none."""
     last: float | None = None
@@ -210,7 +219,10 @@ class Moment:
     road_user: str
     """The other's type, e.g. ``"VEHICLE"``."""
     constellation: str
-    """The ego's constellation with it then, e.g. ``"same direction"``; ``"near miss"`` if it was the other's danger."""
+    """
+    The ego's constellation with it then, e.g. ``"same direction"``; ``"near miss"`` for a danger the other
+    caused where a careful driver would have kept clearer.
+    """
     x: float
     """The ego's body centre then, map frame."""
     y: float
@@ -288,14 +300,23 @@ class RssJudge:
     """The obstacle frames taken, in time order."""
     _held: Dict[int, Tuple[float, str, Moment]]
     """
-    Per obstacle, the least margin of the ego failing RSS against it, held until the danger's end: a
-    failure that a touch then shows made no difference (``_braking_in_vain``) does not count.
+    Per obstacle, ``(margin, worst, worst_at)`` for the least margin of the ego failing RSS against it, held
+    until the danger's end: a failure that a touch then shows made no difference (``_braking_in_vain``) does
+    not count.
     """
     _contacts: Dict[int, float] | None
     """When each obstacle first touched the ego, seconds since the record began; built by ``_traffic``."""
 
     def __init__(self, map_service: MapService, vehicle: ApolloVehicleConfig, params: RssParameters = CANONICAL,
                  rss_map: RssMap | None = None) -> None:
+        """
+        Constructor
+
+        :param MapService map_service: The map Apollo drove.
+        :param ApolloVehicleConfig vehicle: The ego's dimensions.
+        :param RssParameters params: RSS dynamics.
+        :param RssMap | None rss_map: The map's lanes, when already built.
+        """
         self.map = rss_map if rss_map is not None else RssMap.of(map_service)
         self.vehicle = vehicle
         self.params = params
@@ -328,7 +349,9 @@ class RssJudge:
         self._frames.append(_Frame(world.t, me, obstacles, names, dict(world.lights)))
 
     def finish(self) -> None:
-        """Judge the frames taken: fill ``verdicts``, ``margin``, ``worst`` and ``worst_at``."""
+        """
+        Judge the frames taken: fill ``verdicts``, ``margin``, ``worst`` and ``worst_at``.
+        """
         routes = self._routes()
         ego_route = tuple(self._path(self._lanes([frame.ego for frame in self._frames])))
         mine: Dict[int, _Side] = {}
