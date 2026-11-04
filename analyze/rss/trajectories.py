@@ -18,6 +18,8 @@ from shapely.geometry import MultiPoint, Polygon
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 
+from ...utils import rectangle_corners
+
 from .physics import (DISTANCE, DISTANCE_MAX, DURATION, SPEED, accelerated_limited_movement, feq, fge, fgt, flt,
                       fmax, speed_and_distance_offset, time_to_stop)
 from .types import ObjectType, RelativeObjectState
@@ -32,6 +34,15 @@ _CIRCLE_STEP = 2 * pi / 20
 
 @dataclass(frozen=True)
 class TrajectoryPoint:
+    """
+    A sampled unstructured trajectory pose and motion state.
+
+    :param float x: Map X coordinate in metres.
+    :param float y: Map Y coordinate in metres.
+    :param float angle: Heading in radians.
+    :param float speed: Speed in metres per second.
+    :param float yaw_rate: Angular velocity in radians per second.
+    """
     x: float
     y: float
     angle: float
@@ -41,6 +52,7 @@ class TrajectoryPoint:
 
 @dataclass
 class _Step:
+    """Left, right and centre trajectory samples at one reachable-set calculation step."""
     left: List[TrajectoryPoint] = field(default_factory=list)
     right: List[TrajectoryPoint] = field(default_factory=list)
     center: TrajectoryPoint | None = None
@@ -56,6 +68,7 @@ class _Location:
 
 
 def _start(obj: RelativeObjectState, maximum: bool) -> TrajectoryPoint:
+    """Create the initial trajectory point using the selected minimum or maximum object speed."""
     u = obj.unstructured
     return TrajectoryPoint(u.x, u.y, u.yaw, u.speed_max if maximum else u.speed_min, u.yaw_rate)
 
@@ -66,24 +79,24 @@ def _corners(point: TrajectoryPoint, obj: RelativeObjectState) -> Tuple[Tuple[fl
     front = u.length / 2
     if obj.object_type == ObjectType.EGO_VEHICLE:
         front += obj.dynamics.min_longitudinal_safety_distance
-    c, s = cos(point.angle), sin(point.angle)
-    corners = []
-    for lateral, along in ((-u.width / 2, front), (u.width / 2, front), (-u.width / 2, -u.length / 2),
-                           (u.width / 2, -u.length / 2)):
-        # Local x lateral (right positive), y forward, rotated by angle - pi/2.
-        corners.append((point.x + along * c + lateral * s, point.y + along * s - lateral * c))
-    return tuple(corners)
+    corners = rectangle_corners(point.x, point.y, point.angle, front=front,
+                                back=u.length / 2, left=u.width / 2, right=u.width / 2)
+    # RSS indexes front-left, front-right, back-left, back-right, not a ring.
+    return tuple(tuple(corners[index]) for index in (0, 3, 1, 2))
 
 
 def _hull(points) -> BaseGeometry:
+    """Return the convex hull of the supplied map-frame points."""
     return MultiPoint(list(points)).convex_hull
 
 
 def _union(a: BaseGeometry | None, b: BaseGeometry) -> BaseGeometry:
+    """Union a new geometry with the accumulated set, accepting an empty or absent accumulator."""
     return b if a is None or a.is_empty else unary_union([a, b])
 
 
 def _step_polygon(obj: RelativeObjectState, step: _Step) -> Tuple[BaseGeometry, _Location]:
+    """Build a step's left/right hulls and return their union with the boundary footprint locations."""
     left_points = [c for p in step.left for c in _corners(p, obj)]
     center = _corners(step.center, obj)
     right_points = [c for p in step.right for c in _corners(p, obj)]
@@ -92,6 +105,7 @@ def _step_polygon(obj: RelativeObjectState, step: _Step) -> Tuple[BaseGeometry, 
 
 
 def _between(polygon: BaseGeometry | None, previous: _Location, current: _Location) -> BaseGeometry | None:
+    """Add swept hulls between consecutive footprint locations to the accumulated set."""
     if previous == current:
         return polygon
     left = _hull(previous.left + previous.center + current.left + current.center)
@@ -101,6 +115,7 @@ def _between(polygon: BaseGeometry | None, previous: _Location, current: _Locati
 
 def _front_and_sides(obj: RelativeObjectState, initial: _Location, sides: List[_Step], front: _Step,
                      polygon: BaseGeometry | None) -> Tuple[BaseGeometry, _Location]:
+    """Accumulate side and front step polygons with connecting sweeps; return the set and final location."""
     previous = initial
     for side in sides:
         step_polygon, location = _step_polygon(obj, side)
@@ -113,6 +128,7 @@ def _front_and_sides(obj: RelativeObjectState, initial: _Location, sides: List[_
 
 
 def _response_time_polygon(obj: RelativeObjectState, initial: _Location, polygon: BaseGeometry) -> BaseGeometry:
+    """Include the response-time hull connecting the minimum-speed start body to the initial location."""
     current = _corners(_start(obj, maximum=False), obj)
     return _union(polygon, _hull(initial.left + initial.center + initial.right + current))
 
@@ -136,6 +152,7 @@ def _ratios(diff: float, *, negative: bool, positive: bool, zero: bool):
 # Vehicles (TrajectoryVehicle.cpp)
 
 def _time_in_movement(speed: float, acceleration: float, time: float) -> float:
+    """Limit a movement duration in seconds to the stopping time under negative acceleration."""
     if acceleration < 0:
         if feq(speed, 0.0, SPEED):
             return 0.0
@@ -180,6 +197,7 @@ def _vehicle_point(start: TrajectoryPoint, obj: RelativeObjectState, duration: f
 
 
 def _vehicle_response_step(obj: RelativeObjectState, acceleration: float, steps: int, maximum: bool) -> _Step:
+    """Sample vehicle steering ratios over its moving portion of response time at the given acceleration."""
     diff = 2.0 / (2.0 * steps + 2.0)
     start = _start(obj, maximum)
     duration = _time_in_movement(start.speed, acceleration, obj.dynamics.response_time)
@@ -193,6 +211,7 @@ def _vehicle_response_step(obj: RelativeObjectState, acceleration: float, steps:
 
 
 def _move_step(step: _Step, obj: RelativeObjectState, duration: float, acceleration: float) -> _Step:
+    """Advance all step samples along their turning circles for the given duration and acceleration."""
     return _Step([_on_circle(p, acceleration, duration, obj) for p in step.left],
                  [_on_circle(p, acceleration, duration, obj) for p in step.right],
                  _on_circle(step.center, acceleration, duration, obj))
@@ -286,18 +305,21 @@ def _pedestrian_move(point: TrajectoryPoint, obj: RelativeObjectState, distance:
 
 def _pedestrian_point(point: TrajectoryPoint, obj: RelativeObjectState, duration: float, acceleration: float,
                       ratio: float) -> TrajectoryPoint:
+    """Advance a pedestrian with capped acceleration and a selected turning ratio."""
     moved = accelerated_limited_movement(point.speed, obj.dynamics.max_speed_on_acceleration, acceleration, duration)
     speed, distance = moved if moved is not None else (point.speed, 0.0)
     return _pedestrian_move(replace(point, speed=speed), obj, distance, ratio)
 
 
 def _straight(point: TrajectoryPoint, distance: float) -> TrajectoryPoint:
+    """Translate a trajectory point along its heading for a positive distance in metres."""
     if fgt(distance, 0.0, DISTANCE):
         return replace(point, x=point.x + cos(point.angle) * distance, y=point.y + sin(point.angle) * distance)
     return point
 
 
 def _straight_step(step: _Step, distance: float) -> _Step:
+    """Translate every step sample straight ahead, leaving nonpositive distances unchanged."""
     if not fgt(distance, 0.0, DISTANCE):
         return step
     return _Step([_straight(p, distance) for p in step.left], [_straight(p, distance) for p in step.right],
@@ -305,6 +327,7 @@ def _straight_step(step: _Step, distance: float) -> _Step:
 
 
 def _pedestrian_response_step(obj: RelativeObjectState, acceleration: float, steps: int, maximum: bool) -> _Step:
+    """Sample pedestrian turning ratios through response time at the selected initial speed."""
     diff = 2.0 / (2.0 * steps + 2.0)
     step, r = _Step(), -1.0
     while r <= 1.0 + _RATIO:
@@ -320,6 +343,7 @@ def _pedestrian_response_step(obj: RelativeObjectState, acceleration: float, ste
 
 
 def _circle(x: float, y: float, radius: float) -> Polygon:
+    """Approximate a map-frame circle with a regular 20-vertex polygon."""
     return Polygon([(x + radius * cos(k * _CIRCLE_STEP), y + radius * sin(k * _CIRCLE_STEP)) for k in range(20)])
 
 

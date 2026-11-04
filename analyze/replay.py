@@ -69,6 +69,7 @@ class EgoState:
 
 
 def _set(value: float) -> float:
+    """Replace a non-finite recorded scalar with zero; preserve finite values."""
     return value if isfinite(value) else 0.0
 
 
@@ -178,6 +179,7 @@ class Replay:
     """
 
     def __init__(self, reader: RecordReader) -> None:
+        """Bind the record reader used to reconstruct successive world snapshots."""
         self.reader = reader
 
     def run(self, oracles: Sequence["Oracle"]) -> List["Violation"]:

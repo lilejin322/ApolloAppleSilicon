@@ -49,6 +49,7 @@ class Oracle:
     violations: List[Violation]
 
     def __init__(self) -> None:
+        """Initialize an empty collection of reported violations."""
         self.violations = []
 
     def on_message(self, world: World, channel: str, message: Message) -> None:
@@ -123,6 +124,7 @@ class Episodes:
     """
 
     def __init__(self) -> None:
+        """Initialize an empty mapping of active episodes by subject key."""
         self.open: Dict[Hashable, Episode] = {}
 
     def update(self, world: World, holding: Mapping[Hashable, float]) -> List[Tuple[Hashable, Episode]]:

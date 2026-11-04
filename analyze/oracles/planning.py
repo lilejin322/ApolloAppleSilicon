@@ -15,6 +15,7 @@ __all__ = ["EStopOracle", "JunctionLaneChangeOracle", "PlanningFailureOracle"]
 
 
 def _enum_name(message: Message, field: str) -> str:
+    """Resolve the symbolic name of a protobuf enum field at its current value."""
     return message.DESCRIPTOR.fields_by_name[field].enum_type.values_by_number[getattr(message, field)].name
 
 
@@ -29,10 +30,12 @@ class EStopOracle(Oracle):
     channels = frozenset({PLANNING})
 
     def __init__(self) -> None:
+        """Start with no reported emergency-stop reasons."""
         super().__init__()
         self._reasons: set = set()
 
     def on_message(self, world: World, channel: str, message: Message) -> None:
+        """Report each distinct emergency-stop reason found in Planning messages."""
         decision = message.decision.main_decision
         if not decision.HasField("estop"):
             return
@@ -57,12 +60,14 @@ class JunctionLaneChangeOracle(Oracle):
     channels = frozenset({PLANNING})
 
     def __init__(self, map_service: MapService) -> None:
+        """Cache usable junction polygons and initialize per-junction reporting state."""
         super().__init__()
         self._areas = [(junction_id, area) for junction_id, junction in map_service.junction_table.items()
                        if (area := polygon_to_shape(junction.polygon)) is not None]
         self._junctions: set = set()
 
     def on_message(self, world: World, channel: str, message: Message) -> None:
+        """Report a left or right lane-change decision inside each junction at most once."""
         decision = message.decision.main_decision
         main = decision.cruise if decision.HasField("cruise") else decision.stop if decision.HasField("stop") else None
         if main is None or world.ego is None:
@@ -97,6 +102,7 @@ class PlanningFailureOracle(Oracle):
     channels = frozenset({PLANNING, COMMAND_STATUS})
 
     def __init__(self, *, max_gap: float = 2.0, max_error: float = 1.0) -> None:
+        """Configure maximum Planning silence and minimum error-episode duration, both in seconds."""
         super().__init__()
         self.max_gap = max_gap
         self.max_error = max_error
@@ -105,6 +111,7 @@ class PlanningFailureOracle(Oracle):
         self._message = ""
 
     def on_message(self, world: World, channel: str, message: Message) -> None:
+        """Track gaps between Planning messages and ERROR episodes for the active command."""
         if channel == PLANNING:
             self._gap(world)
             self._last = world.t
@@ -116,15 +123,18 @@ class PlanningFailureOracle(Oracle):
         self._close(self._errors.update(world, {"error": 1.0} if failing else {}))
 
     def finish(self, world: World) -> None:
+        """Check final Planning silence and report any qualifying error episode still open."""
         self._gap(world)
         self._close(self._errors.close_all())
 
     def _gap(self, world: World) -> None:
+        """Report silence longer than the configured gap since the last Planning message."""
         if self._last is not None and world.t - self._last > self.max_gap:
             self.report(world, "planning", f"no planning message for {world.t - self._last:.1f} s "
                                            f"after t={self._last:.1f} s", kind="planning_gap")
 
     def _close(self, closed) -> None:
+        """Report closed command-error episodes lasting at least the configured threshold."""
         for _, episode in closed:
             if episode.duration >= self.max_error:
                 self.report_episode(episode, "planning", f"Planning failed the command for {episode.duration:.1f} s: "

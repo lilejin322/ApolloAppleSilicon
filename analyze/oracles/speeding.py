@@ -32,6 +32,7 @@ class SpeedingOracle(Oracle):
     channels = frozenset({LOCALIZATION, PLANNING_COMMAND})
 
     def __init__(self, map_service: MapService, *, tolerance: float = 0.05, max_offset: float = 3.0) -> None:
+        """Configure the relative speed tolerance and maximum lane offset in metres."""
         super().__init__()
         self.map = map_service
         self.tolerance = tolerance
@@ -41,6 +42,7 @@ class SpeedingOracle(Oracle):
         self._episodes = Episodes()
 
     def on_message(self, world: World, channel: str, message: Message) -> None:
+        """Refresh route speed limits or update speeding episodes on the nearest eligible route lane."""
         if channel == PLANNING_COMMAND:
             if world.route != self._route:
                 self._route = world.route
@@ -58,9 +60,11 @@ class SpeedingOracle(Oracle):
         self._close(world, self._episodes.update(world, holding))
 
     def finish(self, world: World) -> None:
+        """Report any speeding episodes still open at the end of replay."""
         self._close(world, self._episodes.close_all())
 
     def _close(self, world: World, closed) -> None:
+        """Report each closed speeding episode with its peak speed, lane limit and duration."""
         for (lane, limit), episode in closed:
             self.report_episode(episode, lane, f"{episode.peak:.2f} m/s on {lane}, limit {limit:.2f} m/s "
                                                f"(+{episode.peak / limit - 1:.0%}) for {episode.duration:.1f} s")

@@ -77,6 +77,7 @@ class Party:
 
 @dataclass(frozen=True)
 class LaneInfo:
+    """Cached lane geometry, connectivity, speed limit and traffic controls used by RSS map queries."""
     id: str
     line: LineString
     surface: Polygon
@@ -91,6 +92,13 @@ class LaneInfo:
     stop_sign: bool
 
     def heading_at(self, s: float) -> float:
+        """
+        Estimate the lane heading at an arc-length position.
+
+        :param float s: Metres along the centreline.
+        :returns: Heading in radians, using a centred sample clipped to the lane endpoints.
+        :rtype: float
+        """
         a = self.line.interpolate(max(s - 0.5, 0.0))
         b = self.line.interpolate(min(s + 0.5, self.line.length))
         return atan2(b.y - a.y, b.x - a.x)
@@ -110,6 +118,7 @@ class RssMap:
         return rss_map
 
     def __init__(self, service: MapService) -> None:
+        """Cache lane surfaces, traffic controls and a spatial index from the supplied map service."""
         self.service = service
         junctions = service.relations.junction_areas
         stop_overlaps = {o.id for sign in service.stop_sign_table.values() for o in sign.overlap_id}
@@ -160,9 +169,11 @@ class RssMap:
         the successors and ahead the single predecessors.
         """
         def back(lane: LaneInfo) -> Tuple[str, ...]:
+            """Return links behind the current lane, reversing connectivity when travelling against it."""
             return lane.successors if against else lane.predecessors
 
         def front(lane: LaneInfo) -> Tuple[str, ...]:
+            """Return links ahead of the current lane, reversing connectivity when travelling against it."""
             return lane.predecessors if against else lane.successors
         behind: List[str] = []
         length, current = 0.0, lane_id
@@ -236,6 +247,15 @@ class RssMap:
         return (reverse, forward) if against else (forward, reverse)
 
     def dynamics(self, party: Party, params: RssParameters, lanes: Sequence[str]) -> Dynamics:
+        """
+        Select road-user dynamics and apply the configured lane speed-limit factor.
+
+        :param Party party: Road user whose type selects the base dynamics.
+        :param RssParameters params: Dynamics and optional speed-limit multiplier.
+        :param Sequence[str] lanes: Known lane IDs whose positive speed limits are considered.
+        :returns: Base dynamics or a copy with the acceleration speed cap adjusted; pedestrians keep the base.
+        :rtype: Dynamics
+        """
         base = {ObjectType.EGO_VEHICLE: params.ego, ObjectType.PEDESTRIAN: params.pedestrian,
                 ObjectType.BICYCLE: params.bicycle}.get(party.object_type, params.vehicle)
         limits = [self.lanes[l].speed_limit for l in lanes if self.lanes[l].speed_limit > 0]
@@ -245,6 +265,7 @@ class RssMap:
 
 
 def _surface(lane, line: LineString) -> Polygon:
+    """Build the lane surface from its boundaries, falling back to a buffered centreline."""
     try:
         left, right = curve_to_line(lane.left_boundary.curve), curve_to_line(lane.right_boundary.curve)
         polygon = Polygon(list(left.coords) + list(right.coords)[::-1])
@@ -258,6 +279,7 @@ def _surface(lane, line: LineString) -> Polygon:
 
 
 def _junction_of(line: LineString, junctions) -> str | None:
+    """Return the first junction covering at least half the centreline length, or None."""
     for junction_id, area in junctions.items():
         if area is not None and line.intersection(area).length >= 0.5 * line.length:
             return junction_id
@@ -282,6 +304,7 @@ def _coordinates(line: LineString, body: Polygon) -> Tuple[Tuple[float, float], 
 
 
 def _heading(line: LineString, s: float) -> float:
+    """Estimate heading in radians from centreline points up to half a metre either side of s."""
     a, b = line.interpolate(max(s - 0.5, 0.0)), line.interpolate(min(s + 0.5, line.length))
     return atan2(b.y - a.y, b.x - a.x)
 
@@ -294,6 +317,7 @@ def _velocity(line: LineString, party: Party) -> Velocity:
 
 
 def _lon_relation(ego: Tuple[float, float], other: Tuple[float, float]) -> Tuple[LonPosition, float]:
+    """Classify ego longitudinal interval placement and return the nonnegative separation in metres."""
     if ego[0] > other[1]:
         return LonPosition.IN_FRONT, ego[0] - other[1]
     if other[0] > ego[1]:
@@ -306,6 +330,7 @@ def _lon_relation(ego: Tuple[float, float], other: Tuple[float, float]) -> Tuple
 
 
 def _lat_relation(ego: Tuple[float, float], other: Tuple[float, float]) -> Tuple[LatPosition, float]:
+    """Classify lateral interval placement in the RSS convention and return separation in metres."""
     if ego[0] > other[1]:
         return LatPosition.AT_RIGHT, ego[0] - other[1]
     if other[0] > ego[1]:
@@ -318,6 +343,7 @@ def _lat_relation(ego: Tuple[float, float], other: Tuple[float, float]) -> Tuple
 
 
 def _unstructured_state(party: Party) -> UnstructuredObjectState:
+    """Convert a road user to an unstructured state, retaining its speed and yaw rate."""
     return UnstructuredObjectState(party.x, party.y, party.heading, party.length, party.width, party.speed,
                                    party.speed, yaw_rate=party.yaw_rate)
 
@@ -399,6 +425,7 @@ def unstructured_constellation(rss_map: RssMap, first: Party, second: Party, par
 
 
 def _junction_between(rss_map: RssMap, chain: Sequence[str], line: LineString, first: Party, second: Party) -> bool:
+    """Return whether a junction lane intersects the path segment between the two road users."""
     a = line.project(Point(first.x, first.y))
     b = line.project(Point(second.x, second.y))
     between = substring(line, min(a, b), max(a, b))
@@ -442,6 +469,7 @@ def _intersection(rss_map: RssMap, first: Party, second: Party, first_line: Line
     position, distance = _intersection_order(first_i, second_i)
 
     def state(party: Party, dynamics: Dynamics, line: LineString, s_range, area_range, priority: bool):
+        """Build intersection-relative velocity, priority and nonnegative entry/exit distances for one party."""
         return RelativeObjectState(
             ObjectType.EGO_VEHICLE if party is first else party.object_type, dynamics,
             StructuredState(_velocity(line, party), has_priority=priority,
@@ -457,6 +485,7 @@ def _intersection(rss_map: RssMap, first: Party, second: Party, first_line: Line
 
 
 def _area_range(line: LineString, area, width: float) -> Tuple[float, float] | None:
+    """Project the area intersecting a width-metre path band to an arc-length range, or None."""
     band = line.buffer(width / 2, cap_style="flat").intersection(area)
     if band.is_empty:
         return None

@@ -30,10 +30,12 @@ class PredictionNaNOracle(Oracle):
     channels = frozenset({PREDICTION})
 
     def __init__(self) -> None:
+        """Start with no obstacle IDs reported for invalid predictions."""
         super().__init__()
         self._reported: Set[int] = set()
 
     def on_message(self, world: World, channel: str, message: Message) -> None:
+        """Report each obstacle at most once when a predicted trajectory contains NaN X or Y coordinates."""
         for predicted in message.prediction_obstacle:
             obstacle = predicted.perception_obstacle
             if obstacle.id in self._reported or not any(

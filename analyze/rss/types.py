@@ -18,6 +18,7 @@ __all__ = ["CANONICAL", "ConstellationType", "DEFAULT_UNSTRUCTURED", "Dynamics",
 
 
 class ConstellationType(IntEnum):
+    """RSS pairwise traffic configurations, including priority-specific intersection cases."""
     NOT_RELEVANT = 0
     SAME_DIRECTION = 1
     OPPOSITE_DIRECTION = 2
@@ -35,6 +36,7 @@ class ConstellationType(IntEnum):
 
 
 class ObjectType(IntEnum):
+    """RSS road-user categories used to select dynamics and response rules."""
     INVALID = 0
     EGO_VEHICLE = 1
     OTHER_VEHICLE = 2
@@ -67,17 +69,20 @@ class LatPosition(IntEnum):
 
 
 class LonResponse(IntEnum):
+    """Longitudinal proper responses, distinguishing correct-lane braking from ordinary minimum braking."""
     NONE = 0
     BRAKE_MIN_CORRECT = 1
     BRAKE_MIN = 2
 
 
 class LatResponse(IntEnum):
+    """Lateral proper responses: no restriction or minimum lateral braking."""
     NONE = 0
     BRAKE_MIN = 1
 
 
 class UnstructuredResponse(IntEnum):
+    """Unstructured proper responses for reachable-set interactions."""
     NONE = 0
     CONTINUE_FORWARD = 1
     DRIVE_AWAY = 2
@@ -85,6 +90,7 @@ class UnstructuredResponse(IntEnum):
 
 
 class Evaluator(IntEnum):
+    """Identifier of the distance or intersection rule that produced an RSS result."""
     NONE = 0
     LONGITUDINAL_DISTANCE_OPPOSITE_DIRECTION_EGO_CORRECT_LANE = 1
     LONGITUDINAL_DISTANCE_OPPOSITE_DIRECTION = 2
@@ -108,6 +114,14 @@ class IntersectionState(Enum):
 
 @dataclass(frozen=True)
 class LongitudinalAccelerations:
+    """
+    Longitudinal acceleration limits and positive braking magnitudes, in metres per second squared.
+
+    :param float accel_max: Maximum acceleration during response time.
+    :param float brake_max: Maximum braking magnitude.
+    :param float brake_min: Minimum required braking magnitude.
+    :param float brake_min_correct: Minimum braking when travelling in the correct lane.
+    """
     accel_max: float
     brake_max: float
     brake_min: float
@@ -116,12 +130,19 @@ class LongitudinalAccelerations:
 
 @dataclass(frozen=True)
 class LateralAccelerations:
+    """
+    Lateral acceleration and braking magnitudes, in metres per second squared.
+
+    :param float accel_max: Maximum lateral acceleration during response time.
+    :param float brake_min: Minimum required lateral braking magnitude.
+    """
     accel_max: float
     brake_min: float
 
 
 @dataclass(frozen=True)
 class UnstructuredSettings:
+    """Turning bounds and trajectory sampling counts for unstructured reachable sets."""
     pedestrian_turning_radius: float = 2.0
     drive_away_max_angle: float = 2.4
     vehicle_yaw_rate_change: float = 0.3
@@ -204,6 +225,7 @@ class Velocity:
 
 @dataclass(frozen=True)
 class StructuredState:
+    """Lane-relative velocity, priority and intersection entry/exit distances in metres."""
     velocity: Velocity = Velocity()
     has_priority: bool = False
     is_in_correct_lane: bool = True
@@ -228,6 +250,7 @@ class UnstructuredObjectState:
 
 @dataclass(frozen=True)
 class RelativeObjectState:
+    """One road user's type, dynamics and structured or unstructured state for a relative constellation."""
     object_type: ObjectType
     dynamics: Dynamics
     structured: StructuredState = StructuredState()
@@ -252,6 +275,7 @@ class RelativeConstellation:
 
 @dataclass
 class LonState:
+    """Longitudinal safety, required response, evaluator and current/safe distances in metres."""
     is_safe: bool = False
     response: LonResponse = LonResponse.BRAKE_MIN
     evaluator: Evaluator = Evaluator.NONE
@@ -261,6 +285,7 @@ class LonState:
 
 @dataclass
 class LatState:
+    """Lateral safety, required response, evaluator and current/safe distances in metres."""
     is_safe: bool = False
     response: LatResponse = LatResponse.BRAKE_MIN
     evaluator: Evaluator = Evaluator.NONE
@@ -270,6 +295,7 @@ class LatState:
 
 @dataclass
 class UnstructuredResult:
+    """Unstructured safety, required response and allowed heading interval in radians."""
     is_safe: bool = False
     response: UnstructuredResponse = UnstructuredResponse.BRAKE
     heading_range: Tuple[float, float] = (0.0, 6.283185307179586)
@@ -288,10 +314,12 @@ class RssState:
 
 
 def is_longitudinal_safe(state: RssState) -> bool:
+    """Return whether the longitudinal component of the RSS state is safe. :rtype: bool"""
     return state.lon.is_safe
 
 
 def is_lateral_safe(state: RssState) -> bool:
+    """Return whether both lateral components of the RSS state are safe. :rtype: bool"""
     return state.lat_left.is_safe and state.lat_right.is_safe
 
 

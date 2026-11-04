@@ -38,6 +38,7 @@ class RedLightOracle(Oracle):
     channels = frozenset({LOCALIZATION, PLANNING_COMMAND})
 
     def __init__(self, map_service: MapService, vehicle: ApolloVehicleConfig) -> None:
+        """Initialize map and ego geometry with no cached route or previously crossed signals."""
         super().__init__()
         self.map = map_service
         self.vehicle = vehicle
@@ -48,6 +49,7 @@ class RedLightOracle(Oracle):
         self._run: set = set()
 
     def on_message(self, world: World, channel: str, message: Message) -> None:
+        """Refresh route stop lines or report the ego front crossing a red signal once per signal."""
         if channel == PLANNING_COMMAND:
             if world.route != self._route:
                 self._route = world.route

@@ -75,6 +75,7 @@ class RecordReader:
     """Message type of every channel, by channel name."""
 
     def __init__(self, path: str | Path, *, descriptor_path: str | Path) -> None:
+        """Read the header and channel table, rejecting unsupported compression or an invalid header."""
         self.path = Path(path)
         self._bundle = DescriptorBundle(descriptor_path)
         record_format = DescriptorBundle(RECORD_DESCRIPTOR)
@@ -92,6 +93,44 @@ class RecordReader:
             for kind, payload in self._sections(stream, wanted={_CHANNEL}):
                 channel = self._channel_cls.FromString(payload)
                 self.channels[channel.name] = channel.message_type
+
+    def validate(self, *, required_channels: Collection[str] = ()) -> None:
+        """Require a complete, structurally intact record before formal scoring.
+
+        Ordinary message iteration remains available for partial-file inspection.
+        """
+        from collections import Counter
+        from google.protobuf.message import DecodeError
+
+        if not self.header.is_complete:
+            raise RecordError(f"{self.path}: recording is incomplete")
+        counts = Counter()
+        indexed = False
+        try:
+            with self.path.open("rb") as stream:
+                stream.seek(0, 2)
+                end = stream.tell()
+                stream.seek(_SECTION.size + _HEADER_LENGTH)
+                while stream.tell() < end:
+                    kind, size = self._section(stream)
+                    if stream.tell() + size > end:
+                        raise RecordError(f"{self.path}: truncated section")
+                    if kind == _CHUNK_BODY:
+                        body = self._body_cls.FromString(stream.read(size))
+                        counts.update(m.channel_name for m in body.messages)
+                    elif kind == _INDEX:
+                        indexed = True
+                        stream.seek(size, 1)
+                    else:
+                        stream.seek(size, 1)
+        except (EOFError, DecodeError) as error:
+            raise RecordError(f"{self.path}: truncated or invalid record") from error
+        if not indexed or sum(counts.values()) != self.header.message_number:
+            raise RecordError(f"{self.path}: missing index or message count mismatch")
+        if len(self.channels) != self.header.channel_number:
+            raise RecordError(f"{self.path}: channel count mismatch")
+        if not counts or any(not counts[c] for c in required_channels):
+            raise RecordError(f"{self.path}: no messages on required channels")
 
     def messages(self, channels: Collection[str] | None = None) -> Iterator[RecordMessage]:
         """
@@ -112,6 +151,7 @@ class RecordReader:
                         yield RecordMessage(single.channel_name, single.time, cls.FromString(single.content))
 
     def _classes(self, channels: Collection[str] | None) -> Dict[str, type]:
+        """Resolve selected channel types; reject unknown explicit selections and skip unknown implicit ones."""
         if channels is None:
             names = [name for name, kind in self.channels.items() if self._known(kind)]
         else:
@@ -122,6 +162,7 @@ class RecordReader:
         return {name: self._bundle.message(self.channels[name]) for name in names}
 
     def _known(self, message_type: str) -> bool:
+        """Return whether the descriptor bundle defines the given fully qualified message type."""
         try:
             self._bundle.message(message_type)
         except KeyError:
@@ -145,6 +186,12 @@ class RecordReader:
                 stream.seek(size, 1)
 
     def _section(self, stream: BinaryIO) -> Tuple[int, int]:
+        """
+        Read one section header and return its type and payload byte count.
+
+        :raises EOFError: If fewer than a complete section header's bytes remain.
+        :raises RecordError: If the declared payload size is negative.
+        """
         raw = stream.read(_SECTION.size)
         if len(raw) < _SECTION.size:
             raise EOFError

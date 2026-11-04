@@ -53,6 +53,7 @@ class RssOracle(Oracle):
 
     def __init__(self, map_service: MapService, vehicle: ApolloVehicleConfig,
                  params: RssParameters = CANONICAL) -> None:
+        """Initialize the RSS judge with the map, ego geometry and response parameters."""
         super().__init__()
         self.judge = RssJudge(map_service, vehicle, params)
 
@@ -77,8 +78,10 @@ class RssOracle(Oracle):
         return self.judge.worst
 
     def on_message(self, world: World, channel: str, message: Message) -> None:
+        """Buffer the current obstacle frame for RSS collision analysis."""
         self.judge.add(world)
 
     def finish(self, world: World) -> None:
+        """Finish RSS analysis and append the resulting collision violations."""
         self.judge.finish()
         self.violations.extend(self.judge.violations())

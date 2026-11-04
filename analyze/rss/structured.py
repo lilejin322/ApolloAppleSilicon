@@ -24,6 +24,7 @@ class NonIntersectionChecker:
     """Same and opposite direction (RssNonIntersectionConstellationChecker.cpp)."""
 
     def __init__(self) -> None:
+        """Initialize previous-frame and current-frame same/opposite-direction safety histories."""
         self._time: int | None = None
         self._last: Dict[int, Tuple[bool, bool]] = {}
         self._new: Dict[int, Tuple[bool, bool]] = {}
@@ -67,6 +68,7 @@ class NonIntersectionChecker:
 
 
 def _lon_same(c: RelativeConstellation, lon: LonState) -> bool:
+    """Update same-direction longitudinal safety and response; return whether the calculation succeeded."""
     lon.current_distance = c.lon_distance
     if c.lon_position in (LonPosition.IN_FRONT, LonPosition.OVERLAP_FRONT):
         lon.evaluator = Evaluator.LONGITUDINAL_DISTANCE_SAME_DIRECTION_EGO_FRONT
@@ -81,6 +83,7 @@ def _lon_same(c: RelativeConstellation, lon: LonState) -> bool:
 
 
 def _lon_opposite(c: RelativeConstellation, lon: LonState) -> bool:
+    """Update opposing-traffic longitudinal safety using the correct-lane braking rule when applicable."""
     lon.current_distance = c.lon_distance
     if c.ego.structured.is_in_correct_lane:
         lon.evaluator = Evaluator.LONGITUDINAL_DISTANCE_OPPOSITE_DIRECTION_EGO_CORRECT_LANE
@@ -95,6 +98,7 @@ def _lon_opposite(c: RelativeConstellation, lon: LonState) -> bool:
 
 
 def _lateral(c: RelativeConstellation, state: RssState) -> bool:
+    """Update both lateral responses from relative position; return whether the distance calculation succeeded."""
     left, right = state.lat_left, state.lat_right
     position = c.lat_position
     if position == LatPosition.AT_LEFT:
@@ -119,6 +123,7 @@ def _lateral(c: RelativeConstellation, state: RssState) -> bool:
 
 
 def _safe(side: LatState) -> None:
+    """Mark one lateral component safe and remove its braking response."""
     side.is_safe, side.response = True, LatResponse.NONE
 
 
@@ -126,6 +131,7 @@ class IntersectionChecker:
     """The three intersection types (RssIntersectionConstellationChecker.cpp)."""
 
     def __init__(self) -> None:
+        """Initialize previous-frame and current-frame intersection-state histories."""
         self._time: int | None = None
         self._last: Dict[int, IntersectionState] = {}
         self._new: Dict[int, IntersectionState] = {}
@@ -169,6 +175,7 @@ class IntersectionChecker:
 
 
 def _intersection_safe(c: RelativeConstellation, lon: LonState) -> Tuple[bool, IntersectionState | None]:
+    """Evaluate intersection safety and update longitudinal diagnostics; return validity and a safe-state reason."""
     ego, other = c.ego.structured, c.other.structured
     if (flt(ego.distance_to_leave_intersection, ego.distance_to_enter_intersection, DISTANCE)
             or flt(other.distance_to_leave_intersection, other.distance_to_enter_intersection, DISTANCE)):
@@ -212,11 +219,13 @@ def _no_time_overlap(c: RelativeConstellation) -> Tuple[bool, bool]:
     v_max = e.dynamics.max_speed_on_acceleration  # The library uses the ego's cap for both (lines 49, 69).
 
     def reach(obj):
+        """Compute time to the intersection entrance using maximum speed and response-then-minimum braking."""
         d, s = obj.dynamics, obj.structured
         return time_to_cover_distance(s.velocity.speed_lon_max, v_max, d.response_time, d.alpha_lon.accel_max,
                                       d.alpha_lon.brake_min, s.distance_to_enter_intersection)
 
     def leave(obj):
+        """Compute time to leave the intersection using minimum speed and maximum braking."""
         d, s = obj.dynamics, obj.structured
         return time_to_cover_distance(s.velocity.speed_lon_min, v_max, d.response_time, d.alpha_lon.brake_max,
                                       d.alpha_lon.brake_max, s.distance_to_leave_intersection)

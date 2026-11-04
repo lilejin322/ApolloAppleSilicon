@@ -15,7 +15,7 @@ from .oracles import (ComfortOracle, EStopOracle, JunctionLaneChangeOracle, Lane
                       PlanningFailureOracle, PredictionNaNOracle, RedLightOracle, RssOracle, SpeedingOracle, Violation)
 from .planning_states import planning_transitions
 from .record import RecordReader
-from .replay import PLANNING, Replay
+from .replay import LOCALIZATION, OBSTACLES, PLANNING, Replay
 from .rss.judge import Moment, Verdict
 
 __all__ = ["RecordAnalysis", "RecordAnalyzer", "default_oracles"]
@@ -65,6 +65,7 @@ class RecordAnalyzer:
     """
 
     def __init__(self, map_service: MapService, vehicle: ApolloVehicleConfig, descriptor_path: str | Path) -> None:
+        """Keep the map, vehicle geometry and descriptor bundle path for subsequent record analyses."""
         self.map_service = map_service
         self.vehicle = vehicle
         self.descriptor_path = descriptor_path
@@ -77,6 +78,7 @@ class RecordAnalyzer:
         :rtype: RecordAnalysis
         """
         reader = RecordReader(record, descriptor_path=self.descriptor_path)
+        reader.validate(required_channels={LOCALIZATION, OBSTACLES})
         oracles = default_oracles(self.map_service, self.vehicle)
         rss = oracles[0]
         violations = Replay(reader).run(oracles)

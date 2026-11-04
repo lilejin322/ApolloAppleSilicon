@@ -16,7 +16,6 @@ checkers with the roles swapped (digest §4.6, §5.4).
 from dataclasses import dataclass, field, replace
 from math import atan2, cos, pi, sin
 from typing import Dict, List, Tuple
-
 from shapely.affinity import translate
 from shapely.geometry import Polygon
 
@@ -71,22 +70,40 @@ class Verdict:
     """
     Who answers for one touch (``kind``, one of ``KINDS``), and why.
 
+    :param str obstacle: The road user touched, e.g. ``"VEHICLE 1003"``.
+    :param float t: Seconds since the record began: the first frame their bodies touched.
+    :param str kind: ``"collision"``, ``"collision_preventable"`` or ``"collision_by_other"``.
+    :param str detail: Why, for people: who failed what, and whether a careful driver would have avoided it.
+    :param float x: The ego's body centre at ``t``, map frame.
+    :param float y: The ego's body centre at ``t``.
     :param str constellation: The ego's constellation with it then, e.g. ``"same direction"``.
     :param str part: Where on the ego it touched: ``front``, ``rear``, ``left`` or ``right``.
     """
-
     obstacle: str
+    """The road user touched, e.g. ``"VEHICLE 1003"``."""
     t: float
+    """Seconds since the record began: the first frame their bodies touched."""
     kind: str
+    """``"collision"``, ``"collision_preventable"`` or ``"collision_by_other"``."""
     detail: str
+    """Why, for people: who failed what, and whether a careful driver would have avoided it."""
     x: float
+    """The ego's body centre at ``t``, map frame."""
     y: float
+    """The ego's body centre at ``t``."""
     constellation: str = ""
+    """The ego's constellation with it then, e.g. ``"same direction"``."""
     part: str = ""
+    """Where on the ego it touched: ``front``, ``rear``, ``left`` or ``right``."""
 
     @property
     def ego_blamed(self) -> bool:
-        """Whether the ego answers for it: it failed RSS, or could have prevented it."""
+        """
+        Whether the ego answers for it: it failed RSS, or could have prevented it.
+
+        :returns: True if the ego is to blame, False otherwise.
+        :rtype: bool
+        """
         return self.kind != "collision_by_other"
 
 
@@ -95,24 +112,51 @@ class _Owed:
     """
     One obligation: from ``start`` (the last frame it was not owed) the party
     may accelerate up to ``accel_max``, from ``due`` it must apply it.
+
+    :param float start: Seconds since the record began: the party's previous frame, or the first frame it was owed
+        when it was not seen before.
+    :param float due: Seconds since the record began: the first frame it was owed, plus the party's response time.
     """
-
     start: float
+    """Seconds since the record began: the party's previous frame, or the first frame owed if it was not seen before."""
     due: float
-
+    """Seconds since the record began: the first frame owed, plus the party's response time."""
 
 @dataclass
 class _Side:
-    """One party's checkers against one other, and its current danger episode."""
+    """
+    One party's checkers against one other, and its current danger episode.
+    Frames are seconds since the record began.
 
+    :param NonIntersectionChecker structured: Checks it in a same or opposite direction constellation.
+    :param IntersectionChecker intersection: Checks it in one of the three intersection constellations.
+    :param UnstructuredChecker unstructured: Checks it in an unstructured constellation.
+    :param int constellation_id: The id of its current constellation, which the checkers keep their history by.
+    :param int | None checked: The time index it was last checked at.
+    :param ConstellationType | None kind: The type of its current constellation; None while it has none.
+    :param float | None last: Its previous frame, while it is seen frame after frame.
+    :param float | None threshold: The danger threshold of the current episode: its last safe frame.
+    :param float | None danger: The first dangerous frame of the current episode.
+    :param Dict[str, _Owed] owed: What it owes in the episode, by direction: ``"lon"``, ``"left"`` or ``"right"``.
+    :param Dict[str, str] failed: How it first failed each obligation it still owes: one no longer owed takes its
+        failure with it.
+    :param List[str] bounds: Where it left RSS's bounds in the episode.
+    :param float | None against: When it first failed or left RSS's bounds in the episode.
+    :param Samples lateral: Its lateral speed in the constellation, ``(t, m/s)``, over the latest ``2 * WINDOW``
+        seconds.
+    """
     structured: NonIntersectionChecker = field(default_factory=NonIntersectionChecker)
+    """Checks it in a same or opposite direction constellation."""
     intersection: IntersectionChecker = field(default_factory=IntersectionChecker)
+    """Checks it in one of the three intersection constellations."""
     unstructured: UnstructuredChecker = field(default_factory=UnstructuredChecker)
+    """Checks it in an unstructured constellation."""
     constellation_id: int = 0
     """The id of its current constellation, which the checkers keep their history by."""
     checked: int | None = None
     """The time index it was last checked at."""
     kind: ConstellationType | None = None
+    """The type of its current constellation; None while it has none."""
     last: float | None = None
     """Its previous frame, while it is seen frame after frame."""
     threshold: float | None = None
@@ -120,6 +164,7 @@ class _Side:
     danger: float | None = None
     """The first dangerous frame of the current episode."""
     owed: Dict[str, _Owed] = field(default_factory=dict)
+    """What it owes in the episode, by direction: ``"lon"``, ``"left"`` or ``"right"``."""
     failed: Dict[str, str] = field(default_factory=dict)
     """How it first failed each obligation it still owes: one no longer owed takes its failure with it."""
     bounds: List[str] = field(default_factory=list)
@@ -127,15 +172,25 @@ class _Side:
     against: float | None = None
     """When it first failed or left RSS's bounds in the episode."""
     lateral: Samples = field(default_factory=list)
-    """Its lateral speed in the constellation, the latest seconds."""
+    """Its lateral speed in the constellation, ``(t, m/s)``, over the latest ``2 * WINDOW`` seconds."""
 
     @property
     def failure(self) -> str | None:
-        """The first failure of an obligation it still owes."""
+        """
+        The first failure of an obligation it still owes.
+
+        :returns: How it failed, for people, e.g. ``"did not brake: ..."``; None when it failed none.
+        :rtype: str | None
+        """
         return next(iter(self.failed.values()), None)
 
     def calm(self, t: float | None) -> None:
-        """Safe at ``t``, or not relevant (None): the danger episode, and what it owed, are over."""
+        """
+        Safe at ``t``, or not relevant (None): the danger episode, and what it owed, are over.
+
+        :param float | None t: The frame it is safe at, kept as the next episode's threshold; None when not
+            relevant, which also forgets its constellation, previous frame and lateral speeds.
+        """
         self.threshold, self.danger, self.owed, self.failed, self.bounds, self.against = t, None, {}, {}, [], None
         if t is None:
             self.last, self.kind, self.lateral = None, None, []
@@ -143,32 +198,66 @@ class _Side:
 
 @dataclass(frozen=True)
 class Moment:
-    """Where the margin was least: the road user's type, the ego's constellation with it, the ego's centre."""
+    """
+    Where the margin was least: the road user's type, the ego's constellation with it, the ego's centre.
 
+    :param str road_user: The other's type, e.g. ``"VEHICLE"``.
+    :param str constellation: The ego's constellation with it then, e.g. ``"same direction"``; ``"near miss"``
+        for a danger the other caused where a careful driver would have kept clearer.
+    :param float x: The ego's body centre then, map frame.
+    :param float y: The ego's body centre then.
+    """
     road_user: str
+    """The other's type, e.g. ``"VEHICLE"``."""
     constellation: str
+    """The ego's constellation with it then, e.g. ``"same direction"``; ``"near miss"`` if it was the other's danger."""
     x: float
+    """The ego's body centre then, map frame."""
     y: float
+    """The ego's body centre then."""
 
 
 @dataclass
 class _Caused:
-    """A danger the other caused (it failed or left RSS's bounds), with one obstacle."""
+    """
+    A danger the other caused (it failed or left RSS's bounds), with one obstacle.
 
+    :param int start: The index of the frame it began, in the judge's frames.
+    :param float against: Seconds since the record began: when the other first failed or left RSS's bounds.
+    :param str cause: How, for people: its first failure, else the first way it left RSS's bounds.
+    :param bool ego_failed: Whether the ego failed RSS against it in the danger too, whose margin then counts.
+    """
     start: int
-    """The frame it began."""
+    """The index of the frame it began, in the judge's frames."""
     against: float
+    """Seconds since the record began: when the other first failed or left RSS's bounds."""
     cause: str
+    """How, for people: its first failure, else the first way it left RSS's bounds."""
     ego_failed: bool = False
+    """Whether the ego failed RSS against it in the danger too, whose margin then counts."""
 
 
 @dataclass(frozen=True)
 class _Frame:
+    """
+    One obstacle frame of the record, as the judge keeps it.
+
+    :param float t: Seconds since the record began.
+    :param Party ego: The ego, at its body centre, on its planned route.
+    :param Dict[int, Party] obstacles: Each obstacle, by id.
+    :param Dict[int, str] names: Each obstacle's name, by id, e.g. ``"VEHICLE 1003"``.
+    :param Dict[str, str] lights: Colour name of every reported signal, e.g. ``{"signal_9": "RED"}``.
+    """
     t: float
+    """Seconds since the record began."""
     ego: Party
+    """The ego, at its body centre, on its planned route."""
     obstacles: Dict[int, Party]
+    """Each obstacle, by id."""
     names: Dict[int, str]
+    """Each obstacle's name, by id, e.g. ``"VEHICLE 1003"``."""
     lights: Dict[str, str]
+    """Colour name of every reported signal, e.g. ``{"signal_9": "RED"}``."""
 
 
 class RssJudge:
@@ -185,28 +274,42 @@ class RssJudge:
     def __init__(self, map_service: MapService, vehicle: ApolloVehicleConfig, params: RssParameters = CANONICAL,
                  rss_map: RssMap | None = None) -> None:
         self.map = rss_map if rss_map is not None else RssMap.of(map_service)
+        """The map's lanes, as RSS reads them."""
         self.vehicle = vehicle
+        """The ego's dimensions."""
         self.params = params
+        """RSS dynamics."""
         self.verdicts: List[Verdict] = []
+        """Who answers for each touch, in time order; one per obstacle at most."""
         self.margin = MARGIN_CAP
+        """The ego's RSS margin in metres, ``MARGIN_CAP`` until lowered; at most 0 after a touch it answers for."""
         self.worst: str | None = None
+        """What happened at the least margin, for people; None when nothing lowered it."""
         self.worst_at: Moment | None = None
+        """Where that was; None when nothing lowered it."""
         self._frames: List[_Frame] = []
-        # Per obstacle, the least margin of the ego failing RSS against it, held until the danger's end: a
-        # failure that a touch then shows made no difference (``_braking_in_vain``) does not count.
+        """The obstacle frames taken, in time order."""
         self._held: Dict[int, Tuple[float, str, Moment]] = {}
-        self._contacts: Dict[int, float] | None = None  # When each obstacle first touched the ego (``_traffic``).
+        """
+        Per obstacle, the least margin of the ego failing RSS against it, held until the danger's end: a
+        failure that a touch then shows made no difference (``_braking_in_vain``) does not count.
+        """
+        self._contacts: Dict[int, float] | None = None
+        """When each obstacle first touched the ego, seconds since the record began; built by ``_traffic``."""
 
     def add(self, world: World) -> None:
-        """Take one obstacle frame."""
+        """
+        Take one obstacle frame; one without the ego's state is skipped.
+
+        :param World world: The latest state of the record's channels.
+        """
         ego = world.ego
         if ego is None:
             return
         v = self.vehicle
-        offset = (v.front_edge_to_center - v.back_edge_to_center) / 2  # From the reference point to the centre.
-        me = Party(-1, ObjectType.EGO_VEHICLE, ego.x + cos(ego.heading) * offset, ego.y + sin(ego.heading) * offset,
-                   ego.heading, ego.speed, v.front_edge_to_center + v.back_edge_to_center,
-                   v.left_edge_to_center + v.right_edge_to_center, ego_footprint(ego.x, ego.y, ego.heading, v),
+        x, y = v.body_center(ego.x, ego.y, ego.heading)
+        me = Party(-1, ObjectType.EGO_VEHICLE, x, y, ego.heading, ego.speed,
+                   v.body_length, v.body_width, ego_footprint(ego.x, ego.y, ego.heading, v),
                    tuple(world.route))
         obstacles = {o.id: Party(o.id, _TYPES.get(o.type, ObjectType.OTHER_OBJECT), o.x, o.y, o.heading, o.speed,
                                  o.length, o.width, box(o.x, o.y, o.heading, o.length, o.width))
@@ -215,7 +318,7 @@ class RssJudge:
         self._frames.append(_Frame(world.t, me, obstacles, names, dict(world.lights)))
 
     def finish(self) -> None:
-        """Judge the frames taken."""
+        """Judge the frames taken: fill ``verdicts``, ``margin``, ``worst`` and ``worst_at``."""
         routes = self._routes()
         ego_route = tuple(self._path(self._lanes([frame.ego for frame in self._frames])))
         mine: Dict[int, _Side] = {}
@@ -277,13 +380,23 @@ class RssJudge:
             self._release(oid)
 
     def violations(self) -> List[Violation]:
-        """The verdicts as violations of their kinds."""
+        """
+        The verdicts as violations of their kinds.
+
+        :returns: One per verdict, in time order, at the ego's body centre.
+        :rtype: List[Violation]
+        """
         return [Violation(v.kind, v.t, v.obstacle, v.detail, v.x, v.y) for v in self.verdicts]
 
     # Frames to constellations
 
     def _routes(self) -> Dict[int, Tuple[str, ...]]:
-        """The lanes each obstacle drives in the record, in order: its route (``_path``)."""
+        """
+        The lanes each obstacle drives in the record, in order: its route (``_path``).
+
+        :returns: Each obstacle's route, by id; pedestrians drive no lanes and have none.
+        :rtype: Dict[int, Tuple[str, ...]]
+        """
         tracks: Dict[int, List[Party]] = {}
         for frame in self._frames:
             for oid, other in frame.obstacles.items():
@@ -292,7 +405,13 @@ class RssJudge:
         return {oid: tuple(self._path(self._lanes(track))) for oid, track in tracks.items()}
 
     def _lanes(self, track: List[Party]) -> List[str]:
-        """The lanes a road user was matched to frame by frame, without repeats."""
+        """
+        The lanes a road user was matched to frame by frame, without repeats.
+
+        :param List[Party] track: The road user, frame by frame.
+        :returns: Lane ids in the order matched, each run of frames on one lane once; frames off lanes add none.
+        :rtype: List[str]
+        """
         lanes: List[str] = []
         for party in track:
             lane = self.map.main_lane(replace(party, route=()))
@@ -307,6 +426,10 @@ class RssJudge:
         sibling first (one leaving the same lane) and only later the one it
         takes, so the later sibling replaces the earlier; lanes merging into the
         same lane it overlapped on the way out are not its.
+
+        :param List[str] lanes: The lanes it was matched to frame by frame (``_lanes``).
+        :returns: Lane ids, in the order it drove them.
+        :rtype: List[str]
         """
         path: List[str] = []
         for lane in lanes:
@@ -327,8 +450,22 @@ class RssJudge:
         return path
 
     def _relevant(self, ego: Party, other: Party) -> bool:
-        """Whether the pair is within both parties' reach in their response times, or a fixed radius."""
+        """
+        Whether the pair is within both parties' reach in their response times, or a fixed radius.
+
+        :param Party ego: The ego.
+        :param Party other: The road user.
+        :returns: True if their bodies are at most both reaches apart, or 30 m with a pedestrian, else 100 m.
+        :rtype: bool
+        """
         def reach(party: Party) -> float:
+            """
+            How far ``party`` may go: accelerating for its response time, then braking at ``brake_min_correct``.
+
+            :param Party party: The road user.
+            :returns: Metres; 0 when it cannot be computed.
+            :rtype: float
+            """
             dynamics = self.map.dynamics(party, self.params, ())
             return lon_stated_braking(party.speed, SPEED_MAX, dynamics.response_time, dynamics.alpha_lon.accel_max,
                                       dynamics.alpha_lon.brake_min_correct) or 0.0
@@ -336,7 +473,17 @@ class RssJudge:
         return ego.body.distance(other.body) <= max(reach(ego) + reach(other), radius)
 
     def _check(self, side: _Side, first: Party, second: Party, frame: _Frame, time_index: int) -> Checked | None:
-        """``first``'s state against ``second``, from its own checkers."""
+        """
+        ``first``'s state against ``second``, from its own checkers.
+
+        :param _Side side: ``first``'s side against ``second``, whose checkers and constellation it updates.
+        :param Party first: The party checked.
+        :param Party second: The other.
+        :param _Frame frame: The frame, for its lights.
+        :param int time_index: The checkers' time index: the frame's index plus one.
+        :returns: Its constellation and state; None when not relevant, or when its checker gives no state.
+        :rtype: Checked | None
+        """
         constellation = relative_constellation(self.map, first, second, frame.lights, self.params)
         if constellation is None and first.body.distance(second.body) <= NEAR:
             constellation = unstructured_constellation(self.map, first, second, self.params)
@@ -363,7 +510,15 @@ class RssJudge:
     # Obligations
 
     def _comply(self, side: _Side, checked: Checked, party: Party, t: float, speeds: Samples) -> None:
-        """Follow the danger episode and whether ``party`` applies its proper responses."""
+        """
+        Follow the danger episode and whether ``party`` applies its proper responses.
+
+        :param _Side side: ``party``'s side, whose episode, obligations and failures it updates.
+        :param Checked checked: ``party``'s constellation and state at ``t`` (``_check``).
+        :param Party party: The party, at ``t``.
+        :param float t: Seconds since the record began: the frame.
+        :param Samples speeds: ``party``'s speeds up to ``t``, ``(t, m/s)``; the ego's median-filtered.
+        """
         constellation, state = checked
         structured = constellation.constellation_type != ConstellationType.UNSTRUCTURED
         lat_speed = constellation.ego.structured.velocity.speed_lat_max
@@ -438,6 +593,14 @@ class RssJudge:
 
     @staticmethod
     def _fail(side: _Side, key: str, t: float, why: str) -> None:
+        """
+        Record that ``side``'s party failed the obligation ``key``: only its first failure of each is kept.
+
+        :param _Side side: The party's side.
+        :param str key: The obligation: ``"lon"``, ``"left"`` or ``"right"``.
+        :param float t: Seconds since the record began: the frame it failed at; ``side.against`` if none yet.
+        :param str why: How it failed, for people.
+        """
         side.failed.setdefault(key, why)
         if side.against is None:
             side.against = t
@@ -448,7 +611,15 @@ class RssJudge:
         """
         How far both were from a collision that braking as hard as they can
         (``brake_max``) from now could not avoid: the room left, less what both
-        still need; along or across the lane, whichever leaves more.
+        still need. In a lane, overlapping along it only the room across counts,
+        overlapping across it only the room along; neither, whichever leaves
+        more; both, whichever leaves less. The least for each obstacle is held
+        until its danger ends (``_release``).
+
+        :param Checked checked: The ego's constellation and state against ``other``.
+        :param _Frame frame: The frame.
+        :param Party other: The road user.
+        :param bool touching: Whether their bodies touch: the margin is then at most 0.
         """
         constellation, state = checked
         ego, obj = constellation.ego, constellation.other
@@ -497,16 +668,39 @@ class RssJudge:
                                             f"{how} if both braked hard", _moment(frame, other.id, _name(kind)))
 
     def _release(self, oid: int) -> None:
-        """Count the margin held against ``oid``."""
+        """
+        Count the margin held against ``oid``, if any, towards ``margin``.
+
+        :param int oid: The obstacle's id.
+        """
         held = self._held.pop(oid, None)
         if held is not None:
             self._lower(*held)
 
     def _lower(self, margin: float, worst: str, at: Moment) -> None:
+        """
+        Lower the judge's margin to ``margin`` if it is less, with what happened then and where.
+
+        :param float margin: Metres.
+        :param str worst: What happened, for people.
+        :param Moment at: Where it happened.
+        """
         if margin < self.margin:
             self.margin, self.worst, self.worst_at = margin, worst, at
 
     def _verdict(self, index: int, oid: int, ego_side: _Side, other_side: _Side) -> None:
+        """
+        Judge the touch with ``oid`` and append its verdict: ``collision`` if the
+        ego failed RSS, unless braking as owed would still have left it touched
+        (``_braking_in_vain``); else ``collision_preventable`` if a competent and
+        careful driver would have avoided it; else ``collision_by_other``. The
+        margin goes to 0 when the ego answers for it.
+
+        :param int index: The index of the frame they first touched at.
+        :param int oid: The obstacle's id.
+        :param _Side ego_side: The ego's side against it.
+        :param _Side other_side: Its side against the ego.
+        """
         frame = self._frames[index]
         name = frame.names[oid]
         due = self._braking_in_vain(index, oid, ego_side, other_side)
@@ -552,6 +746,10 @@ class RssJudge:
         Lower the margin for a danger the other caused without a touch, where
         the ego failed nothing but a competent and careful driver in its place
         would have kept clearer: to how close the ego came.
+
+        :param int oid: The obstacle's id.
+        :param _Caused episode: The danger it caused.
+        :param int end: The index of the frame the danger ended at, or of the obstacle's last frame.
         """
         if episode.ego_failed:
             return  # Its RSS margin counts there.
@@ -595,6 +793,13 @@ class RssJudge:
         past the end of its recorded path: the record shows nothing there.
         Braking so is not capped at where the ego went: braking later but
         harder it may have stopped short where braking as owed went on by.
+
+        :param int index: The index of the frame they first touched at.
+        :param int oid: The obstacle's id.
+        :param _Side ego_side: The ego's side against it.
+        :param _Side other_side: Its side against the ego.
+        :returns: When the braking was due, seconds since the record began; None otherwise.
+        :rtype: float | None
         """
         owed = ego_side.owed.get("lon")
         if set(ego_side.failed) != {"lon"} or owed is None or not (other_side.failure or other_side.bounds):
@@ -613,6 +818,12 @@ class RssJudge:
         What a competent and careful driver in the ego's place would have done
         about the touch at ``index``: it avoided it only without running into
         another road user (UN R157 5.1.1).
+
+        :param int index: The index of the frame they first touched at.
+        :param int oid: The obstacle's id.
+        :param _Side side: Its side against the ego: from when it first went against RSS the risk may be perceived.
+        :returns: When it perceived the risk and braked, whether it avoided the touch, and whom avoiding it ran into.
+        :rtype: Prevention
         """
         touch = self._frames[index].t
         before = [f for f in self._frames[:index + 1] if oid in f.obstacles and f.t >= touch - LOOKBACK - 1e-6]
@@ -639,6 +850,12 @@ class RssJudge:
         The bodies and names of the road users but ``oid`` from ``since`` to
         ``until``, each up to its first touch with the ego: after a touch the
         replayed bodies pass through each other.
+
+        :param int oid: The obstacle to leave out: the one judged.
+        :param float since: Seconds since the record began.
+        :param float until: Seconds since the record began.
+        :returns: ``(t, body, name)`` of each road user in each frame, in time order.
+        :rtype: List[Tuple[float, Polygon, str]]
         """
         if self._contacts is None:
             self._contacts = {}
@@ -651,11 +868,27 @@ class RssJudge:
 
 
 def _moment(frame: _Frame, oid: int, constellation: str) -> Moment:
+    """
+    The ``Moment`` of ``frame`` with ``oid``.
+
+    :param _Frame frame: The frame.
+    :param int oid: The obstacle's id.
+    :param str constellation: The ego's constellation with it, or ``"near miss"``.
+    :returns: Its type, ``constellation`` and the ego's body centre.
+    :rtype: Moment
+    """
     return Moment(frame.names[oid].split()[0], constellation, frame.ego.x, frame.ego.y)
 
 
 def _part(ego: Party, other: Party) -> str:
-    """Where on the ego ``other`` is: in front within 45 degrees of its heading, behind, or to a side."""
+    """
+    Where on the ego ``other`` is: in front within 45 degrees of its heading, behind, or to a side.
+
+    :param Party ego: The ego.
+    :param Party other: The road user, by its body centre.
+    :returns: ``"front"``, ``"rear"``, ``"left"`` or ``"right"``.
+    :rtype: str
+    """
     bearing = normalize_angle(atan2(other.y - ego.y, other.x - ego.x) - ego.heading)
     if abs(bearing) <= pi / 4:
         return "front"
@@ -665,21 +898,49 @@ def _part(ego: Party, other: Party) -> str:
 
 
 def _name(kind: ConstellationType | None) -> str:
+    """
+    A constellation type for people.
+
+    :param ConstellationType | None kind: The type; None for no constellation.
+    :returns: Its name in lower case with spaces, e.g. ``"same direction"``; ``"no constellation"`` for None.
+    :rtype: str
+    """
     return "no constellation" if kind is None else kind.name.lower().replace("_", " ")
 
 
 def _bound(side: _Side, t: float, why: str) -> None:
+    """
+    Record that ``side``'s party left RSS's bounds.
+
+    :param _Side side: The party's side.
+    :param float t: Seconds since the record began: the frame; ``side.against`` if none yet.
+    :param str why: How, for people, e.g. ``"accelerated at 4.2 m/s^2 at t=3.10 s"``.
+    """
     side.bounds.append(why)
     if side.against is None:
         side.against = t
 
 
 def _since(side: _Side) -> str:
+    """
+    When ``side``'s party was last safe before its danger, for a verdict's detail.
+
+    :param _Side side: The party's side.
+    :returns: ``", in danger after t=... s"`` from its threshold; empty without one.
+    :rtype: str
+    """
     return "" if side.threshold is None else f", in danger after t={side.threshold:.2f} s"
 
 
 def _sweep(party: Party, stop: float) -> Polygon:
-    """The ground its body covers braking straight on to a stop ``stop`` metres ahead."""
+    """
+    The ground its body covers braking straight on to a stop ``stop`` metres ahead.
+
+    :param Party party: The road user.
+    :param float stop: Metres to its stop, along its heading.
+    :returns: The convex hull of its body now and at the stop.
+    :rtype: Polygon
+    """
     moved = translate(party.body, cos(party.heading) * stop, sin(party.heading) * stop)
     return party.body.union(moved).convex_hull
 
@@ -688,6 +949,13 @@ def _sweep_margin(ego: Party, stop_ego: float, other: Party, stop_other: float) 
     """
     The gap between the grounds both cover braking straight on; where they
     meet, how far short of its stop the ego reaches the other's (at most 0).
+
+    :param Party ego: The ego.
+    :param float stop_ego: Metres to its stop.
+    :param Party other: The road user.
+    :param float stop_other: Metres to its stop.
+    :returns: Metres: the gap where they do not meet; else at most 0.
+    :rtype: float
     """
     mine, theirs = _sweep(ego, stop_ego), _sweep(other, stop_other)
     if mine.disjoint(theirs):
@@ -701,16 +969,37 @@ def _sweep_margin(ego: Party, stop_ego: float, other: Party, stop_other: float) 
 
 
 def _points(geom) -> List[Tuple[float, float]]:
+    """
+    The vertices of a shapely geometry.
+
+    :param BaseGeometry geom: A polygon, by its exterior ring, or a line or point.
+    :returns: Its ``(x, y)`` coordinates.
+    :rtype: List[Tuple[float, float]]
+    """
     return list(geom.exterior.coords) if hasattr(geom, "exterior") else list(geom.coords)
 
 
 def _lateral_stop(speed: float, dynamics) -> float:
-    """Metres to stop moving sideways at ``speed`` (towards the other when positive) at ``|lat brake_min|``."""
+    """
+    Metres to stop moving sideways at ``speed`` (towards the other when positive) at ``|lat brake_min|``.
+
+    :param float speed: m/s sideways, towards the other when positive.
+    :param Dynamics dynamics: The party's RSS dynamics.
+    :returns: Metres; 0 when it does not move towards the other.
+    :rtype: float
+    """
     return speed * speed / (2 * -dynamics.alpha_lat.brake_min) if speed > 0 else 0.0
 
 
 def _median(values: List[float], half: int) -> List[float]:
-    """Each value replaced by the median of the ``2 * half + 1`` around it (fewer at the ends)."""
+    """
+    Each value replaced by the median of the ``2 * half + 1`` around it (fewer at the ends).
+
+    :param List[float] values: The values, in order.
+    :param int half: How many values each side of each count.
+    :returns: The filtered values, as many as given.
+    :rtype: List[float]
+    """
     out = []
     for i in range(len(values)):
         window = sorted(values[max(0, i - half):i + half + 1])
@@ -719,6 +1008,16 @@ def _median(values: List[float], half: int) -> List[float]:
 
 
 def _overlap(a0: float, a1: float, b0: float, b1: float) -> float:
+    """
+    How long the intervals ``[a0, a1]`` and ``[b0, b1]`` overlap.
+
+    :param float a0: The first's start.
+    :param float a1: The first's end.
+    :param float b0: The second's start.
+    :param float b1: The second's end.
+    :returns: The overlap's length; 0 when they do not overlap.
+    :rtype: float
+    """
     return max(0.0, min(a1, b1) - max(a0, b0))
 
 
@@ -730,7 +1029,13 @@ def _excess(samples: Samples, owed: _Owed, t: float, before: float, after: float
     start; after it, at the last sample before the due time, so that time the
     party was allowed to wait does not water its braking down.
 
+    :param Samples samples: The party's speeds up to ``t``, ``(t, m/s)``: forward, or sideways towards the other.
+    :param _Owed owed: The obligation.
+    :param float t: Seconds since the record began: the latest sample's.
+    :param float before: m/s^2 allowed until the due time: its ``accel_max``.
+    :param float after: m/s^2 allowed from the due time: what it owes, e.g. its ``brake_min``.
     :returns: The mean rate over the window and whether it was after the due time; None when within.
+    :rtype: Tuple[float, bool] | None
     """
     late = t > owed.due + 1e-6
     begin = owed.start
@@ -748,7 +1053,13 @@ def _excess(samples: Samples, owed: _Owed, t: float, before: float, after: float
 
 
 def _yaw_rate(headings: Samples) -> float:
-    """The latest yaw rate, rad/s, over about ``WINDOW`` seconds of headings."""
+    """
+    The latest yaw rate, rad/s, over about ``WINDOW`` seconds of headings.
+
+    :param Samples headings: Headings by time, ``(t, rad)``.
+    :returns: rad/s, counter-clockwise; 0 with fewer than two headings.
+    :rtype: float
+    """
     if len(headings) < 2:
         return 0.0
     t, heading = headings[-1]
@@ -759,7 +1070,13 @@ def _yaw_rate(headings: Samples) -> float:
 
 
 def _rate(samples: Samples) -> float | None:
-    """How fast the latest sampled value changes, over about ``WINDOW`` seconds."""
+    """
+    How fast the latest sampled value changes, over about ``WINDOW`` seconds, else since the first sample.
+
+    :param Samples samples: Values by time, ``(t, value)``.
+    :returns: Per second; None with fewer than two samples.
+    :rtype: float | None
+    """
     if len(samples) < 2:
         return None
     t, value = samples[-1]

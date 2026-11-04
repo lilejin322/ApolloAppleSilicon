@@ -31,12 +31,14 @@ class ComfortOracle(Oracle):
     channels = frozenset({LOCALIZATION})
 
     def __init__(self, *, max_acceleration: float = 4.0, max_deceleration: float = 4.0) -> None:
+        """Set positive acceleration and braking thresholds in metres per second squared."""
         super().__init__()
         self.max_acceleration = max_acceleration
         self.max_deceleration = max_deceleration
         self._episodes = Episodes()
 
     def on_message(self, world: World, channel: str, message: Message) -> None:
+        """Update harsh acceleration or braking episodes from the current ego acceleration."""
         a = world.ego.acceleration
         holding = {}
         if a > self.max_acceleration + _TOLERANCE:
@@ -46,9 +48,11 @@ class ComfortOracle(Oracle):
         self._close(self._episodes.update(world, holding))
 
     def finish(self, world: World) -> None:
+        """Report acceleration and braking episodes still open at the end of replay."""
         self._close(self._episodes.close_all())
 
     def _close(self, closed) -> None:
+        """Report each closed episode with its peak acceleration magnitude and duration."""
         for what, episode in closed:
             limit = self.max_acceleration if what == "acceleration" else self.max_deceleration
             self.report_episode(episode, what, f"harsh {what} up to {episode.peak:.2f} m/s^2 "

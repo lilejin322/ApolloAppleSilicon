@@ -45,6 +45,7 @@ def inside_heading_range(angle: float, heading_range: Tuple[float, float]) -> bo
 
 
 def _collides(a: BaseGeometry, b: BaseGeometry) -> bool:
+    """Return whether two reachable sets intersect; boundary contact counts as collision."""
     return not a.disjoint(b)  # Touching counts.
 
 
@@ -56,6 +57,7 @@ class UnstructuredChecker:
     """
 
     def __init__(self) -> None:
+        """Initialize per-object safety history, drive-away positions and the per-frame ego-set cache."""
         self._time: int | None = None
         self._last: Dict[int, bool] = {}
         self._new: Dict[int, bool] = {}

@@ -199,6 +199,7 @@ def _braking(poses: Sequence[Pose], brake: float, deceleration: float,
     speed = _interpolate(times, [p.speed for p in poses], brake)
 
     def pose(t: float) -> Tuple[float, float, float, bool]:
+        """Return a braked pose along the recorded path and whether it remains within that path."""
         s = start + _braked(speed, t - brake, deceleration, jerk_time)
         return (*_along(poses, arc, s), s <= arc[-1] + 1e-6)
     return pose
@@ -225,6 +226,7 @@ def _braked(speed: float, elapsed: float, deceleration: float = DECELERATION, je
 
 
 def _interpolate(times: Sequence[float], values: Sequence[float], t: float) -> float:
+    """Linearly interpolate a nonempty sampled series, clamping queries outside its time range."""
     i = bisect_right(times, t)
     if i == 0:
         return values[0]

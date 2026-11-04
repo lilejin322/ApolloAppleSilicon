@@ -53,6 +53,7 @@ class LaneMarkingOracle(Oracle):
 
     def __init__(self, map_service: MapService, vehicle: ApolloVehicleConfig, *, min_depth: float = 0.1,
                  min_duration: float = 0.2) -> None:
+        """Configure body penetration thresholds in metres and seconds and initialize marking caches."""
         super().__init__()
         self.map = map_service
         self.vehicle = vehicle
@@ -66,6 +67,7 @@ class LaneMarkingOracle(Oracle):
         self._episodes = Episodes()
 
     def on_message(self, world: World, channel: str, message: Message) -> None:
+        """Update episodes where the ego body crosses a prohibiting marking beyond the depth threshold."""
         ego = world.ego
         body = ego_footprint(ego.x, ego.y, ego.heading, self.vehicle)
         reference = Point(ego.x, ego.y)
@@ -80,9 +82,11 @@ class LaneMarkingOracle(Oracle):
         self._close(self._episodes.update(world, holding))
 
     def finish(self, world: World) -> None:
+        """Report qualifying marking-crossing episodes still open at the end of replay."""
         self._close(self._episodes.close_all())
 
     def _line(self, marking: LaneMarking) -> LaneMarking:
+        """Reuse a canonical marking for geometrically coincident painted lines."""
         line = self._lines.get(marking)
         if line is None:
             line = next((known for known in self._known
@@ -93,6 +97,7 @@ class LaneMarkingOracle(Oracle):
         return line
 
     def _close(self, closed: List[Tuple[LaneMarking, object]]) -> None:
+        """Report closed marking-crossing episodes meeting the minimum duration."""
         for line, episode in closed:
             if episode.duration >= self.min_duration:
                 types = "+".join(line.types)

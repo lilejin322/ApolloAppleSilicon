@@ -12,15 +12,16 @@ from typing import Tuple
 
 from shapely.geometry import Polygon
 
-from ..utils import ApolloVehicleConfig
+from ..utils import ApolloVehicleConfig, rectangle_corners
 
 __all__ = ["box", "ego_footprint", "front_point"]
 
 
 def _rectangle(x: float, y: float, heading: float, front: float, back: float, left: float, right: float) -> Polygon:
-    c, s = cos(heading), sin(heading)
-    corners = [(front, left), (front, -right), (-back, -right), (-back, left)]
-    return Polygon([(x + c * dx - s * dy, y + s * dx + c * dy) for dx, dy in corners])
+    # Preserve this module's clockwise ring order.
+    """Build a clockwise map-frame rectangle from four reference-point edge distances, in metres."""
+    return Polygon(rectangle_corners(x, y, heading, front=front, back=back,
+                                     left=left, right=right)[[0, 3, 2, 1]])
 
 
 def ego_footprint(x: float, y: float, heading: float, vehicle: ApolloVehicleConfig) -> Polygon:

@@ -31,6 +31,7 @@ def valid(obj: RelativeObjectState) -> bool:
 
 
 def _signbit(value: float) -> bool:
+    """Return the floating-point sign bit, including the sign of negative zero."""
     return copysign(1.0, value) < 0
 
 
@@ -116,6 +117,7 @@ def safe_lat(left: RelativeObjectState, right: RelativeObjectState) -> float | N
 
 
 def _check(distance: float, safe: float | None) -> Check:
+    """Return validity, safe distance and strict safety, using RSS distance tolerances."""
     if flt(distance, 0.0, DISTANCE) or safe is None:
         return False, DISTANCE_MAX, False
     return True, safe, fgt(distance, safe, DISTANCE)

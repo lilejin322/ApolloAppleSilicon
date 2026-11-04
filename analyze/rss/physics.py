@@ -61,6 +61,7 @@ def fmin(a: float, b: float, precision: float) -> float:
 
 
 def _signbit(value: float) -> bool:
+    """Return the floating-point sign bit, including the sign of negative zero."""
     return copysign(1.0, value) < 0
 
 
