@@ -270,32 +270,42 @@ class RssJudge:
     :param RssParameters params: RSS dynamics.
     :param RssMap | None rss_map: The map's lanes, when already built.
     """
+    map: RssMap
+    """The map's lanes, as RSS reads them."""
+    vehicle: ApolloVehicleConfig
+    """The ego's dimensions."""
+    params: RssParameters
+    """RSS dynamics."""
+    verdicts: List[Verdict]
+    """Who answers for each touch, in time order; one per obstacle at most."""
+    margin: float
+    """The ego's RSS margin in metres, ``MARGIN_CAP`` until lowered; at most 0 after a touch it answers for."""
+    worst: str | None
+    """What happened at the least margin, for people; None when nothing lowered it."""
+    worst_at: Moment | None
+    """Where that was; None when nothing lowered it."""
+    _frames: List[_Frame]
+    """The obstacle frames taken, in time order."""
+    _held: Dict[int, Tuple[float, str, Moment]]
+    """
+    Per obstacle, the least margin of the ego failing RSS against it, held until the danger's end: a
+    failure that a touch then shows made no difference (``_braking_in_vain``) does not count.
+    """
+    _contacts: Dict[int, float] | None
+    """When each obstacle first touched the ego, seconds since the record began; built by ``_traffic``."""
 
     def __init__(self, map_service: MapService, vehicle: ApolloVehicleConfig, params: RssParameters = CANONICAL,
                  rss_map: RssMap | None = None) -> None:
         self.map = rss_map if rss_map is not None else RssMap.of(map_service)
-        """The map's lanes, as RSS reads them."""
         self.vehicle = vehicle
-        """The ego's dimensions."""
         self.params = params
-        """RSS dynamics."""
-        self.verdicts: List[Verdict] = []
-        """Who answers for each touch, in time order; one per obstacle at most."""
+        self.verdicts = []
         self.margin = MARGIN_CAP
-        """The ego's RSS margin in metres, ``MARGIN_CAP`` until lowered; at most 0 after a touch it answers for."""
-        self.worst: str | None = None
-        """What happened at the least margin, for people; None when nothing lowered it."""
-        self.worst_at: Moment | None = None
-        """Where that was; None when nothing lowered it."""
-        self._frames: List[_Frame] = []
-        """The obstacle frames taken, in time order."""
-        self._held: Dict[int, Tuple[float, str, Moment]] = {}
-        """
-        Per obstacle, the least margin of the ego failing RSS against it, held until the danger's end: a
-        failure that a touch then shows made no difference (``_braking_in_vain``) does not count.
-        """
-        self._contacts: Dict[int, float] | None = None
-        """When each obstacle first touched the ego, seconds since the record began; built by ``_traffic``."""
+        self.worst = None
+        self.worst_at = None
+        self._frames = []
+        self._held = {}
+        self._contacts = None
 
     def add(self, world: World) -> None:
         """

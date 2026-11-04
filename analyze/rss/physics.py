@@ -20,60 +20,140 @@ DISTANCE = SPEED = DURATION = 1e-3
 ACCELERATION = 1e-4
 """Precision of accelerations (m/s^2)."""
 DISTANCE_MAX = 1e9
+"""Metres: the ad_physics distance maximum, which the library uses as "infinite"."""
 DURATION_MAX = 1e6
+"""Seconds: the ad_physics duration maximum, which the library uses as "infinite"."""
 SPEED_MAX = 100.0
-"""The ad_physics types' maxima, which the library uses as "infinite"."""
+"""m/s: the ad_physics speed maximum, which the library uses as "infinite"."""
 
 
 def feq(a: float, b: float, precision: float) -> bool:
-    """``a == b`` within ``precision``."""
+    """
+    ``a == b`` within ``precision``.
+
+    :param float a: The left value.
+    :param float b: The right value.
+    :param float precision: How close counts as equal, e.g. ``SPEED``.
+    :returns: True if ``|a - b| < precision``.
+    :rtype: bool
+    """
     return abs(a - b) < precision
 
 
 def fgt(a: float, b: float, precision: float) -> bool:
-    """``a > b`` and not equal within ``precision``."""
+    """
+    ``a > b`` and not equal within ``precision``.
+
+    :param float a: The left value.
+    :param float b: The right value.
+    :param float precision: How close counts as equal, e.g. ``SPEED``.
+    :returns: True if ``a`` exceeds ``b`` by at least ``precision``.
+    :rtype: bool
+    """
     return a > b and not feq(a, b, precision)
 
 
 def flt(a: float, b: float, precision: float) -> bool:
-    """``a < b`` and not equal within ``precision``."""
+    """
+    ``a < b`` and not equal within ``precision``.
+
+    :param float a: The left value.
+    :param float b: The right value.
+    :param float precision: How close counts as equal, e.g. ``SPEED``.
+    :returns: True if ``b`` exceeds ``a`` by at least ``precision``.
+    :rtype: bool
+    """
     return a < b and not feq(a, b, precision)
 
 
 def fge(a: float, b: float, precision: float) -> bool:
-    """``a >= b`` within ``precision``."""
+    """
+    ``a >= b`` within ``precision``.
+
+    :param float a: The left value.
+    :param float b: The right value.
+    :param float precision: How close counts as equal, e.g. ``SPEED``.
+    :returns: True if ``a > b``, or they are equal within ``precision``.
+    :rtype: bool
+    """
     return a > b or feq(a, b, precision)
 
 
 def fle(a: float, b: float, precision: float) -> bool:
-    """``a <= b`` within ``precision``."""
+    """
+    ``a <= b`` within ``precision``.
+
+    :param float a: The left value.
+    :param float b: The right value.
+    :param float precision: How close counts as equal, e.g. ``SPEED``.
+    :returns: True if ``a < b``, or they are equal within ``precision``.
+    :rtype: bool
+    """
     return a < b or feq(a, b, precision)
 
 
 def fmax(a: float, b: float, precision: float) -> float:
-    """``std::max`` on ad_physics values: ``b`` if ``a < b``, else ``a``."""
+    """
+    ``std::max`` on ad_physics values: ``b`` if ``a < b``, else ``a``.
+
+    :param float a: The left value.
+    :param float b: The right value.
+    :param float precision: How close counts as equal, e.g. ``SPEED``.
+    :returns: The larger; ``a`` when they are equal within ``precision``.
+    :rtype: float
+    """
     return b if flt(a, b, precision) else a
 
 
 def fmin(a: float, b: float, precision: float) -> float:
-    """``std::min`` on ad_physics values: ``b`` if ``b < a``, else ``a``."""
+    """
+    ``std::min`` on ad_physics values: ``b`` if ``b < a``, else ``a``.
+
+    :param float a: The left value.
+    :param float b: The right value.
+    :param float precision: How close counts as equal, e.g. ``SPEED``.
+    :returns: The smaller; ``a`` when they are equal within ``precision``.
+    :rtype: float
+    """
     return b if flt(b, a, precision) else a
 
 
 def _signbit(value: float) -> bool:
-    """Return the floating-point sign bit, including the sign of negative zero."""
+    """
+    Return the floating-point sign bit, including the sign of negative zero.
+
+    :param float value: The value.
+    :returns: True if it is negative, ``-0.0`` included.
+    :rtype: bool
+    """
     return copysign(1.0, value) < 0
 
 
 def distance_offset_accelerated(v: float, a: float, t: float) -> float | None:
-    """Distance covered in ``t`` from ``v`` at ``a``, unclamped (Physics.cpp:25-38)."""
+    """
+    Distance covered in ``t`` from ``v`` at ``a``, unclamped (Physics.cpp:25-38).
+
+    :param float v: The initial speed, m/s.
+    :param float a: The acceleration, m/s^2.
+    :param float t: The duration, s.
+    :returns: Metres, ``v t + a t^2 / 2``, even past a standstill; None for a negative ``t``.
+    :rtype: float | None
+    """
     if flt(t, 0.0, DURATION):
         return None
     return 0.5 * a * t * t + v * t
 
 
 def speed_accelerated(v: float, a: float, t: float) -> float | None:
-    """Speed after ``t`` from ``v`` at ``a``, unclamped (Physics.cpp:40-53)."""
+    """
+    Speed after ``t`` from ``v`` at ``a``, unclamped (Physics.cpp:40-53).
+
+    :param float v: The initial speed, m/s.
+    :param float a: The acceleration, m/s^2.
+    :param float t: The duration, s.
+    :returns: m/s, ``v + a t``, even below 0; None for a negative ``t``.
+    :rtype: float | None
+    """
     if flt(t, 0.0, DURATION):
         return None
     return v + a * t
@@ -83,6 +163,12 @@ def stopping_distance(v: float, a: float) -> float | None:
     """
     Distance to stop from ``v`` braking at ``a`` (Physics.cpp:55-79); signed:
     a negative speed stopped by a positive ``a`` gives a negative distance.
+
+    :param float v: The speed, m/s.
+    :param float a: The acceleration, m/s^2: of the opposite sign to ``v``.
+    :returns: Metres, ``v^2 / (-2 a)``; 0 standing at no acceleration; None when ``a`` is 0 while moving, or
+        has ``v``'s sign bit.
+    :rtype: float | None
     """
     if feq(a, 0.0, ACCELERATION):
         return 0.0 if feq(v, 0.0, SPEED) else None
@@ -97,7 +183,12 @@ def accelerated_limited_movement(v0: float, v_max: float | None, a: float, t: fl
     Speed and distance after ``t`` from ``v0`` at ``a``, never below standstill
     and, accelerating, never above ``max(v_max, v0)`` (Physics.cpp:81-128).
 
-    :returns: ``(speed, distance)``.
+    :param float v0: The initial speed, m/s.
+    :param float | None v_max: The speed cap, m/s; None for none.
+    :param float a: The acceleration, m/s^2.
+    :param float t: The duration, s.
+    :returns: ``(speed, distance)``, m/s and m; None for a negative ``t`` or ``v0``.
+    :rtype: Tuple[float, float] | None
     """
     if flt(t, 0.0, DURATION) or flt(v0, 0.0, SPEED):
         return None
@@ -110,14 +201,33 @@ def accelerated_limited_movement(v0: float, v_max: float | None, a: float, t: fl
 
 
 def required_time_accelerated(v0: float, a: float, s: float) -> float:
-    """The first positive time to cover ``s`` from ``v0`` at ``a`` (Physics.cpp:130-153)."""
+    """
+    The first positive time to cover ``s`` from ``v0`` at ``a`` (Physics.cpp:130-153).
+
+    :param float v0: The initial speed, m/s.
+    :param float a: The acceleration, m/s^2; not 0.
+    :param float s: The distance, m.
+    :returns: Seconds.
+    :rtype: float
+    :raises ValueError: When braking at ``a`` stops it short of ``s``.
+    """
     root = sqrt((v0 / a) ** 2 + 2 * s / a)
     t1, t2 = -v0 / a + root, -v0 / a - root
     return t2 if fgt(t2, 0.0, DURATION) else t1
 
 
 def time_for_distance(v0: float, v_max: float, a: float, s: float) -> float | None:
-    """Time to cover ``s`` from ``v0`` at ``a``, accelerating up to ``v_max`` (Physics.cpp:155-220)."""
+    """
+    Time to cover ``s`` from ``v0`` at ``a``, accelerating up to ``v_max`` (Physics.cpp:155-220).
+
+    :param float v0: The initial speed, m/s.
+    :param float v_max: The speed cap while accelerating, m/s.
+    :param float a: The acceleration, m/s^2.
+    :param float s: The distance, m.
+    :returns: Seconds; ``DURATION_MAX`` standing at no acceleration; None for a negative ``v0``.
+    :rtype: float | None
+    :raises ValueError: When braking at ``a`` stops it short of ``s``, or the movement is inconsistent.
+    """
     if flt(v0, 0.0, SPEED):
         return None
     if feq(a, 0.0, ACCELERATION) or (fge(v0, v_max, SPEED) and fgt(a, 0.0, ACCELERATION)):
@@ -139,6 +249,15 @@ def time_to_cover_distance(v0: float, v_max: float, rho: float, a_response: floa
     Time to cover ``s``: ``a_response`` during the response time ``rho`` (speed
     capped by ``v_max``), then ``a_after`` uncapped; ``DURATION_MAX`` when it stops
     short (Physics.cpp:222-289).
+
+    :param float v0: The initial speed, m/s.
+    :param float v_max: The speed cap during the response time, m/s.
+    :param float rho: The response time, s.
+    :param float a_response: The acceleration during it, m/s^2.
+    :param float a_after: The acceleration after it, m/s^2.
+    :param float s: The distance, m.
+    :returns: Seconds; ``DURATION_MAX`` when it stops short; None for a negative ``s``, ``rho`` or ``v0``.
+    :rtype: float | None
     """
     if flt(s, 0.0, DISTANCE):
         return None
@@ -163,7 +282,15 @@ def speed_and_distance_offset(t: float, v0: float, rho: float, v_max: float, a_r
     Speed and distance after ``t``: ``a_response`` during ``rho``, then ``a_after``,
     both capped by ``v_max`` (Physics.cpp:291-321).
 
-    :returns: ``(speed, distance)``.
+    :param float t: The duration, s.
+    :param float v0: The initial speed, m/s.
+    :param float rho: The response time, s.
+    :param float v_max: The speed cap, m/s.
+    :param float a_response: The acceleration during the response time, m/s^2.
+    :param float a_after: The acceleration after it, m/s^2.
+    :returns: ``(speed, distance)``, m/s and m, never below standstill; None for a negative ``t``, ``rho`` or
+        ``v0``.
+    :rtype: Tuple[float, float] | None
     """
     first = accelerated_limited_movement(v0, v_max, a_response, fmin(t, rho, DURATION))
     if first is None:
@@ -181,6 +308,14 @@ def time_to_stop(v0: float, rho: float, v_max: float, a_response: float, a_after
     """
     Time until standstill: ``a_response`` during ``rho``, then ``a_after``
     (Physics.cpp:323-375); None when standing already while braking, or never stopping.
+
+    :param float v0: The initial speed, m/s.
+    :param float rho: The response time, s.
+    :param float v_max: The speed cap during the response time, m/s.
+    :param float a_response: The acceleration during it, m/s^2.
+    :param float a_after: The acceleration after it, m/s^2.
+    :returns: Seconds; None as above, or for a negative ``rho`` or ``v0``.
+    :rtype: float | None
     """
     if flt(a_response, 0.0, ACCELERATION) and fle(v0, 0.0, SPEED):
         return None
