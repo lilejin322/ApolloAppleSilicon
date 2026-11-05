@@ -29,6 +29,7 @@ _LAYOUTS: "WeakKeyDictionary[Any, Dict[Tuple, Any]]" = WeakKeyDictionary()
 _LAYOUT_CACHE_SIZE = 4096
 """Layouts kept per space; the oldest are dropped first."""
 _Built = TypeVar("_Built")
+"""Whatever ``memo_layout`` builds and caches: an agent type's validated layout tuple."""
 
 MAX_SPEED_POINTS = 4
 """Max speed points"""
@@ -294,7 +295,8 @@ def ordered_points(placed: Sequence[Tuple[float, int, SpeedPoint]], fallback: Sp
     one with the lowest rank stays, trailing stops are dropped (the agent
     stops at the route end anyway), and ``fallback`` stands in for an empty result.
 
-    :param Sequence[Tuple[float, int, SpeedPoint]] placed: Distance, priority, and speed-point triples to order and deduplicate.
+    :param Sequence[Tuple[float, int, SpeedPoint]] placed: Distance, priority, and speed-point triples to order and
+        deduplicate.
     :param SpeedPoint fallback: Speed point retained when no usable ordered points remain.
     :returns: Distinct speed points in driven order, without trailing stops, or the fallback point.
     :rtype: Tuple[SpeedPoint, ...]
@@ -1131,7 +1133,8 @@ def _window_mean(s: np.ndarray, values: np.ndarray, reach: float, low: float, hi
     :param float reach: Half-width of the averaging window, in metres.
     :param float low: Start of the signal domain, in path metres.
     :param float high: End of the signal domain, in path metres.
-    :param Callable[[np.ndarray], np.ndarray] extend: Callback evaluating the extended signal at an array of path positions.
+    :param Callable[[np.ndarray], np.ndarray] extend: Callback evaluating the extended signal at an array of path
+        positions.
     :returns: The signal averaged within the requested distance window at each input position.
     :rtype: np.ndarray
     """
@@ -1281,7 +1284,8 @@ def anchored(frame: RouteFrame, draws: Sequence[Tuple[float, float, float]]) -> 
     Speed points at shares of a route's driven distance, anchored to the lane there.
 
     :param RouteFrame frame: Route frame used to map lane positions to driven distance.
-    :param Sequence[Tuple[float, float, float]] draws: Fraction-of-distance, speed, and dwell triples to anchor on the route.
+    :param Sequence[Tuple[float, float, float]] draws: Fraction-of-distance, speed, and dwell triples to anchor on the
+        route.
     :returns: Speed points anchored to map lane positions at the requested distance fractions.
     :rtype: Tuple[SpeedPoint, ...]
     """

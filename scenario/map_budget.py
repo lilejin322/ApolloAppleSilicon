@@ -21,8 +21,11 @@ agents cluster near the ego, so the useful count grows slower than the network.
 
 from dataclasses import dataclass
 from math import sqrt
-from .scenario_chromosome import ScenarioContext
-from .sections import SectionRules
+from typing import TYPE_CHECKING, Self
+
+if TYPE_CHECKING:  # ``scenario_chromosome`` imports this module: only the type checker may import it back.
+    from .scenario_chromosome import ScenarioContext
+    from .sections import SectionRules
 
 REFERENCE_LENGTH: float = 2729.0
 """Drivable (CITY_DRIVING) length of borregas_ave in metres; its scale is 1."""
@@ -34,26 +37,29 @@ class MapBudget:
     Absolute per-type count caps of one map, derived from its size.
 
     :param float scale: Multiplier on each section's base ``max_count``.
-    :param float drivable_length: CITY_DRIVING length the scale came from, metres (0 when given directly).
+    :param float drivable_length: CITY_DRIVING length the scale came from, in metres (0 when the scale is given
+        directly).
     :param int junctions: Junction count of the map (informational).
     """
     scale: float = 1.0
     """Multiplier on each section's base ``max_count``."""
     drivable_length: float = 0.0
-    """CITY_DRIVING length the scale came from, in metres."""
+    """CITY_DRIVING length the scale came from, in metres (0 when the scale is given directly)."""
     junctions: int = 0
     """Junction count of the map (informational)."""
 
     def __post_init__(self) -> None:
         """
-        Reject a nonpositive spacing scale with ValueError.
+        Reject a nonpositive scale.
+
+        :raises ValueError: If ``scale`` is not positive.
         """
         if self.scale <= 0:
             raise ValueError("scale must be positive")
 
     @classmethod
     def from_size(cls, drivable_length: float, junctions: int = 0, *, reference_length: float = REFERENCE_LENGTH,
-                  min_scale: float = 1.0, max_scale: float = 3.0) -> "MapBudget":
+                  min_scale: float = 1.0, max_scale: float = 3.0) -> Self:
         """
         Budget of a map with ``drivable_length`` metres of CITY_DRIVING lanes.
 
@@ -70,7 +76,7 @@ class MapBudget:
         return cls(min(max(scale, min_scale), max_scale), float(drivable_length), int(junctions))
 
     @classmethod
-    def of(cls, context: ScenarioContext, **kwargs: float) -> "MapBudget":
+    def of(cls, context: "ScenarioContext", **kwargs: float) -> Self:
         """
         Budget of a ``ScenarioContext``: its own ``budget`` if set, otherwise from its map's size.
 
@@ -95,7 +101,7 @@ class MapBudget:
         """
         return max(min_count, int(round(base_max * self.scale)))
 
-    def rules(self, rules: SectionRules) -> SectionRules:
+    def rules(self, rules: "SectionRules") -> "SectionRules":
         """
         ``rules`` (a ``SectionRules``) with ``max_count`` replaced by this map's cap.
 

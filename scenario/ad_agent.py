@@ -35,6 +35,8 @@ class ADAgent:
     def __post_init__(self) -> None:
         """
         Validate the field values and consistency of the constructed object.
+
+        :raises ValueError: If ``start_t`` is negative.
         """
         require_nonnegative(start_t=self.start_t)
 

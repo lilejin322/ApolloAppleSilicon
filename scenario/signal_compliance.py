@@ -22,7 +22,6 @@ from __future__ import annotations
 
 from itertools import groupby
 from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Tuple
-
 from shapely.geometry import LineString, Point
 
 from .bike_connectors import parallel_car_lanes
@@ -58,18 +57,11 @@ class SignalStop(NamedTuple):
     :param str control_id: Signal ID or crosswalk ID.
     """
     distance: float
+    """Path metres of the stopped body's reference point."""
     kind: str
+    """``"signal"`` (stop line of a traffic signal) or ``"crosswalk"``."""
     control_id: str
-
-
-def _first_crossing(path: LineString, geometry: Any) -> Optional[float]:
-    """Smallest path distance where ``path`` meets ``geometry``; ``None`` if they do not meet."""
-    hit = path.intersection(geometry)
-    if hit.is_empty:
-        return None
-    points = [hit] if hit.geom_type == "Point" else [Point(c) for g in getattr(hit, "geoms", [hit])
-                                                      for c in g.coords]
-    return min(path.project(p) for p in points)
+    """Signal ID or crosswalk ID."""
 
 
 def lane_signal_stops(service: Any, lanes: Iterable[str], path: LineString, signals: SignalSection,
@@ -159,7 +151,14 @@ def connector_signal_stops(space: Any, lanes: Iterable[str], layout: Any, signal
 
 
 def _planned(signals: SignalSection, signal_id: str) -> bool:
-    """Whether ``signal_id`` has a plan in ``signals``."""
+    """
+    Whether ``signal_id`` has a plan in ``signals``.
+
+    :param SignalSection signals: Plans in force.
+    :param str signal_id: A signal of the map.
+    :returns: ``True`` if one of the plans covers it.
+    :rtype: bool
+    """
     try:
         signals.plan_of(signal_id)
     except KeyError:
@@ -357,5 +356,12 @@ def _hold(signals: SignalSection, stops: Tuple[SignalStop, ...], depart: float, 
 
 
 def active(signals: Optional[SignalSection], agent: Any) -> bool:
-    """Whether ``agent``'s replay depends on ``signals``: plans exist and the agent obeys them."""
+    """
+    Whether ``agent``'s replay depends on ``signals``: plans exist and the agent obeys them.
+
+    :param Optional[SignalSection] signals: Plans in force, or None.
+    :param Any agent: An agent with an ``obeys_signals`` gene; one without is taken to obey.
+    :returns: ``True`` if ``comply`` has anything to do for it.
+    :rtype: bool
+    """
     return bool(signals is not None and signals.plans and getattr(agent, "obeys_signals", True))

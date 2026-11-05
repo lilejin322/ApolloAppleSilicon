@@ -121,7 +121,7 @@ def _parts(geometry) -> List:
     """
     The line parts of a shapely geometry.
 
-    :param geometry: A (multi)line, collection or point geometry.
+    :param BaseGeometry geometry: A shapely (multi)line, collection or point geometry.
     :returns: Its parts with length.
     :rtype: List
     """

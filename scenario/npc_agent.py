@@ -44,9 +44,13 @@ class VehicleType(Enum):
     NPC vehicle categories selecting body dimensions, motion limits, and speed priors.
     """
     CAR = "CAR"
+    """Passenger car (Apollo ``ST_CAR``): 4.7 x 1.9 m; about 72 % of urban traffic (``realism.VEHICLE_MIX``)."""
     VAN = "VAN"
+    """Van or light truck (``ST_VAN``): 5.5 x 2.0 m; about 20 %."""
     TRUCK = "TRUCK"
+    """Heavy truck (``ST_TRUCK``): 9.0 x 2.5 m, slow and wide-turning; about 8 %."""
     BUS = "BUS"
+    """Bus (``ST_BUS``): 12.0 x 2.55 m, the longest body; about 0.5 %."""
 
 
 def random_vehicle_type(rng: Random, weights: Mapping[str, float] = VEHICLE_MIX) -> VehicleType:
@@ -67,6 +71,9 @@ class VehicleSpec:
     """
     Fixed properties of a vehicle type.
 
+    Comfortable acceleration and braking come from ``realism.COMFORT`` by the
+    agent's ``drive_style`` (``realism.comfort_limits``), within these hard limits.
+
     :param float length: Metres.
     :param float width: Metres.
     :param float height: Metres.
@@ -77,12 +84,7 @@ class VehicleSpec:
     :param float max_deceleration: m/s^2, positive.
     :param float max_lateral_acceleration: m/s^2; cap on speed squared times
         the curvature of the replayed heading profile.
-
-
-    Comfortable acceleration and braking come from ``realism.COMFORT`` by the
-    agent's ``drive_style`` (``realism.comfort_limits``), within these hard limits.
     """
-
     length: float
     """Metres."""
     width: float
@@ -132,24 +134,31 @@ class NPCVehicleAgent:
     :param VehicleType vehicle_type: Dimensions and limits from ``VEHICLE_SPECS``.
     :param float drive_style: In [0, 1], from gentle to brisk: the comfortable
         acceleration and braking the replay uses (``realism.COMFORT``).
+    :param int | None obstacle_id: Perception obstacle ID in this type's block (``obstacle_ids``); None until a
+        section numbers it.
+    :param str lineage_id: GA identity (uuid4 hex): kept by mutation, crossover and renumbering. Labels, not genes:
+        both are left out of ``==`` and ``hash``.
+    :param bool obeys_signals: Gene: whether the agent waits at red stop lines (``signal_compliance``).
     """
-
     route: LaneRoute
     """City lanes to drive, with start and end positions."""
     lane_change_s: Tuple[float, ...]
     """Where each lane change starts on its source lane, one per lateral transition, in route order."""
     speed_profile: Tuple[SpeedPoint, ...]
-    """One to four target speeds at (lane, s) positions on the route, in driving order; the last speed must not be zero. The first point's speed also applies before it."""
+    """One to four target speeds at (lane, s) positions on the route, in driving order; the last speed must not be
+    zero. The first point's speed also applies before it."""
     start_t: float
     """Seconds after scenario start to move off."""
     vehicle_type: VehicleType
     """Dimensions and limits from ``VEHICLE_SPECS``."""
     drive_style: float = 0.5
-    """In [0, 1], from gentle to brisk: the comfortable acceleration and braking the replay uses (``realism.COMFORT``)."""
+    """In [0, 1], from gentle to brisk: the comfortable acceleration and braking the replay uses
+    (``realism.COMFORT``)."""
     obstacle_id: int | None = field(default=None, compare=False)
     """Perception obstacle ID in this type's block (``obstacle_ids``); None until a section numbers it."""
     lineage_id: str = field(default_factory=new_lineage_id, compare=False)
-    """GA identity (uuid4 hex): kept by mutation, crossover and renumbering. Labels, not genes: both are left out of ``==`` and ``hash``."""
+    """GA identity (uuid4 hex): kept by mutation, crossover and renumbering. Labels, not genes: both are left out of
+    ``==`` and ``hash``."""
     obeys_signals: bool = True
     """Gene: whether the agent waits at red stop lines (``signal_compliance``)."""
 
@@ -330,7 +339,14 @@ class NPCVehicleAgent:
         """
         path, curvature, limits, positions = self._validated_layout(space)
         def build(forced: Dict[float, float]) -> ReplayTrajectory:
-            """Build the replay speed grid with the requested forced stops, curvature and lane speed limits."""
+            """
+            Build the replay speed grid with the requested forced stops, curvature and lane speed limits.
+
+            :param Dict[float, float] forced: Seconds to wait by path metres: the signal holds
+                ``signal_compliance.comply`` adds (an NPC has no pivots of its own).
+            :returns: The replay of this agent's speed profile with those stops.
+            :rtype: ReplayTrajectory
+            """
             s, v, dwell = speed_grid(path.length, self.speed_profile, positions, self.limits,
                                      curvature_spans=curvature, speed_limits=limits, forced_stops=forced)
             return ReplayTrajectory(path, self.start_t, s, v, dwell)
@@ -503,7 +519,8 @@ class NPCVehicleAgent:
 
         :param float position: Position along the replay path, in metres.
         :param Sequence[float] marks: Driven distances of the speed points, in metres.
-        :returns: The profile's desired speed at a position, with the points at ``marks`` in the same units: a stop's next speed, as in ``replay.speed_grid``.
+        :returns: The profile's desired speed at a position, with the points at ``marks`` in the same units: a stop's
+            next speed, as in ``replay.speed_grid``.
         :rtype: float
         """
         index = max(bisect_right(list(marks), position) - 1, 0)

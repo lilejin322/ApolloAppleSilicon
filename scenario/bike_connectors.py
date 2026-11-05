@@ -32,11 +32,10 @@ class ConnectorKind(Enum):
     """
     How a connector crosses: by the change of heading from dead end to start.
     """
-
     STRAIGHT = "STRAIGHT"
-    """Straight connector"""
+    """One smooth curve carrying on across the junction: heading change under ``_STRAIGHT_TURN``."""
     RIGHT = "RIGHT"
-    """Right connector"""
+    """One smooth curve turning right: clockwise heading change from ``_STRAIGHT_TURN`` to ``_TURN_LIMIT``."""
     LEFT_TWO_STAGE = "LEFT_TWO_STAGE"
     """Straight to the far corner, a stop to turn in place, then straight across."""
     LEFT_DIAGONAL = "LEFT_DIAGONAL"
@@ -45,20 +44,23 @@ class ConnectorKind(Enum):
 
 
 DEFAULT_KINDS = frozenset({ConnectorKind.STRAIGHT, ConnectorKind.RIGHT, ConnectorKind.LEFT_TWO_STAGE})
-"""Default"""
+"""Kinds ``bike_connectors`` builds unless told otherwise: lefts in two stages, as riders turn them, never
+diagonally."""
 
 _TOPOLOGY_STEPS = 3
 """Car-lane forward steps followed from a dead end's neighbour, enough to cross a junction."""
 _AHEAD_DISTANCE = 80.0
 """Metres within which a straight continuation ahead is looked for."""
 _AHEAD_HEADING = radians(30)
+"""Largest heading difference in radians between a dead end and a straight continuation ahead of it."""
 _AHEAD_OFFSET = 6.0
 """Largest lateral offset in metres of a straight continuation."""
 _HEADING_CHORD = 3.0
 """Metres over which a lane's end or start heading is measured; single segments are noisy."""
 _STRAIGHT_TURN = radians(45)
+"""Heading change in radians below which a connector is ``STRAIGHT``; from it on, a right or left turn."""
 _TURN_LIMIT = radians(135)
-"""Heading changes up to ``_STRAIGHT_TURN`` are straight; beyond ``_TURN_LIMIT``, U-turns get no connector."""
+"""Heading change in radians beyond which a lane pair is a U-turn and gets no connector."""
 _MOVEMENT_ANGLE = radians(30)
 """Largest difference between the chord headings of a connector leg and of a car lane for the leg to ride
 beside that lane's movement (``parallel_car_lanes``). On the bundled maps matched movements differ by at
@@ -373,7 +375,8 @@ def _too_tight(connector: VirtualLane, min_turn_radius: float) -> bool:
 
     :param VirtualLane connector: Virtual bicycle lane whose geometry is checked.
     :param float min_turn_radius: Minimum permitted turning radius, in metres.
-    :returns: ``True`` if any heading interval of the connector, pivots aside, is tighter than ``min_turn_radius``; otherwise ``False``.
+    :returns: ``True`` if any heading interval of the connector, pivots aside, is tighter than ``min_turn_radius``;
+        otherwise ``False``.
     :rtype: bool
     """
     return any(curvature > 1 / min_turn_radius + 1e-9

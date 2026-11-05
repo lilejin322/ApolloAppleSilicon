@@ -30,7 +30,6 @@ from weakref import WeakKeyDictionary
 from typing import Any, Callable, ClassVar, Dict, Generic, Iterable, Mapping, NamedTuple, TypeVar, Tuple
 
 from ..utils import rectangle_corners
-
 from .bicycle import RIDER_SPECS, BicycleAgent
 from .npc_agent import VEHICLE_SPECS, NPCVehicleAgent, VehicleType
 from .pedestrian import WALKER_SPECS, PedestrianAgent
@@ -41,8 +40,10 @@ from .signal_compliance import active
 from .walkways import WalkNetwork
 
 T = TypeVar("T")
+"""A section's agent type: ``NPCVehicleAgent``, ``BicycleAgent`` or ``PedestrianAgent``."""
 
 Spaces = Mapping[VehicleType, RouteSpace]
+"""The NPC sections' map context: one route space per vehicle type (``NPCVehicleAgent.rules``)."""
 
 
 class InvalidSection(ValueError):
@@ -288,10 +289,12 @@ def sampled_body(agent: Any, trajectory: Callable[[], Any],
     plans its replay can meet. Past ``_BODY_CACHE_SIZE`` bodies the least recently used goes.
 
     :param Any agent: Agent sampled. Its ``start_t`` is stored, and it is part of the cache key.
-    :param Callable[[], Any] trajectory: Builds the replay. Called only on a cache miss; ``state_at`` supplies x, y, and heading.
+    :param Callable[[], Any] trajectory: Builds the replay. Called only on a cache miss; ``state_at`` supplies x, y,
+        and heading.
     :param float length: Body length, in metres.
     :param float width: Body width, in metres.
-    :param Any context: Map context the poses belong to. A mapping of route spaces is cached on one of them; a context that cannot be weakly referenced is not cached.
+    :param Any context: Map context the poses belong to. A mapping of route spaces is cached on one of them; a
+        context that cannot be weakly referenced is not cached.
     :param SectionRules rules: Time grid. ``horizon`` and ``dt`` are part of the cache key.
     :param Any signal_key: What of the signal plans the replay depends on (``Section.signal_plans``),
         or None for a replay without signals.
@@ -328,6 +331,9 @@ class Section(Generic[T]):
     ``WalkNetwork`` for pedestrians.
 
     :param Tuple[T, ...] agents: The agents, in no particular order.
+    :param float | None density: Relative size gene in ``[0, 1]``, map-free: the size is
+        ``count_for(density, min_count, max_count)`` under the map's budgeted rules (``map_budget``). None (legacy)
+        means ``len(agents)`` is the gene.
     """
     agents: Tuple[T, ...] = ()
     """The agents, in no particular order."""
@@ -339,7 +345,8 @@ class Section(Generic[T]):
     RULES: ClassVar[SectionRules] = SectionRules()
     """Default in-type constraints for this section."""
     ID_BASE: ClassVar[int | None] = None
-    """First ``obstacle_id`` of the agent type's block; subclasses set it. Post-init dedupes ``lineage_id`` and renumbers densely."""
+    """First ``obstacle_id`` of the agent type's block; subclasses set it. Post-init dedupes ``lineage_id`` and
+    renumbers densely."""
 
     def __post_init__(self) -> None:
         """
@@ -385,7 +392,10 @@ class Section(Generic[T]):
         Motion ``agent`` replays on its map context. Subclasses implement this.
 
         :param T agent: Agent to replay.
-        :param Any context: Map context for this agent type: ``RouteSpace`` mappings for vehicles, a ``RouteSpace`` for bicycles, a ``WalkNetwork`` for pedestrians.
+        :param Any context: Map context for this agent type: ``RouteSpace`` mappings for vehicles, a ``RouteSpace``
+            for bicycles, a ``WalkNetwork`` for pedestrians.
+        :param SignalSection | None signals: Plans a signal-obeying agent waits for (``signal_compliance``); None
+            replays its profile unchanged.
         :returns: The trajectory describing the agent motion over scenario time.
         :rtype: ReplayTrajectory
         :raises NotImplementedError: If called on ``Section`` itself.
@@ -413,7 +423,8 @@ class Section(Generic[T]):
         Check ``agent`` on its map context. Subclasses implement this.
 
         :param T agent: Agent to check.
-        :param Any context: Map context for this agent type: ``RouteSpace`` mappings for vehicles, a ``RouteSpace`` for bicycles, a ``WalkNetwork`` for pedestrians.
+        :param Any context: Map context for this agent type: ``RouteSpace`` mappings for vehicles, a ``RouteSpace``
+            for bicycles, a ``WalkNetwork`` for pedestrians.
         :raises InvalidRoute: With the first problem found.
         :raises ValueError: If the context does not fit this agent.
         :raises NotImplementedError: If called on ``Section`` itself.
@@ -452,6 +463,7 @@ class Section(Generic[T]):
         :param Iterable[T] others: Agents already in the section.
         :param Any context: Map context passed to ``body``.
         :param SectionRules | None rules: Constraints. Defaults to ``RULES``.
+        :param SignalSection | None signals: Plans the bodies are replayed under (``body``).
         :returns: Why ``agent`` cannot join ``others`` in one section (start gap or overlap), or None.
         :rtype: str | None
         """
@@ -477,6 +489,7 @@ class Section(Generic[T]):
 
         :param Any context: Map context passed to ``check_agent`` and ``conflict``.
         :param SectionRules | None rules: Constraints. Defaults to ``RULES``.
+        :param SignalSection | None signals: Plans the bodies are replayed under (``conflict``).
         :raises InvalidSection: If the count, an agent, the start-time spread or an overlap breaks the rules.
         """
         rules = rules or self.RULES
@@ -497,6 +510,7 @@ class Section(Generic[T]):
 
         :param Any context: Map context passed to ``validate``.
         :param SectionRules | None rules: Constraints. Defaults to ``RULES``.
+        :param SignalSection | None signals: Plans passed to ``validate``.
         :returns: ``True`` if ``validate`` accepts this section; ``False`` if it raises ``InvalidSection``.
         :rtype: bool
         """
@@ -568,6 +582,8 @@ class NPCSection(Section[NPCVehicleAgent]):
 
         :param NPCVehicleAgent agent: Vehicle to replay.
         :param Spaces context: Route spaces keyed by vehicle type.
+        :param SignalSection | None signals: Plans a signal-obeying vehicle waits for at red stop lines; None
+            replays its profile unchanged.
         :returns: The trajectory describing the vehicle motion over scenario time.
         :rtype: ReplayTrajectory
         :raises KeyError: If ``context`` has no space for ``agent.vehicle_type``.
@@ -637,6 +653,8 @@ class BicycleSection(Section[BicycleAgent]):
 
         :param BicycleAgent agent: Bicycle to replay.
         :param RouteSpace context: Route space built with ``BicycleAgent.space``.
+        :param SignalSection | None signals: Plans a signal-obeying rider waits for at stop lines and connectors;
+            None replays its profile unchanged.
         :returns: The trajectory describing the bicycle motion over scenario time.
         :rtype: ReplayTrajectory
         """
@@ -708,6 +726,8 @@ class PedestrianSection(Section[PedestrianAgent]):
 
         :param PedestrianAgent agent: Pedestrian to replay.
         :param WalkNetwork context: Walk network supplying sidewalk and excursion geometry.
+        :param SignalSection | None signals: Plans a signal-obeying walker waits for at signalised crosswalks; None
+            replays its profile unchanged.
         :returns: The trajectory describing the pedestrian motion over scenario time.
         :rtype: ReplayTrajectory
         """

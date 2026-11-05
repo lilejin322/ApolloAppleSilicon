@@ -82,7 +82,9 @@ NEAR_RANGE = (2.0, 20.0)
 NEAR_ANGLE = radians(30)
 """Largest angle between a crossing beside a crosswalk and its axis."""
 MID_BLOCK_CROSSWALK_CLEARANCE = 20.0
+"""Metres a mid-block crossing keeps from every crosswalk."""
 MID_BLOCK_JUNCTION_CLEARANCE = 15.0
+"""Metres a mid-block crossing keeps from every junction."""
 MID_BLOCK_ANGLE = radians(45)
 """Largest angle between a mid-block crossing and the road's normal."""
 MID_BLOCK_ANGLE_SIGMA = radians(15)
@@ -113,6 +115,7 @@ sidewalk ring goes round such a road end across the carriageway, where the road
 in fact carries on beyond the map; walks may not cross these gates nor start or
 end within ``EDGE_GATE_CLEARANCE`` of one."""
 EDGE_GATE_CLEARANCE = 1.0
+"""Metres a walk's start and end keep from a map-edge gate."""
 EDGE_HULL_REACH = 3.0
 """Metres from the road surface's convex hull within which a lane end counts as the map's edge."""
 MAX_EXCURSIONS = 2
@@ -127,6 +130,7 @@ TURN_BACK_SHARE = 0.6
 _STRAY = 0.5
 """Metres of a line tolerated outside an area it must keep to."""
 _CACHE_SIZE = 4096
+"""Entries ``WalkNetwork._checks`` holds before it is cleared."""
 
 
 class ExcursionKind(Enum):
@@ -134,10 +138,15 @@ class ExcursionKind(Enum):
     How a walker leaves the sidewalk.
     """
     CROSSWALK = "CROSSWALK"
+    """Across the road inside a marked crosswalk; about three crossings in four (``realism.EXCURSION_MIX``)."""
     NEAR_CROSSWALK = "NEAR_CROSSWALK"
+    """Across the road just outside a crosswalk (``NEAR_RANGE`` from its edge, within ``NEAR_ANGLE`` of its axis)."""
     MID_BLOCK = "MID_BLOCK"
+    """Across the road away from crosswalks and junctions (the ``MID_BLOCK_*`` clearances and angles)."""
     DIAGONAL = "DIAGONAL"
+    """Corner to corner across a junction, mostly outside its crosswalks (the ``DIAGONAL_*`` bounds)."""
     ROADSIDE = "ROADSIDE"
+    """A step into the road, a walk ``ROADSIDE_OFFSET`` inside the curb and a step back onto the same sidewalk."""
 
 
 @dataclass(frozen=True)
@@ -268,7 +277,8 @@ class Excursion:
     exit: CurbPoint
     """Where it returns; on the same sidewalk for ``ROADSIDE``."""
     turn_back: float | None = None
-    """Metres from ``entry`` along the excursion where the walker stops, turns round and walks back to ``entry``; None to carry on."""
+    """Metres from ``entry`` along the excursion where the walker stops, turns round and walks back to ``entry``; None
+    to carry on."""
 
     def __post_init__(self) -> None:
         """
@@ -643,6 +653,9 @@ class WalkNetwork:
     """Bounded cache of excursion checks (the crossing used, or the ``InvalidRoute``) and walk elements."""
     _gate_tree: STRtree
     """Spatial index over ``edge_gates``."""
+    fingerprint: str
+    """Hash of the network's geometry: a ``WalkRoute`` means the same place only on a network with the same
+    fingerprint (``_fingerprint``; ``Scenario.walk_network`` records it)."""
 
     def __init__(self, service: MapService) -> None:
         """
@@ -700,8 +713,8 @@ class WalkNetwork:
                                              for lane_id in self._road_lanes]) if self._road_lanes else np.zeros(0)
         self._ring_lengths = np.cumsum([self.sidewalks[key].length for key in self._sidewalk_ids]) \
             if self._sidewalk_ids else np.zeros(0)
-        self._diagonals: Dict[str, List] = {}
-        self._checks: Dict = {}
+        self._diagonals = {}
+        self._checks = {}
         self.edge_gates = self._edge_gates()
         self._gate_tree = STRtree(list(self.edge_gates))
         self.fingerprint = self._fingerprint()
@@ -975,7 +988,8 @@ class WalkNetwork:
 
         :param CurbPoint a: Start curb point.
         :param CurbPoint b: End curb point.
-        :returns: The sidewalk's vertices from ``a`` to ``b`` the shorter way round, ``a`` and ``b`` included; one point if they coincide.
+        :returns: The sidewalk's vertices from ``a`` to ``b`` the shorter way round, ``a`` and ``b`` included; one
+            point if they coincide.
         :rtype: List[Tuple[float, float]]
         :raises InvalidRoute: If they lie on different sidewalks.
         """
@@ -1054,7 +1068,8 @@ class WalkNetwork:
         :param ExcursionKind kind: Excursion category whose geometry or constraints apply.
         :param CurbPoint entry: Excursion entry position on a sidewalk.
         :param CurbPoint exit: Excursion exit position on a sidewalk.
-        :returns: The path of an excursion: a straight crossing, or for ``ROADSIDE`` a step into the road, a walk ``ROADSIDE_OFFSET`` inside the curb, and a step back.
+        :returns: The path of an excursion: a straight crossing, or for ``ROADSIDE`` a step into the road, a walk
+            ``ROADSIDE_OFFSET`` inside the curb, and a step back.
         :rtype: LineString
         :raises InvalidRoute: If a point is off the network or a roadside walk has no road beside it.
         """
@@ -1148,7 +1163,8 @@ class WalkNetwork:
         :param CurbPoint exit: Excursion exit position on a sidewalk.
         :returns: The marked crossing a crosswalk or near-crosswalk excursion uses, else ``None``.
         :rtype: Crossing | None
-        :raises InvalidRoute: If the excursion is too short, misses the road, cuts through a block, or fails its kind-specific check.
+        :raises InvalidRoute: If the excursion is too short, misses the road, cuts through a block, or fails its
+            kind-specific check.
         """
         line = self.excursion_line(kind, entry, exit)
         if kind is ExcursionKind.ROADSIDE:
@@ -1227,7 +1243,8 @@ class WalkNetwork:
         :param CurbPoint exit: Excursion exit position on a sidewalk.
         :param LineString line: Line geometry in map metres.
         :param BaseGeometry on_road: Part of the crossing geometry lying on road or refuge surfaces.
-        :raises InvalidRoute: If the crossing is too close to a crosswalk or junction, or is too oblique to the road normal.
+        :raises InvalidRoute: If the crossing is too close to a crosswalk or junction, or is too oblique to the road
+            normal.
         """
         if len(self._crossing_tree.query(on_road, predicate="dwithin", distance=MID_BLOCK_CROSSWALK_CLEARANCE)):
             raise InvalidRoute(f"a mid-block crossing keeps more than {MID_BLOCK_CROSSWALK_CLEARANCE} m from crosswalks")
@@ -1329,7 +1346,8 @@ class WalkNetwork:
         :param WalkRoute route: Walk whose elements are constructed.
         :returns: Raw sidewalk and excursion elements in walking order.
         :rtype: Tuple[WalkElement, ...]
-        :raises InvalidRoute: If a curb point or sidewalk connection is invalid, a turn-back position is out of range, or an element violates a map-edge gate.
+        :raises InvalidRoute: If a curb point or sidewalk connection is invalid, a turn-back position is out of
+            range, or an element violates a map-edge gate.
         """
         elements, here = [], route.start
         self.point(here)

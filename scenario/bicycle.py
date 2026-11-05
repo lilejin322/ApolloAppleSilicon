@@ -80,6 +80,9 @@ class RiderSpec:
     """
     Fixed properties of a rider type; Apollo's obstacle type is BICYCLE.
 
+    Comfortable acceleration and braking come from ``realism.COMFORT`` by the
+    agent's ``drive_style`` (``realism.comfort_limits``), within these hard limits.
+
     :param float length: Metres.
     :param float width: Metres.
     :param float height: Metres.
@@ -90,12 +93,7 @@ class RiderSpec:
     :param float max_deceleration: m/s^2, positive.
     :param float max_lateral_acceleration: m/s^2; cap on speed squared times
         the curvature of the replayed heading profile.
-
-
-    Comfortable acceleration and braking come from ``realism.COMFORT`` by the
-    agent's ``drive_style`` (``realism.comfort_limits``), within these hard limits.
     """
-
     length: float
     """Metres."""
     width: float
@@ -286,6 +284,11 @@ class BicycleAgent:
     :param RiderType rider_type: Dimensions and limits from ``RIDER_SPECS``.
     :param float drive_style: In [0, 1], from gentle to brisk: the comfortable
         acceleration and braking the replay uses (``realism.COMFORT``).
+    :param int | None obstacle_id: Perception obstacle ID in this type's block (``obstacle_ids``); None until a
+        section numbers it.
+    :param str lineage_id: GA identity (uuid4 hex): kept by mutation, crossover and renumbering. Labels, not genes:
+        both are left out of ``==`` and ``hash``.
+    :param bool obeys_signals: Gene: whether the agent waits at red stop lines (``signal_compliance``).
     """
 
     route: LaneRoute
@@ -293,17 +296,20 @@ class BicycleAgent:
     turn_dwell: Tuple[float, ...]
     """Seconds to wait at each pivot of the route, in riding order; ``pivot_keys`` names them."""
     speed_profile: Tuple[SpeedPoint, ...]
-    """One to four target speeds at (lane, s) positions on the route, in riding order; the last speed must not be zero. The first point's speed also applies before it."""
+    """One to four target speeds at (lane, s) positions on the route, in riding order; the last speed must not be
+    zero. The first point's speed also applies before it."""
     start_t: float
     """Seconds after scenario start to move off."""
     rider_type: RiderType
     """Dimensions and limits from ``RIDER_SPECS``."""
     drive_style: float = 0.5
-    """In [0, 1], from gentle to brisk: the comfortable acceleration and braking the replay uses (``realism.COMFORT``)."""
+    """In [0, 1], from gentle to brisk: the comfortable acceleration and braking the replay uses
+    (``realism.COMFORT``)."""
     obstacle_id: int | None = field(default=None, compare=False)
     """Perception obstacle ID in this type's block (``obstacle_ids``); None until a section numbers it."""
     lineage_id: str = field(default_factory=new_lineage_id, compare=False)
-    """GA identity (uuid4 hex): kept by mutation, crossover and renumbering. Labels, not genes: both are left out of ``==`` and ``hash``."""
+    """GA identity (uuid4 hex): kept by mutation, crossover and renumbering. Labels, not genes: both are left out of
+    ``==`` and ``hash``."""
     obeys_signals: bool = True
     """Gene: whether the agent waits at red stop lines (``signal_compliance``)."""
 
@@ -418,9 +424,11 @@ class BicycleAgent:
         speed point, once the path is known to be rideable.
 
         :param RouteSpace space: Route space supplying bicycle routing geometry and topology.
-        :returns: The replay layout, its curvature spans, and the path metres of each speed point, once the path is known to be rideable.
+        :returns: The replay layout, its curvature spans, and the path metres of each speed point, once the path
+            is known to be rideable.
         :rtype: Tuple[ReplayLayout, List[Span], List[float]]
-        :raises InvalidRoute: If route geometry, topology, point placement, or map constraints fail the checks performed here.
+        :raises InvalidRoute: If route geometry, topology, point placement, or map constraints fail the checks
+            performed here.
         """
         return memo_layout(space, ("bicycle", self.route, len(self.turn_dwell), self.speed_profile, self.rider_type),
                            lambda: self._build_layout(space))
@@ -490,7 +498,14 @@ class BicycleAgent:
         """
         layout, curvature, positions = self._validated_layout(space)
         def build(forced: Dict[float, float]) -> ReplayTrajectory:
-            """Build the bicycle replay with forced stops, curvature limits, lane speed limits and pivots."""
+            """
+            Build the bicycle replay with forced stops, curvature limits, lane speed limits and pivots.
+
+            :param Dict[float, float] forced: Seconds to wait by path metres: the pivots' waits, plus the
+                signal holds ``signal_compliance.comply`` adds.
+            :returns: The replay of this agent's speed profile with those stops.
+            :rtype: ReplayTrajectory
+            """
             s, v, dwell = speed_grid(layout.path.length, self.speed_profile, positions, self.limits,
                                      curvature_spans=curvature, speed_limits=layout.limits, forced_stops=forced)
             return ReplayTrajectory(layout.path, self.start_t, s, v, dwell, layout.pivots)
@@ -612,10 +627,12 @@ class BicycleAgent:
         :param float max_turn_dwell: Maximum sampled pivot-turn dwell, in seconds.
         :param float min_speed: Minimum moving target speed, in m/s.
         :param int max_attempts: Maximum number of generation attempts before failure.
-        :param float min_arrival_t: Earliest accepted route-end time in scenario seconds; zero disables the horizon check.
+        :param float min_arrival_t: Earliest accepted route-end time in scenario seconds; zero disables the horizon
+            check.
         :returns: A randomly generated valid agent satisfying the requested constraints.
         :rtype: BicycleAgent
-        :raises RuntimeError: If required map data is unavailable or no valid candidate is found within the attempt limit.
+        :raises RuntimeError: If required map data is unavailable or no valid candidate is found within the attempt
+            limit.
         """
         spec = RIDER_SPECS[rider_type]
         last_problem = "no candidates drawn"

@@ -43,15 +43,18 @@ DEFAULT_SPEED_LIMIT = 13.4
 CRUISE_FACTOR = {"CAR": 0.92, "VAN": 0.9, "TRUCK": 0.85, "BUS": 0.83}
 """Mean target speed as a share of the reference speed, by vehicle type."""
 CRUISE_SIGMA = 0.08
+"""Standard deviation of the usual drivers' cruise factor around ``CRUISE_FACTOR``."""
 CRUISE_RANGE = (0.7, 1.0)
-"""The usual cruise factors: a normal truncated to this range."""
+"""The usual drivers' cruise factors: a normal truncated to this range."""
 SLOW_SHARE = 0.1
+"""Share of slower drivers, whose cruise factor is drawn uniformly from ``SLOW_RANGE``."""
 SLOW_RANGE = (0.35, 0.7)
-"""Share of slower drivers and their (uniform) cruise factors."""
+"""The slow drivers' cruise factors (uniform)."""
 
 RIDER_CRUISE = {"BICYCLE": (4.5, 0.8, (2.5, 7.0)), "E_BIKE": (6.0, 1.0, (3.5, 9.5))}
 """Riders' target speeds in m/s: mean, sigma and range of the usual component."""
 RIDER_SLOW_RANGE = {"BICYCLE": (1.5, 2.5), "E_BIKE": (2.0, 3.5)}
+"""Riders' slow component in m/s (uniform): dawdling, laden or riding beside a walker."""
 
 WALKER_CRUISE = {
     "ADULT": (1.45, 0.25, (0.9, 2.2)),
@@ -71,11 +74,9 @@ WALKER_SLOW_RANGE = {"ADULT": (0.6, 0.9), "ELDERLY": (0.4, 0.6), "CHILD": (0.6, 
 ABSOLUTE_CRUISE = {**RIDER_CRUISE, **WALKER_CRUISE}
 """Types whose target speeds are absolute rather than shares of the lane limit."""
 _ABSOLUTE_SLOW_RANGE = {**RIDER_SLOW_RANGE, **WALKER_SLOW_RANGE}
+"""Slow components of the absolute-speed types, in m/s."""
 
 COMFORT = {
-    # (acceleration, braking) ranges in m/s^2, from the gentlest (drive_style 0)
-    # to the briskest (1) ordinary driver. Cornering keeps the type's lateral
-    # limit: urban turns are routinely driven at 2-3 m/s^2.
     "CAR": ((1.0, 2.5), (1.5, 3.0)),
     "VAN": ((0.9, 2.0), (1.4, 2.7)),
     "TRUCK": ((0.5, 1.2), (1.0, 2.0)),
@@ -90,6 +91,9 @@ COMFORT = {
     "CHILD": ((0.6, 1.8), (0.6, 1.8)),
     "RUNNER": ((1.0, 2.5), (1.0, 2.5)),
 }
+"""(acceleration, braking) ranges in m/s^2 by agent type, from the gentlest (style 0) to the briskest (1)
+ordinary road user; ``comfort_limits`` interpolates by the agent's style. Cornering keeps the type's lateral
+limit: urban turns are routinely driven at 2-3 m/s^2."""
 JERK_TARGET = 2.5
 """m/s^3: the replay rounds acceleration changes over a distance that keeps
 jerk near this at cruise speed."""

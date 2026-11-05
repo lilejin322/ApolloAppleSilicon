@@ -3,10 +3,11 @@ Stable perception-obstacle IDs carried on the participant chromosomes.
 
 Each agent type owns one block of ``ID_BLOCK`` IDs, so IDs never collide across
 types: NPC vehicles ``[1000, 1999]``, bicycles ``[2000, 2999]``, pedestrians
-``[3000, 3999]``. The ID is a gene-free label (``lineage_id`` is the GA identity, below): every section renumbers its agents
-densely in section order (``assign_ids``: ``base, base + 1, ...``, no holes),
-after any GA operator too, and ``ObstacleManager`` publishes it unchanged by ``ObstacleManager``, so a
-scenario JSON dumped before a run matches the ``PerceptionObstacles`` log.
+``[3000, 3999]``. The ID is a gene-free label (``lineage_id`` is the GA identity,
+below): every section renumbers its agents densely in section order
+(``assign_ids``: ``base, base + 1, ...``, no holes), after any GA operator too, and
+``ObstacleManager`` publishes it unchanged, so a scenario JSON dumped before a run
+matches the ``PerceptionObstacles`` log.
 """
 
 from dataclasses import replace
@@ -23,6 +24,7 @@ ID_BLOCK = 1000
 """IDs per agent type."""
 
 A = TypeVar("A")
+"""An agent dataclass with ``obstacle_id`` and ``lineage_id`` fields: NPC vehicle, bicycle or pedestrian."""
 
 
 def new_lineage_id() -> str:
@@ -34,6 +36,9 @@ def new_lineage_id() -> str:
     (random generation, a retyped replacement keeps the old one), survives
     ``dataclasses.replace`` (mutation, in-place crossover) and every
     ``obstacle_id`` renumbering, and is unique across runs without a counter.
+
+    :returns: The new identity.
+    :rtype: str
     """
     return uuid4().hex
 
@@ -42,6 +47,10 @@ def dedupe_lineage(agents: Sequence[A]) -> List[A]:
     """
     ``agents`` where a repeated ``lineage_id`` (clones pooled by set crossover)
     is replaced by a fresh one; the first holder keeps it.
+
+    :param Sequence[A] agents: Agents of one type, in section order.
+    :returns: The same agents in order; a clone is a copy with a new ``lineage_id``, the others the same objects.
+    :rtype: List[A]
     """
     seen, out = set(), []
     for agent in agents:
@@ -56,6 +65,9 @@ def check_id(obstacle_id: int | None, base: int, kind: str) -> None:
     """
     Check that ``obstacle_id`` is unset or an int in ``[base, base + ID_BLOCK)``.
 
+    :param int | None obstacle_id: The agent's ID; None until a section numbers it.
+    :param int base: First ID of the agent type's block (``NPC_ID_BASE`` and the like).
+    :param str kind: The agent type's name for the error message.
     :raises ValueError: If it is not an int or lies outside the type's block.
     """
     if obstacle_id is None:
@@ -74,6 +86,11 @@ def assign_ids(agents: Sequence[A], base: int, kind: str) -> List[A]:
     gaps left by agents a GA operator removed. An agent whose ID already
     matches keeps the same object.
 
+    :param Sequence[A] agents: Agents of one type, in section order.
+    :param int base: First ID of the agent type's block (``NPC_ID_BASE`` and the like).
+    :param str kind: The agent type's name for the error message.
+    :returns: The agents in order, the ``index``-th carrying ``base + index``.
+    :rtype: List[A]
     :raises ValueError: When there are more than ``ID_BLOCK`` agents.
     """
     if len(agents) > ID_BLOCK:

@@ -18,10 +18,9 @@ Cross-type constraints (``ScenarioRules``):
 
 import numpy as np
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterator, Mapping, Tuple
+from typing import Any, Dict, Iterator, Mapping, Tuple, Self
 
 from ..utils import ApolloVehicleConfig, DEFAULT_VEHICLE_CONFIG
-
 from .ad_agent import ADAgent
 from .map_budget import MapBudget
 from .routing import InvalidRoute, RouteSpace
@@ -74,27 +73,54 @@ class ScenarioRules:
 
     @property
     def ego_length(self) -> float:
-        """Ego body length in metres, derived from the shared vehicle edges. :rtype: float"""
+        """
+        Ego body length, derived from the shared vehicle edges.
+
+        :returns: The length in metres.
+        :rtype: float
+        """
         return self.vehicle.body_length
 
     @property
     def ego_width(self) -> float:
-        """Ego body width in metres, derived from the shared vehicle edges. :rtype: float"""
+        """
+        Ego body width, derived from the shared vehicle edges.
+
+        :returns: The width in metres.
+        :rtype: float
+        """
         return self.vehicle.body_width
 
     @property
     def ego_center_forward(self) -> float:
-        """Forward localization-reference-to-centre offset in metres. :rtype: float"""
+        """
+        Forward offset from the localization reference point to the body centre.
+
+        :returns: The offset in metres.
+        :rtype: float
+        """
         return self.vehicle.center_forward
 
     @property
     def ego_center_left(self) -> float:
-        """Leftward localization-reference-to-centre offset in metres. :rtype: float"""
+        """
+        Leftward offset from the localization reference point to the body centre.
+
+        :returns: The offset in metres.
+        :rtype: float
+        """
         return self.vehicle.center_left
 
     @classmethod
-    def from_vehicle(cls, vehicle: ApolloVehicleConfig, **settings) -> "ScenarioRules":
-        """Share the exact configuration used for localization and record analysis."""
+    def from_vehicle(cls, vehicle: ApolloVehicleConfig, **settings) -> Self:
+        """
+        Rules for another ego: share the exact configuration used for localization and record analysis.
+
+        :param ApolloVehicleConfig vehicle: The ego's configuration, including its reference-point geometry.
+        :param Any settings: Any other field of ``ScenarioRules`` (``spawn_clearance``, ``horizon``, ...).
+        :returns: Rules sized for ``vehicle``.
+        :rtype: ScenarioRules
+        """
         return cls(vehicle=vehicle, **settings)
 
     def section_rules(self, rules: SectionRules) -> SectionRules:
@@ -135,6 +161,8 @@ class ScenarioContext:
         Leave it empty (the default) only for a map without signals: Apollo takes a
         signal it gets no light for as red, while agents without plans ignore signals.
         Signals that are not evolved keep ``SignalSection.default`` plans.
+    :param MapBudget | None budget: Per-map agent count caps; None derives them from the map size
+        (``MapBudget.of``).
     """
     ego_space: RouteSpace
     """``RouteSpace(service, ADAgent.rules(...))``."""
@@ -154,7 +182,8 @@ class ScenarioContext:
         Map context ``section`` replays on.
 
         :param Section section: Section whose context is requested.
-        :returns: ``npc_spaces`` for an NPC section, ``bicycle_space`` for a bicycle section, otherwise ``walk_network``.
+        :returns: ``npc_spaces`` for an NPC section, ``bicycle_space`` for a bicycle section, otherwise
+            ``walk_network``.
         :rtype: Any
         """
         if isinstance(section, NPCSection):
@@ -220,7 +249,7 @@ class Scenario:
         return data
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "Scenario":
+    def from_dict(cls, data: Dict) -> Self:
         """
         Build a scenario from ``to_dict`` output.
 

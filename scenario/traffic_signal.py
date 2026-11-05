@@ -168,7 +168,8 @@ class RegionProfile:
     minor_demand: Tuple[float, float] = (200.0, 400.0)
     """Demand range of a minor phase's critical lane, in veh/h/lane."""
     max_flow_ratio: float = 0.85
-    """Cap on Y. A larger Y is oversaturated; it is scaled down to this cap before Webster, which gives the longest cycle."""
+    """Cap on Y. A larger Y is oversaturated; it is scaled down to this cap before Webster, which gives the longest
+    cycle."""
     cycle_bounds: Tuple[float, float] = (40.0, 120.0)
     """Cycle bounds of a junction built without a tier (collector), in seconds."""
     cycle_tiers: Tuple["CycleTier", ...] = ()
@@ -325,6 +326,14 @@ class SignalPlan:
     """Seconds into the cycle at t = 0, in [0, cycle)."""
     crosswalks: Tuple[Tuple[str, int], ...] = ()
     """(crosswalk ID, phase) per signalised crosswalk: its walkers follow that phase's light."""
+    _phase_of: Dict[str, int] = field(init=False, repr=False, compare=False)
+    """Derived: the phase index of each signal ID."""
+    _onsets: Tuple[float, ...] = field(init=False, repr=False, compare=False)
+    """Derived: cycle position at which each phase's green starts, rounded to 1 us."""
+    _ends: Tuple[Tuple[float, float], ...] = field(init=False, repr=False, compare=False)
+    """Derived: cycle positions at which each phase's green and its yellow end, rounded to 1 us."""
+    _parallel: Dict[str, str] = field(init=False, repr=False, compare=False)
+    """Derived: the signal each crosswalk's walkers follow (the smallest ID of its phase)."""
 
     def __post_init__(self) -> None:
         """
@@ -419,7 +428,8 @@ class SignalPlan:
         """
         (running phase, its colour, seconds since that phase's green started) at time ``t``.
 
-        The cycle position is ``(t + offset)`` wrapped into ``[0, cycle)`` and read to 1 us. Green, yellow and all-red follow in that order, and the third value keeps counting from the green.
+        The cycle position is ``(t + offset)`` wrapped into ``[0, cycle)`` and read to 1 us. Green, yellow and
+        all-red follow in that order, and the third value keeps counting from the green.
 
         :param float t: Absolute scenario time, in seconds.
         :returns: ``(phase index, colour, seconds since that phase's green started)``.
@@ -497,7 +507,8 @@ class SignalPlan:
         """
         A JSON-compatible mapping of this plan.
 
-        Tuples become lists. The keys are ``junction_id``, ``phases``, ``demand``, ``green``, ``yellow``, ``all_red``, ``offset`` and ``crosswalks``.
+        Tuples become lists. The keys are ``junction_id``, ``phases``, ``demand``, ``green``, ``yellow``,
+        ``all_red``, ``offset`` and ``crosswalks``.
 
         :returns: A new mapping that ``from_dict`` can rebuild.
         :rtype: Dict[str, Any]
@@ -973,6 +984,10 @@ class SignalSection:
     """
     plans: Tuple[SignalPlan, ...] = ()
     """One ``SignalPlan`` per control unit, in unit order."""
+    _by_signal: Dict[str, SignalPlan] = field(init=False, repr=False, compare=False)
+    """Derived: the plan of each signal ID."""
+    _by_crosswalk: Dict[str, SignalPlan] = field(init=False, repr=False, compare=False)
+    """Derived: the plan of each signalised crosswalk ID."""
 
     def __post_init__(self) -> None:
         """

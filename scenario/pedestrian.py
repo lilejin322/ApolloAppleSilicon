@@ -63,18 +63,22 @@ CURB_STAND_BACK = 0.3
 GUTTER_SHARE = 0.3
 """Share of curb waits made standing in the road, ``GUTTER_RANGE`` past the curb."""
 GUTTER_RANGE = (0.2, 0.8)
+"""Metres past the curb, drawn uniformly, where a walker waiting in the road stands."""
 MAX_CURB_WAIT = 20.0
 """Longest wait at the curb in seconds."""
 ISLAND_WAIT_PROBABILITY = 0.3
 """Chance that a random walker crossing a median or island waits on it (a two-stage crossing)."""
 ISLAND_WAIT = (1.0, 15.0)
+"""Seconds, drawn uniformly, of a wait on a median or island."""
 FASTER_PROBABILITY = 0.3
 """Chance that a random walker speeds up while crossing, by ``FASTER_FACTOR``:
 crossing speeds exceed sidewalk walking speeds."""
 FASTER_FACTOR = (1.0, 1.3)
+"""Factor, drawn uniformly, on the sidewalk speed while crossing, within the type's ``max_speed``."""
 HESITATION_PROBABILITY = 0.05
 """Chance that a random walker stops briefly mid-road (``HESITATION``)."""
 HESITATION = (0.5, 3.0)
+"""Seconds, drawn uniformly, of a stop mid-road."""
 RESUME_GAP = 0.5
 """Metres after a stop where the walker's next target speed applies."""
 STOP_SPACING = 1.0
@@ -86,9 +90,13 @@ class WalkerType(Enum):
     Walker categories selecting body dimensions, motion limits, and speed priors.
     """
     ADULT = "ADULT"
+    """Adult walker: 1.70 m tall, up to 3.5 m/s; about 72 % of walkers (``realism.WALKER_MIX``)."""
     ELDERLY = "ELDERLY"
+    """Elderly walker: the slowest (up to 2.0 m/s) and gentlest; about 12 %."""
     CHILD = "CHILD"
+    """Child: the smallest body (0.25 x 0.40 m, 1.25 m tall), quick to speed up; about 6 %."""
     RUNNER = "RUNNER"
+    """Runner: the fastest (up to 5.0 m/s), for the crossers seen running; about 10 %."""
 
 
 def random_walker_type(rng: Random, weights: Mapping[str, float] = WALKER_MIX) -> WalkerType:
@@ -109,6 +117,9 @@ class WalkerSpec:
     """
     Fixed properties of a walker type; Apollo's obstacle type is PEDESTRIAN.
 
+    Comfortable acceleration and braking come from ``realism.COMFORT`` by the
+    agent's ``walk_style`` (``realism.comfort_limits``), within these hard limits.
+
     :param float length: Body depth in metres, along the heading.
     :param float width: Shoulder breadth in metres.
     :param float height: Metres.
@@ -118,11 +129,7 @@ class WalkerSpec:
     :param float max_acceleration: m/s^2.
     :param float max_deceleration: m/s^2, positive.
     :param float max_lateral_acceleration: m/s^2; walkers slow down round tight corners.
-
-    Comfortable acceleration and braking come from ``realism.COMFORT`` by the
-    agent's ``walk_style`` (``realism.comfort_limits``), within these hard limits.
     """
-
     length: float
     """Body depth in metres, along the heading."""
     width: float
@@ -166,7 +173,6 @@ class WalkLayout(NamedTuple):
     :param Callable[[float], float] moved: Maps raw walked distance to distance
         along the smoothed replay path.
     """
-
     path: LineString
     """Replay path in map metres."""
     pivots: Tuple[float, ...]
@@ -345,24 +351,34 @@ class PedestrianAgent:
     :param WalkerType walker_type: Dimensions and limits from ``WALKER_SPECS``.
     :param float walk_style: In [0, 1], from gentle to brisk: the comfortable
         acceleration and braking the replay uses (``realism.COMFORT``).
+    :param int | None obstacle_id: Perception obstacle ID in this type's block (``obstacle_ids``); None until a
+        section numbers it.
+    :param str lineage_id: GA identity (uuid4 hex): kept by mutation, crossover and renumbering. Labels, not genes:
+        both are left out of ``==`` and ``hash``.
+    :param bool obeys_signals: Gene: whether the agent waits at signalised crosswalks until the parallel vehicle
+        light is green (``signal_compliance``).
     """
-
     route: WalkRoute
     """Its walk on the walk network."""
     speed_profile: Tuple[SpeedPoint, ...]
-    """One to four target speeds at (element, s) positions on the walk, in walking order: ``lane_id`` names an element of ``route.lanes`` and ``s`` is metres from its start, which is a map position (the start, an entry, an exit or a turning point). The last speed must not be zero; the first also applies before it."""
+    """One to four target speeds at (element, s) positions on the walk, in walking order: ``lane_id`` names an
+    element of ``route.lanes`` and ``s`` is metres from its start, which is a map position (the start, an entry, an
+    exit or a turning point). The last speed must not be zero; the first also applies before it."""
     start_t: float
     """Seconds after scenario start to move off."""
     walker_type: WalkerType
     """Dimensions and limits from ``WALKER_SPECS``."""
     walk_style: float = 0.5
-    """In [0, 1], from gentle to brisk: the comfortable acceleration and braking the replay uses (``realism.COMFORT``)."""
+    """In [0, 1], from gentle to brisk: the comfortable acceleration and braking the replay uses
+    (``realism.COMFORT``)."""
     obstacle_id: int | None = field(default=None, compare=False)
     """Perception obstacle ID in this type's block (``obstacle_ids``); None until a section numbers it."""
     lineage_id: str = field(default_factory=new_lineage_id, compare=False)
-    """GA identity (uuid4 hex): kept by mutation, crossover and renumbering. Labels, not genes: both are left out of ``==`` and ``hash``."""
+    """GA identity (uuid4 hex): kept by mutation, crossover and renumbering. Labels, not genes: both are left out of
+    ``==`` and ``hash``."""
     obeys_signals: bool = True
-    """Gene: whether the agent waits at signalised crosswalks until the parallel vehicle light is green (``signal_compliance``)."""
+    """Gene: whether the agent waits at signalised crosswalks until the parallel vehicle light is green
+    (``signal_compliance``)."""
 
     def __post_init__(self) -> None:
         """
@@ -421,7 +437,8 @@ class PedestrianAgent:
         :param WalkNetwork network: Walk network supplying sidewalk and excursion geometry.
         :returns: The layout, its curvature spans, and the path metres of each speed point.
         :rtype: Tuple[WalkLayout, List[Span], List[float]]
-        :raises InvalidRoute: If route geometry, topology, point placement, or map constraints fail the checks performed here.
+        :raises InvalidRoute: If route geometry, topology, point placement, or map constraints fail the checks
+            performed here.
         """
         return memo_layout(network, ("pedestrian", self.route, self.speed_profile, self.walker_type),
                            lambda: self._build_layout(network))
@@ -490,7 +507,14 @@ class PedestrianAgent:
         """
         layout, spans, positions = self._validated_layout(network)
         def build(forced: Dict[float, float]) -> ReplayTrajectory:
-            """Build a walking replay with forced stops, smoothed speeds and bounded pivot yaw rate."""
+            """
+            Build a walking replay with forced stops, smoothed speeds and bounded pivot yaw rate.
+
+            :param Dict[float, float] forced: Seconds to wait by path metres: the pivots' waits, plus the
+                signal holds ``signal_compliance.comply`` adds at crossings.
+            :returns: The replay of this walker's speed profile with those stops.
+            :rtype: ReplayTrajectory
+            """
             s, v, dwell = speed_grid(layout.path.length, self.speed_profile, positions, self.limits,
                                      curvature_spans=spans, forced_stops=forced, smoothing=WALK_SPEED_SMOOTHING)
             return ReplayTrajectory(layout.path, self.start_t, s, v, dwell, layout.pivots, yaw_rate=WALKER_YAW_RATE)
@@ -599,10 +623,12 @@ class PedestrianAgent:
         :param float turn_back_probability: Probability that the final excursion contains a turning point.
         :param float min_speed: Minimum moving target speed, in m/s.
         :param int max_attempts: Maximum number of generation attempts before failure.
-        :param float min_arrival_t: Earliest accepted route-end time in scenario seconds; zero disables the horizon check.
+        :param float min_arrival_t: Earliest accepted route-end time in scenario seconds; zero disables the horizon
+            check.
         :returns: A randomly generated valid agent satisfying the requested constraints.
         :rtype: PedestrianAgent
-        :raises RuntimeError: If required map data is unavailable or no valid candidate is found within the attempt limit.
+        :raises RuntimeError: If required map data is unavailable or no valid candidate is found within the attempt
+            limit.
         """
         spec = WALKER_SPECS[walker_type]
         last_problem = "no candidates drawn"
