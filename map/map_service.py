@@ -12,7 +12,7 @@ from functools import cached_property
 from math import isfinite
 from pathlib import Path
 from threading import Lock, RLock
-from typing import Any, Callable, Dict, Hashable, List, NamedTuple, Optional, Tuple, TypeVar
+from typing import Any, Callable, Dict, Hashable, Iterable, List, NamedTuple, Optional, Tuple, TypeVar
 from google.protobuf.message import Message
 from shapely import STRtree
 from shapely.geometry import LineString, Point
@@ -45,13 +45,14 @@ an entry is only ever replaced by a complete, more indexed one."""
 _derived_lock = RLock()
 """Serializes builds of ``MapService.derived`` data; reentrant, as one build may need another."""
 _T = TypeVar("_T")
+"""Whatever ``MapService.derived`` builds and caches for a map."""
 
 
 def _resolve(path: str | Path) -> Path:
     """
-    Resolve path util function
+    Expand ``~`` and resolve a path to its absolute form.
 
-    :param str | Path: Path to resolve. May be provided as a string or ``Path`` object.
+    :param str | Path path: Path to resolve. May be provided as a string or ``Path`` object.
     :returns: The expanded and resolved absolute path
     :rtype: Path
     """
@@ -66,7 +67,7 @@ def _read_map(path: Path, descriptor_path: Path) -> Message:
     ``apollo.hdmap.Map`` message without caching.
 
     :param Path path: Path to the binary Apollo map file
-    :param Path: descriptor_path: Path to the protobuf descriptor set used to
+    :param Path descriptor_path: Path to the protobuf descriptor set used to
         resolve the ``apollo.hdmap.Map`` message type
     :returns: The decoded Apollo HD map protobuf message
     :rtype: Message
@@ -148,6 +149,16 @@ class MapService:
     """Overlap protobuf messages keyed by overlap ID."""
     routing_graph: Optional[nx.DiGraph]
     """Directed lane topology with F/L/R direction_type edges; None until the graph is built."""
+    _indexes: Optional[Dict[str, SpatialIndex]]
+    """Lane, junction, crosswalk, signal and stop-sign indexes by kind; None until ``build_spatial_indexes``."""
+    _centerlines: Dict[str, LineString]
+    """Lane centerlines decoded so far, by lane ID (``get_lane_central_curve_by_id``)."""
+    _centerline_profiles: Dict[str, CenterlineProfile]
+    """Heading profiles of the centerlines decoded so far, by lane ID."""
+    _view: "MapService"
+    """The service whose tables this handle shares: itself, or the one it adopted the map from (``derived``)."""
+    _derived: Dict[Hashable, Any]
+    """Data built from the map once and shared by every handle of it (``derived``), by key."""
 
     FLAGS_min_length_for_lane_change: float = 1.0
     """Minimum source lane length in meters required to add lane-change edges."""
@@ -173,25 +184,19 @@ class MapService:
         Clear this service's map path, object tables, indexes, graph, and derived caches.
         """
         self.__dict__.pop("relations", None)
-        self.map_path: str | Path | None = None
-        self.lane_table: Dict[str, Message] = dict()
-        self.junction_table: Dict[str, Message] = dict()
-        self.crosswalk_table: Dict[str, Message] = dict()
-        self.signal_table: Dict[str, Message] = dict()
-        self.stop_sign_table: Dict[str, Message] = dict()
-        self.overlap_table: Dict[str, Message] = dict()
-
-        # Lane, junction, crosswalk, signal, and stop-sign indexes by kind; None
-        # until build_spatial_indexes().
-        self._indexes: Optional[Dict[str, SpatialIndex]] = None
-
-        # None until build_routing_graph(), as the indexes are for spatial queries.
-        self.routing_graph: Optional[nx.DiGraph] = None
-        self._centerlines: Dict[str, LineString] = dict()
-        self._centerline_profiles: Dict[str, CenterlineProfile] = dict()
-        # Shared, like the tables, by every handle that adopts this map (``derived``).
-        self._view: "MapService" = self
-        self._derived: Dict[Hashable, Any] = dict()
+        self.map_path = None
+        self.lane_table = dict()
+        self.junction_table = dict()
+        self.crosswalk_table = dict()
+        self.signal_table = dict()
+        self.stop_sign_table = dict()
+        self.overlap_table = dict()
+        self._indexes = None
+        self.routing_graph = None
+        self._centerlines = dict()
+        self._centerline_profiles = dict()
+        self._view = self
+        self._derived = dict()
 
     def derived(self, key: Hashable, build: Callable[["MapService"], _T]) -> _T:
         """
@@ -282,7 +287,8 @@ class MapService:
         their own independent immutable-file cache.
 
         :param str | Path | None map_path: Restrict eviction to this resolved map file path; None matches all map paths.
-        :param str | Path | None descriptor_path: Restrict eviction to this resolved descriptor path; None matches all descriptor paths.
+        :param str | Path | None descriptor_path: Restrict eviction to this resolved descriptor path; None matches
+            all descriptor paths.
         """
         path = None if map_path is None else _resolve(map_path)
         schema = None if descriptor_path is None else _resolve(descriptor_path)
@@ -313,7 +319,8 @@ class MapService:
         Populate object tables by ID and optionally build the spatial indexes and routing graph.
 
         :param Message map: Decoded Apollo HD map message whose objects populate this service's tables.
-        :param bool load_only: If True, populate only object tables; otherwise also build the spatial indexes and routing graph.
+        :param bool load_only: If True, populate only object tables; otherwise also build the spatial indexes and
+            routing graph.
         """
         obj_table_map = [
             (map.lane, self.lane_table),
@@ -585,8 +592,16 @@ class MapService:
         self.routing_graph = nx.DiGraph()
         self.routing_graph.add_nodes_from(self.lane_table)
 
-        def known(ids) -> List[str]:
-            # Skip unknown IDs instead of adding nodes, as in GraphCreator::AddEdge.
+        def known(ids: Iterable[Message]) -> List[str]:
+            """
+            Resolve lane-ID messages to known map lanes, discarding references absent from the lane table.
+
+            Unknown IDs are skipped instead of becoming nodes, as in ``GraphCreator::AddEdge``.
+
+            :param Iterable[Message] ids: ``apollo.hdmap.Id`` messages of a lane's neighbours.
+            :returns: The IDs that name a lane of the table, in order.
+            :rtype: List[str]
+            """
             return [x.id for x in ids if x.id in self.lane_table]
 
         for lane_id, lane in self.lane_table.items():

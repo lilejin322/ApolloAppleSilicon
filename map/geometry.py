@@ -17,6 +17,7 @@ from shapely.ops import substring
 from typing import Callable, Generic, Iterable, List, Mapping, NamedTuple, Optional, Tuple, TypeVar
 
 T = TypeVar("T")
+"""The item type a ``SpatialIndex`` holds and returns: object IDs, or orderable records such as ``LaneMarking``."""
 
 
 def curve_to_line(curve: Message) -> LineString:
@@ -150,7 +151,8 @@ class SpatialIndex(NamedTuple, Generic[T]):
 
         :param str kind: Object kind, for error messages.
         :param Mapping[str, Message] objects: Objects by ID.
-        :param Callable[[Message], Optional[BaseGeometry]] geometry: Returns an object's geometry, or None to leave it out.
+        :param Callable[[Message], Optional[BaseGeometry]] geometry: Returns an object's geometry, or None to leave
+            it out.
         :returns: The index of the IDs of the objects that have a geometry.
         :rtype: SpatialIndex[str]
         :raises ValueError: Naming the first object whose geometry is malformed.
@@ -248,7 +250,7 @@ class CenterlineProfile:
 
     def __init__(self, line: LineString) -> None:
         """
-        Constructor
+        Measure the line: cumulative s at its vertices, each segment's heading and midpoint.
 
         :param LineString line: The lane centerline used to compute cumulative distances
                                 and segment headings.
@@ -256,10 +258,10 @@ class CenterlineProfile:
         coords: List[Tuple[float, float]] = list(line.coords)
         pairs: List[Tuple[Tuple[float, float], Tuple[float, float]]] = list(zip(coords, coords[1:]))
         lengths: List[float] = [hypot(x2 - x1, y2 - y1) for (x1, y1), (x2, y2) in pairs]
-        self.line: LineString = line
-        self.cumulative_s: List[float] = [0.0, *accumulate(lengths)]
-        self.headings: List[float] = [atan2(y2 - y1, x2 - x1) for (x1, y1), (x2, y2) in pairs]
-        self.midpoint_s: List[float] = [start + length / 2 for start, length in zip(self.cumulative_s, lengths)]
+        self.line = line
+        self.cumulative_s = [0.0, *accumulate(lengths)]
+        self.headings = [atan2(y2 - y1, x2 - x1) for (x1, y1), (x2, y2) in pairs]
+        self.midpoint_s = [start + length / 2 for start, length in zip(self.cumulative_s, lengths)]
 
     def heading_at(self, s: float) -> float:
         """

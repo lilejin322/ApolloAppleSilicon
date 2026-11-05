@@ -128,7 +128,12 @@ class MapRelations:
     Signal EQ/NE labels model a junction with circular lights from the lanes
     each signal controls; Apollo maps carry no signal phases, so they are
     inferred, not read.
+
+    :param MapService service: The service whose tables are analysed; every relationship is computed from them
+        on first access.
     """
+    _service: "MapService"
+    """The service whose tables every relationship is computed from."""
 
     def __init__(self, service: "MapService") -> None:
         """
@@ -424,6 +429,11 @@ class MapRelations:
         paths = []
 
         def extend(path: tuple[str, ...]) -> None:
+            """
+            Extend an acyclic lane path within the junction, collecting paths with no further valid successor.
+
+            :param tuple[str, ...] path: Lane IDs walked so far, the signal's controlled lane first.
+            """
             successors = [lane for lane in self.forward_successors.get(path[-1], ())
                           if lane in inside and lane not in path]
             if not successors:
@@ -463,6 +473,13 @@ class MapRelations:
             movements: Dict[str, List[_Movement]] = {}
 
             def movements_of(signal: str) -> List[_Movement]:
+                """
+                Lazily cache the junction movements associated with one signal.
+
+                :param str signal: A signal of the junction.
+                :returns: One movement per path of ``movement_paths``.
+                :rtype: List[_Movement]
+                """
                 if signal not in movements:
                     movements[signal] = [self._movement(signal, path, area)
                                          for path in self.movement_paths(signal, junction_id)]
@@ -493,6 +510,14 @@ class MapRelations:
         :param nx.Graph graph: Edges with ``relation``; modified in place.
         """
         def priority(pair: tuple[str, str]) -> tuple[int, float, str, str]:
+            """
+            Rank signal pairs by shared controls and approach alignment, with deterministic geometric tie-breaking.
+
+            :param tuple[str, str] pair: Two signals joined by an EQ edge.
+            :returns: ``(class, angle, left, right)``: 0 for identical controlled lanes, 1 for the same approach,
+                2 for other approaches; then the angle between the approaches, then the IDs.
+            :rtype: tuple[int, float, str, str]
+            """
             left, right = pair
             if self.lanes_controlled_by_signal[left] == self.lanes_controlled_by_signal[right]:
                 return 0, 0.0, left, right
