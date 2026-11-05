@@ -21,7 +21,8 @@ agents cluster near the ego, so the useful count grows slower than the network.
 
 from dataclasses import dataclass
 from math import sqrt
-from typing import Any
+from .scenario_chromosome import ScenarioContext
+from .sections import SectionRules
 
 REFERENCE_LENGTH: float = 2729.0
 """Drivable (CITY_DRIVING) length of borregas_ave in metres; its scale is 1."""
@@ -56,6 +57,12 @@ class MapBudget:
         """
         Budget of a map with ``drivable_length`` metres of CITY_DRIVING lanes.
 
+        :param float drivable_length: Sum of the map's CITY_DRIVING lane centrelines, in metres
+            (``MapRelations.drivable_length``); a negative value counts as 0.
+        :param int junctions: Junction count of the map, kept for information only.
+        :param float reference_length: Drivable length whose scale is 1, in metres; defaults to borregas_ave.
+        :param float min_scale: Smallest scale, for maps smaller than the reference.
+        :param float max_scale: Largest scale, so a huge map does not flood the ego with agents.
         :returns: ``MapBudget`` with ``scale = clamp(sqrt(L / reference_length), min_scale, max_scale)``.
         :rtype: MapBudget
         """
@@ -63,11 +70,12 @@ class MapBudget:
         return cls(min(max(scale, min_scale), max_scale), float(drivable_length), int(junctions))
 
     @classmethod
-    def of(cls, context: Any, **kwargs: float) -> "MapBudget":
+    def of(cls, context: ScenarioContext, **kwargs: float) -> "MapBudget":
         """
         Budget of a ``ScenarioContext``: its own ``budget`` if set, otherwise from its map's size.
 
-        :param ScenarioContext context: Map context.
+        :param ScenarioContext context: Map context; ``ego_space.service`` supplies the map's size.
+        :param float kwargs: ``reference_length``, ``min_scale`` or ``max_scale`` for ``from_size``.
         :returns: The map's budget.
         :rtype: MapBudget
         """
@@ -80,14 +88,20 @@ class MapBudget:
         """
         Absolute cap for a section whose base cap is ``base_max``.
 
+        :param int base_max: The section type's ``RULES.max_count``, the cap on the reference map.
+        :param int min_count: The section type's ``min_count``; the cap never falls below it.
         :returns: ``max(min_count, round(base_max * scale))``.
         :rtype: int
         """
         return max(min_count, int(round(base_max * self.scale)))
 
-    def rules(self, rules: Any) -> Any:
+    def rules(self, rules: SectionRules) -> SectionRules:
         """
         ``rules`` (a ``SectionRules``) with ``max_count`` replaced by this map's cap.
+
+        :param SectionRules rules: A section type's rules; its ``max_count`` is the base cap.
+        :returns: A copy with ``max_count = cap(rules.max_count, rules.min_count)``.
+        :rtype: SectionRules
         """
         from dataclasses import replace
         return replace(rules, max_count=self.cap(rules.max_count, rules.min_count))
@@ -97,6 +111,9 @@ def count_for(density: float, min_count: int, max_count: int) -> int:
     """
     Section size of a relative ``density`` gene under ``min_count .. max_count``.
 
+    :param float density: The size gene in ``[0, 1]``; values outside are clamped.
+    :param int min_count: Fewest agents of the section type.
+    :param int max_count: The map's cap for the type (``MapBudget.cap``).
     :returns: ``min_count + round(clamp(density, 0, 1) * (max_count - min_count))``.
     :rtype: int
     """
@@ -108,6 +125,10 @@ def density_for(count: int, min_count: int, max_count: int) -> float:
     """
     Relative density of a section of ``count`` agents under ``min_count .. max_count`` (inverse of ``count_for``).
 
+    :param int count: Agents in the section.
+    :param int min_count: Fewest agents of the section type.
+    :param int max_count: The map's cap for the type (``MapBudget.cap``).
+    :returns: ``(count - min_count) / (max_count - min_count)`` clamped to ``[0, 1]``; 0 when the range is empty.
     :rtype: float
     """
     if max_count <= min_count:
