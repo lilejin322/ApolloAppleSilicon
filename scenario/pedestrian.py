@@ -490,6 +490,7 @@ class PedestrianAgent:
         """
         layout, spans, positions = self._validated_layout(network)
         def build(forced: Dict[float, float]) -> ReplayTrajectory:
+            """Build a walking replay with forced stops, smoothed speeds and bounded pivot yaw rate."""
             s, v, dwell = speed_grid(layout.path.length, self.speed_profile, positions, self.limits,
                                      curvature_spans=spans, forced_stops=forced, smoothing=WALK_SPEED_SMOOTHING)
             return ReplayTrajectory(layout.path, self.start_t, s, v, dwell, layout.pivots, yaw_rate=WALKER_YAW_RATE)

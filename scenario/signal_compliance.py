@@ -5,8 +5,11 @@ Every NPC, bicycle and pedestrian carries an ``obeys_signals`` gene. A complying
 replay gets a forced stop before each signal-controlled stop line (vehicles, bicycles on
 road lanes), bicycle connector across a signalised junction (bike lanes carry no signal, so
 riders follow the car movement beside them) or signalised crosswalk (pedestrians) it
-reaches while it may not go, and departs at the first instant it may. A violating agent replays its speed profile unchanged and
-runs the red. With the signal plans fixed the result is deterministic.
+reaches while it may not go, and departs at the first instant it may. A violating agent
+replays its speed profile unchanged and runs the red. With the signal plans fixed the result
+is deterministic. Plans under which an agent can never go at one of its stops admit no
+compliant replay: ``comply`` raises ``CannotComply``, a ``ValueError``, and section
+validation rejects the scenario.
 
 Vehicles may go on GREEN and YELLOW and stop on RED (no dilemma-zone model). The maps
 have no pedestrian heads, so walkers follow the vehicle light parallel to their crossing
@@ -34,6 +37,16 @@ STOP_LINE_MATCH: float = 3.0
 """Metres within which a signal's stop line is matched to a controlled lane (``get_signal_stop_lines``)."""
 _GO_ROUNDS: int = 8
 """Rounds of ``next_go`` over the stops at one place before they are taken never to allow going together."""
+_SETTLE_ROUNDS: int = 8
+"""Holds per stop (and one more) ``comply`` may add before its holds are taken never to settle."""
+
+
+class CannotComply(ValueError):
+    """
+    The signals never let an agent go at one of its stops, so it has no compliant replay.
+
+    A ``ValueError``, so ``Section.validate`` rejects the scenario as it does any invalid agent.
+    """
 
 
 class SignalStop(NamedTuple):
@@ -263,7 +276,14 @@ def comply(build: Callable[[Dict[float, float]], ReplayTrajectory], forced: Mapp
     standstill before the line (a pivot, an own stop such as a walker's curb wait, or its
     start), or stops at the stop point if it has none, until it can both leave and reach the
     line on a go (``_hold``); the wait adds to any dwell it already has there, and later stops
-    see the delay. Deterministic for fixed plans.
+    see the delay.
+
+    Every hold rebuilds the speed profile, and braking for a new stop reaches back as far as the
+    braking distance: a line passed on yellow just before the stop may now be reached on red. So
+    after each hold every stop is checked again from the first. A stop that fails is held, and
+    the holds settled beyond it, timed for the old approach, are dropped and settled anew. A held
+    stop stays held (the agent stands there whatever happens further on), so this ends; a budget
+    of ``_SETTLE_ROUNDS`` holds per stop guards the loop. Deterministic for fixed plans.
 
     :param Callable build: Builds the replay from forced stops ``{path metres: dwell seconds}``.
     :param Mapping[float, float] forced: The agent's own forced stops (pivots).
@@ -272,29 +292,39 @@ def comply(build: Callable[[Dict[float, float]], ReplayTrajectory], forced: Mapp
     :param float length: Path length; stops at or past the end are skipped.
     :returns: The compliant replay.
     :rtype: ReplayTrajectory
+    :raises CannotComply: If the signals at a stop never let the agent go (``_hold`` finds no instant),
+        or the holds do not settle within the budget.
     """
-    held: Dict[float, float] = dict(forced)
-    replay = build(held)
-    for distance, group in groupby(sorted(stops), key=lambda stop: stop.distance):
-        group = tuple(group)
-        if not 0.0 <= distance < length - 0.5:
-            continue
-        if all(may_go(signals, stop, replay.time_at(distance + STOP_SETBACK)) for stop in group):
-            continue
-        trial = dict(held)
+    groups = [(distance, tuple(group)) for distance, group in groupby(sorted(stops), key=lambda stop: stop.distance)
+              if 0.0 <= distance < length - 0.5]
+    holds: Dict[int, Tuple[float, float]] = {}
+    for _ in range(_SETTLE_ROUNDS * (len(groups) + 1)):
+        held = dict(forced)
+        for point, wait in holds.values():
+            held[point] = held.get(point, 0.0) + wait
+        replay = build(held)
+        bad = next((index for index, (distance, group) in enumerate(groups)
+                    if not all(may_go(signals, stop, replay.time_at(distance + STOP_SETBACK)) for stop in group)),
+                   None)
+        if bad is None:
+            return replay
+        distance, group = groups[bad]
         point = replay.last_rest(distance, distance + STOP_SETBACK)
         if point is None:                       # it would roll over the line: stop it at the stop point
-            point, trial[distance] = distance, 0.0
-            stopped = build(trial)
+            point, held[distance] = distance, 0.0
+            stopped = build(held)
         else:                                   # it already stands still before the line: wait there
             stopped = replay
         wait = _hold(signals, group, stopped.departure_at(point), stopped.time_at(distance + STOP_SETBACK))
         if wait is None:
-            continue
-        trial[point] = trial.get(point, 0.0) + wait
-        held = trial
-        replay = build(held)
-    return replay
+            raise CannotComply(f"the signals at {distance:.1f} m never let it go: "
+                               f"{', '.join(stop.control_id for stop in group)}")
+        at, so_far = holds.get(bad, (point, 0.0))
+        holds[bad] = (at, so_far + wait)
+        # Holds further on were settled for the timing before this one: settle them again.
+        for index in [index for index in holds if index > bad]:
+            del holds[index]
+    raise CannotComply(f"the holds at its {len(groups)} stops did not settle in {_SETTLE_ROUNDS} rounds each")
 
 
 def _hold(signals: SignalSection, stops: Tuple[SignalStop, ...], depart: float, line: float) -> Optional[float]:

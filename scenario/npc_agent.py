@@ -330,6 +330,7 @@ class NPCVehicleAgent:
         """
         path, curvature, limits, positions = self._validated_layout(space)
         def build(forced: Dict[float, float]) -> ReplayTrajectory:
+            """Build the replay speed grid with the requested forced stops, curvature and lane speed limits."""
             s, v, dwell = speed_grid(path.length, self.speed_profile, positions, self.limits,
                                      curvature_spans=curvature, speed_limits=limits, forced_stops=forced)
             return ReplayTrajectory(path, self.start_t, s, v, dwell)

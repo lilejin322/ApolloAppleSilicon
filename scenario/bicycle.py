@@ -490,6 +490,7 @@ class BicycleAgent:
         """
         layout, curvature, positions = self._validated_layout(space)
         def build(forced: Dict[float, float]) -> ReplayTrajectory:
+            """Build the bicycle replay with forced stops, curvature limits, lane speed limits and pivots."""
             s, v, dwell = speed_grid(layout.path.length, self.speed_profile, positions, self.limits,
                                      curvature_spans=curvature, speed_limits=layout.limits, forced_stops=forced)
             return ReplayTrajectory(layout.path, self.start_t, s, v, dwell, layout.pivots)

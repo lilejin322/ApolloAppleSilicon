@@ -29,6 +29,8 @@ from dataclasses import dataclass
 from weakref import WeakKeyDictionary
 from typing import Any, Callable, ClassVar, Dict, Generic, Iterable, Mapping, NamedTuple, TypeVar, Tuple
 
+from ..utils import rectangle_corners
+
 from .bicycle import RIDER_SPECS, BicycleAgent
 from .npc_agent import VEHICLE_SPECS, NPCVehicleAgent, VehicleType
 from .pedestrian import WALKER_SPECS, PedestrianAgent
@@ -132,13 +134,14 @@ class SectionRules:
 class Body(NamedTuple):
     """
     An agent's sampled poses on the rules' time grid, with its size.
-    
-    :param np.ndarray x:
-    :param np.ndarray y: 
-    :param np.ndarray heading: 
-    :param float length: 
-    :param float width: 
-    :param float start_t: 
+
+    :param np.ndarray x: Map X at each sample time, in metres.
+    :param np.ndarray y: Map Y at each sample time, in metres.
+    :param np.ndarray heading: Heading at each sample time, in radians.
+    :param float length: Body length, in metres.
+    :param float width: Body width, in metres.
+    :param float start_t: Scenario time the agent starts, in seconds.
+    :param str | None lane: Map lane the agent starts on (its route's first lane), or None without a lane route.
     """
     x: np.ndarray
     """Map X at each sample time, in metres."""
@@ -155,16 +158,6 @@ class Body(NamedTuple):
     lane: str | None = None
     """Map lane the agent starts on (its route's first lane), or None without a lane route."""
 
-    @property
-    def radius(self) -> float:
-        """
-        Half the diagonal: radius of the circle around the rectangular body.
-
-        :returns: Circumscribed radius, in metres.
-        :rtype: float
-        """
-        return hypot(self.length, self.width) / 2
-
 
 def _corners(body: Body, index: np.ndarray, grow: float) -> np.ndarray:
     """
@@ -180,18 +173,18 @@ def _corners(body: Body, index: np.ndarray, grow: float) -> np.ndarray:
     :rtype: np.ndarray
     """
     half_l, half_w = body.length / 2 + grow, body.width / 2 + grow
-    c, s = np.cos(body.heading[index]), np.sin(body.heading[index])
-    x, y = body.x[index], body.y[index]
-    out = np.empty((len(index), 4, 2))
-    for k, (u, v) in enumerate(((half_l, half_w), (-half_l, half_w), (-half_l, -half_w), (half_l, -half_w))):
-        out[:, k, 0] = x + u * c - v * s
-        out[:, k, 1] = y + u * s + v * c
-    return out
+    return rectangle_corners(body.x[index], body.y[index], body.heading[index],
+                             front=half_l, back=half_l, left=half_w, right=half_w)
 
 
 def first_overlap(a: Body, b: Body, margin: float, times: np.ndarray) -> float | None:
     """
     The first sampled time at which the two bodies, grown by ``margin`` / 2 each, overlap; None if never.
+
+    Only the samples whose centres lie within the sum of the grown rectangles' circumscribed
+    radii get the exact test. The grown rectangle keeps sharp corners, so its radius is that
+    of the grown sides, not the body's radius plus half the margin: the latter undershoots by
+    up to 0.2 m per car and would skip corner-to-corner contacts of the grown bodies.
 
     :param Body a: First sampled body.
     :param Body b: Second sampled body.
@@ -200,7 +193,9 @@ def first_overlap(a: Body, b: Body, margin: float, times: np.ndarray) -> float |
     :returns: The first sampled time at which the two bodies, grown by ``margin`` / 2 each, overlap; None if never.
     :rtype: float | None
     """
-    near = np.hypot(a.x - b.x, a.y - b.y) < a.radius + b.radius + margin
+    grow = margin / 2
+    reach = hypot(a.length / 2 + grow, a.width / 2 + grow) + hypot(b.length / 2 + grow, b.width / 2 + grow)
+    near = np.hypot(a.x - b.x, a.y - b.y) < reach
     index = np.flatnonzero(near)
     if not len(index):
         return None

@@ -44,6 +44,9 @@ class MapBudget:
     """Junction count of the map (informational)."""
 
     def __post_init__(self) -> None:
+        """
+        Reject a nonpositive spacing scale with ValueError.
+        """
         if self.scale <= 0:
             raise ValueError("scale must be positive")
 

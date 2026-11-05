@@ -11,6 +11,7 @@ from math import ceil, hypot, pi
 from shapely.geometry import LineString, Point
 from typing import Dict, List, Sequence, Tuple
 
+from ..utils import rectangle_corners
 from ..map import MapService
 from ..map.types import LaneMarking
 from ..map.geometry import CenterlineProfile, normalize_angle
@@ -140,12 +141,9 @@ def _boxes(x: Sequence[float] | np.ndarray, y: Sequence[float] | np.ndarray, hea
     :returns: An array of oriented rectangular body polygons.
     :rtype: np.ndarray
     """
-    corners = np.asarray([[-length / 2, -width / 2], [length / 2, -width / 2],
-                          [length / 2, width / 2], [-length / 2, width / 2]])
-    c, s = np.cos(headings)[:, None], np.sin(headings)[:, None]
-    coords = np.stack((np.asarray(x)[:, None] + c * corners[:, 0] - s * corners[:, 1],
-                       np.asarray(y)[:, None] + s * corners[:, 0] + c * corners[:, 1]), axis=-1)
-    return shapely.polygons(coords)
+    coords = rectangle_corners(x, y, headings, front=length / 2, back=length / 2,
+                               left=width / 2, right=width / 2)
+    return shapely.polygons(coords[..., [2, 3, 0, 1], :])
 
 
 def check_footprint(space: RouteSpace, path: LineString, length: float, width: float, *,

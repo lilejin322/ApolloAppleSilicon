@@ -20,6 +20,8 @@ import numpy as np
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterator, Mapping, Tuple
 
+from ..utils import ApolloVehicleConfig, DEFAULT_VEHICLE_CONFIG
+
 from .ad_agent import ADAgent
 from .map_budget import MapBudget
 from .routing import InvalidRoute, RouteSpace
@@ -37,8 +39,10 @@ class ScenarioRules:
     """
     Cross-type constraints and the ego's size.
 
-    :param float ego_length: Ego body length, in metres (Apollo's default Lincoln MKZ).
-    :param float ego_width: Ego body width, in metres.
+    Route poses are localization reference points, not box centres. Defaults
+    describe the Lincoln MKZ; use ``from_vehicle`` for another vehicle configuration.
+
+    :param ApolloVehicleConfig vehicle: Shared ego configuration, including its reference-point geometry.
     :param float spawn_clearance: Metres between an agent's first pose and the ego's start body.
     :param float ego_side_clearance: Metres between the ego and a lane-aware vehicle not in its queue.
     :param float ego_clear_time: Seconds after the ego's ``start_t`` during which
@@ -46,10 +50,6 @@ class ScenarioRules:
     :param float horizon: Seconds checked; the sections' grids use the same.
     :param float dt: Sampling step in seconds.
     """
-    ego_length: float = 4.933
-    """Ego body length, in metres (Apollo's default Lincoln MKZ)."""
-    ego_width: float = 2.11
-    """Ego body width, in metres."""
     spawn_clearance: float = 3.0
     """Metres between an agent's first pose and the ego's start body."""
     ego_side_clearance: float = 1.0
@@ -68,6 +68,34 @@ class ScenarioRules:
     """Seconds checked; the sections' grids use the same."""
     dt: float = 0.1
     """Sampling step in seconds."""
+
+    vehicle: ApolloVehicleConfig = field(default=DEFAULT_VEHICLE_CONFIG, kw_only=True)
+    """Single source of ego dimensions; no independent geometry overrides."""
+
+    @property
+    def ego_length(self) -> float:
+        """Ego body length in metres, derived from the shared vehicle edges. :rtype: float"""
+        return self.vehicle.body_length
+
+    @property
+    def ego_width(self) -> float:
+        """Ego body width in metres, derived from the shared vehicle edges. :rtype: float"""
+        return self.vehicle.body_width
+
+    @property
+    def ego_center_forward(self) -> float:
+        """Forward localization-reference-to-centre offset in metres. :rtype: float"""
+        return self.vehicle.center_forward
+
+    @property
+    def ego_center_left(self) -> float:
+        """Leftward localization-reference-to-centre offset in metres. :rtype: float"""
+        return self.vehicle.center_left
+
+    @classmethod
+    def from_vehicle(cls, vehicle: ApolloVehicleConfig, **settings) -> "ScenarioRules":
+        """Share the exact configuration used for localization and record analysis."""
+        return cls(vehicle=vehicle, **settings)
 
     def section_rules(self, rules: SectionRules) -> SectionRules:
         """
@@ -313,7 +341,9 @@ def ego_start_body(ego: ADAgent, context: ScenarioContext, rules: ScenarioRules)
     """
     start = context.ego_space.poses(ego.route).start
     n = len(rules.times)
-    return Body(np.full(n, start.x), np.full(n, start.y), np.full(n, start.heading), rules.ego_length,
+    # Routing/Sim Control uses the localization reference point; Body uses the box centre.
+    x, y = rules.vehicle.body_center(start.x, start.y, start.heading)
+    return Body(np.full(n, x), np.full(n, y), np.full(n, start.heading), rules.ego_length,
                 rules.ego_width, ego.start_t, ego.route.lanes[0])
 
 
