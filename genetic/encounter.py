@@ -21,7 +21,7 @@ from typing import Tuple
 import numpy as np
 from shapely.geometry import LineString, Point
 
-from ..scenario import ADAgent
+from ..scenario import ADAgent, RouteSpace
 from ..scenario.sections import Body
 
 __all__ = ["EgoEnvelope", "MOVE_OFF", "REACH", "SLOW", "FAST", "SLACK", "encounter_score"]
@@ -48,17 +48,32 @@ class EgoEnvelope:
     :param LineString path: The ego's route, as it drives it.
     :param float start_t: When the ego may move, its gene's ``start_t``.
     """
-
     path: LineString
+    """The ego's route, as it drives it."""
     start_t: float
+    """When the ego may move, its gene's ``start_t``."""
 
     @classmethod
-    def of(cls, ego: ADAgent, ego_space) -> "EgoEnvelope":
-        """The envelope of ``ego`` on its route space (``ScenarioContext.ego_space``)."""
+    def of(cls, ego: ADAgent, ego_space: RouteSpace) -> "EgoEnvelope":
+        """
+        The envelope of ``ego`` on its route space.
+
+        :param ADAgent ego: The ego gene: its route and ``start_t``.
+        :param RouteSpace ego_space: The ego's route space (``ScenarioContext.ego_space``), which lays out the route.
+        :returns: The envelope along the route ``ego_space`` builds for the ego.
+        :rtype: EgoEnvelope
+        """
         return cls(ego_space.path(ego.route), ego.start_t)
 
     def range(self, t: float) -> Tuple[float, float]:
-        """Metres along the route between which the ego may be at ``t``."""
+        """
+        Metres along the route between which the ego may be at ``t``.
+
+        :param float t: Scenario time in seconds.
+        :returns: ``(nearest, farthest)`` route metres: ``SLOW`` and ``FAST`` times the seconds since the ego moved
+            off (``start_t + MOVE_OFF``), both capped at the route's length; ``(0, 0)`` before it moves.
+        :rtype: Tuple[float, float]
+        """
         moving = max(0.0, t - self.start_t - MOVE_OFF)
         return min(SLOW * moving, self.path.length), min(FAST * moving, self.path.length)
 

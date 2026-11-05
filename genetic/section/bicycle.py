@@ -1,4 +1,5 @@
-"""Bicycle parts of the section operators.
+"""
+Bicycle parts of the section operators.
 
 ``BicycleKind`` draws, mutates, crosses and rebalances ``BicycleAgent`` values
 on the bicycles' route space.
@@ -23,12 +24,13 @@ class BicycleKind(SectionKind[BicycleAgent]):
     :param BicycleOperatorConfig config: Bicycle operators. Defaults to ``BicycleOperatorConfig()``.
     :param SectionRules | None rules: In-type constraints. None uses ``BicycleSection.RULES``.
     """
-
     compliance_rate: float = COMPLIANCE_RATES["bicycle"]
     """Share of its agents that obey signals."""
 
     SECTION: Type[BicycleSection] = BicycleSection
     """Bicycle section class."""
+    config: BicycleOperatorConfig
+    """The bicycle operators and their bounds."""
 
     def __init__(self, space: RouteSpace, config: BicycleOperatorConfig = BicycleOperatorConfig(),
                  rules: SectionRules | None = None) -> None:
@@ -40,7 +42,7 @@ class BicycleKind(SectionKind[BicycleAgent]):
         :param SectionRules | None rules: In-type constraints. None uses ``BicycleSection.RULES``.
         """
         super().__init__(BicycleSection, space, rules)
-        self.config: BicycleOperatorConfig = config
+        self.config = config
 
     def random_agent(self, rng: Random) -> BicycleAgent | None:
         """

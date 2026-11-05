@@ -84,7 +84,7 @@ def mut_lane_change(agent: ADAgent, space: RouteSpace, rng: Random,
 
 
 def mut_s(agent: ADAgent, space: RouteSpace, rng: Random,
-          config: ADOperatorConfig = ADOperatorConfig()) -> ADAgent:
+          config: ADOperatorConfig = ADOperatorConfig()) -> ADAgent | None:
     """
     Move either or both endpoint positions by Gaussian steps, preserving start time.
 
@@ -112,7 +112,8 @@ def mut_start_t(agent: ADAgent, rng: Random,
 
     :param ADAgent agent: Agent from which to construct the mutation candidate.
     :param Random rng: Random source used to sample proposals; reuse a seeded instance for reproducibility.
-    :param ADOperatorConfig config: Time-step standard deviation ``sigma_t`` and upper bound ``max_start_t``, in seconds.
+    :param ADOperatorConfig config: Time-step standard deviation ``sigma_t`` and upper bound ``max_start_t``, in
+        seconds.
     :returns: An agent with the proposed start time.
     :rtype: ADAgent
     """

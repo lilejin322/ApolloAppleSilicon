@@ -8,14 +8,15 @@ the bottom-layer operators.
 from typing import List
 
 from .base import (
-    MUTATION_ACTIONS, SectionKind, adapt_section, SectionOperatorConfig, cx_section, fill, mut_agent, mut_count, mut_section,
-    random_section, rebalance_sections,
+    MUTATION_ACTIONS, SectionKind, SectionOperatorConfig, adapt_section, cx_section, fill, flip_compliance, mut_agent,
+    mut_count, mut_section, random_section, rebalance_sections, swap_compliance,
 )
 from .bicycle import BicycleKind
 from .npc import NPCKind
 from .pedestrian import PedestrianKind
 
 __all__: List[str] = [
-    "MUTATION_ACTIONS", "SectionKind", "adapt_section", "SectionOperatorConfig", "cx_section", "fill", "mut_agent", "mut_count",
-    "mut_section", "random_section", "rebalance_sections", "BicycleKind", "NPCKind", "PedestrianKind",
+    "MUTATION_ACTIONS", "SectionKind", "SectionOperatorConfig", "adapt_section", "cx_section", "fill",
+    "flip_compliance", "mut_agent", "mut_count", "mut_section", "random_section", "rebalance_sections",
+    "swap_compliance", "BicycleKind", "NPCKind", "PedestrianKind",
 ]

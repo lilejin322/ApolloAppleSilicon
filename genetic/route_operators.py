@@ -29,6 +29,7 @@ BRIDGE_TRIALS: int = 6
 """Lane pairs tried per bridge, nearest estimated length first."""
 
 __all__: List[str] = [
+    "BRIDGE_BOUND_SLACK", "BRIDGE_LENGTH_SLACK", "BRIDGE_TRIALS",
     "cx_shared_lane", "cx_bridge", "mut_reroute", "mut_extend_or_truncate", "mut_lane_change", "mut_s",
 ]
 
@@ -92,8 +93,8 @@ def cx_bridge(first: LaneRoute, second: LaneRoute, space: RouteSpace, rng: Rando
     (widened by ``BRIDGE_LENGTH_SLACK``) and, of up to ``BRIDGE_TRIALS`` lane
     pairs whose estimated child length is nearest to it, the child actually
     nearest is kept (only within the parents' range widened by
-    ``BRIDGE_BOUND_SLACK`` if ``config.bridge_within_parents``). Uniform pairs made bridged routes grow (shalun ego: +129 m
-    per child), so lengths crept towards ``max_length`` over generations.
+    ``BRIDGE_BOUND_SLACK`` if ``config.bridge_within_parents``). Uniform pairs made bridged routes grow
+    (shalun ego: +129 m per child), so lengths crept towards ``max_length`` over generations.
 
     :param LaneRoute first: Parent providing the route head and start position.
     :param LaneRoute second: Parent providing the route tail and end position.

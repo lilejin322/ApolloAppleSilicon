@@ -9,13 +9,13 @@ propose candidates and require validation by their caller.
 
 from typing import List
 
-from .common import ADOperatorConfig
+from .common import ADOperatorConfig, acceptable
 from .crossover import cx_ad_agent, cx_bridge, cx_shared_lane, cx_start_time
 from .mutation import (
     mut_ad_agent, mut_extend_or_truncate, mut_lane_change, mut_reroute, mut_s, mut_start_t,
 )
 
 __all__: List[str] = [
-    "ADOperatorConfig", "cx_ad_agent", "cx_bridge", "cx_shared_lane", "cx_start_time",
+    "ADOperatorConfig", "acceptable", "cx_ad_agent", "cx_bridge", "cx_shared_lane", "cx_start_time",
     "mut_ad_agent", "mut_extend_or_truncate", "mut_lane_change", "mut_reroute", "mut_s", "mut_start_t",
 ]

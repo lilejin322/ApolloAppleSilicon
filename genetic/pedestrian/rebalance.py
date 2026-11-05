@@ -52,7 +52,8 @@ def rebalance_crossing_kinds(population: Sequence[PedestrianAgent], network: Wal
     :param Sequence[PedestrianAgent] population: Pedestrians to rebalance. The input sequence is not modified.
     :param WalkNetwork network: Walk network that proposes the replacement excursions.
     :param Random rng: Random source for the donor order and the off-crosswalk kinds.
-    :param PedestrianOperatorConfig config: Kind weights and acceptance limits. Defaults to ``PedestrianOperatorConfig()``.
+    :param PedestrianOperatorConfig config: Kind weights and acceptance limits. Defaults to
+        ``PedestrianOperatorConfig()``.
     :returns: A new list of the same length. Agents that changed are new objects; the others are reused.
     :rtype: List[PedestrianAgent]
     """

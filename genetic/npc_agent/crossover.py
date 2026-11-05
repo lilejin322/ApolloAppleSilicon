@@ -125,7 +125,8 @@ def cx_npc_agent(first: NPCVehicleAgent, second: NPCVehicleAgent, spaces: Spaces
     :param NPCVehicleAgent second: Lead parent of the second child and donor for the first.
     :param Spaces spaces: A route space per vehicle type the children may have.
     :param Random rng: Random number generator used for gene selection, operator selection, and crossover.
-    :param NPCOperatorConfig config: Configuration controlling crossover probabilities, operator weights, and route swapping.
+    :param NPCOperatorConfig config: Configuration controlling crossover probabilities, operator weights, and route
+        swapping.
     :returns: Two children, led by ``first`` and ``second``, respectively.
     :rtype: Tuple[NPCVehicleAgent, NPCVehicleAgent]
     """

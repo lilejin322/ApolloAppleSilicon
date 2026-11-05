@@ -38,7 +38,8 @@ def cx_scenario(first: Scenario, second: Scenario, kinds: ScenarioKinds, rng: Ra
         Defaults to ``ScenarioOperatorConfig()``.
     :returns: ``(child led by first, child led by second)``.
     :rtype: Tuple[Scenario, Scenario]
-    :raises ValueError: If the egos are recombined and ``cx_ad_agent`` accepts no route, and the leading parent is invalid.
+    :raises ValueError: If the egos are recombined and ``cx_ad_agent`` accepts no route, and the leading parent is
+        invalid.
     """
     egos: Tuple[ADAgent, ADAgent] = (first.ego, second.ego)
     if rng.random() < config.ego_crossover_rate:

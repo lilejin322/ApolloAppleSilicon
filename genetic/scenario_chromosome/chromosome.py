@@ -8,8 +8,8 @@ A scenario is the ego plus NPC, bicycle and pedestrian sections
 ``crossover`` and ``mutation`` and use the config and kinds defined here.
 """
 
-from dataclasses import dataclass, field
 from random import Random
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, List, Mapping, Sequence
 
 from ...scenario import ADAgent
@@ -59,7 +59,8 @@ class ScenarioOperatorConfig:
     attempts: int = 20
     """Retries of an ego mutation that clashes with the traffic."""
     ad: ADOperatorConfig = ADOperatorConfig()
-    """Ego operators passed to generation, ``mut_ad_agent`` and ``cx_ad_agent``. ``max_start_t`` bounds a random ego's start."""
+    """Ego operators passed to generation, ``mut_ad_agent`` and ``cx_ad_agent``. ``max_start_t`` bounds a random ego's
+    start."""
     evolve_signals: bool = True
     """Random, varied signal plans; when False, every scenario keeps the fixed default plans."""
 
@@ -74,7 +75,23 @@ class ScenarioKinds:
     signal timings (``context.timings``); empty only for a map without signals,
     since Apollo takes a signal it gets no light for as red. To keep the signals
     fixed, use ``ScenarioOperatorConfig(evolve_signals=False)``.
+
+    :param ScenarioContext context: Map the scenario replays on.
+    :param ScenarioRules rules: Cross-type constraints. Defaults to ``ScenarioRules()``.
+    :param NPCOperatorConfig npc: NPC operators. Defaults to ``NPCOperatorConfig()``.
+    :param BicycleOperatorConfig bicycle: Bicycle operators. Defaults to ``BicycleOperatorConfig()``.
+    :param PedestrianOperatorConfig pedestrian: Pedestrian operators. Defaults to ``PedestrianOperatorConfig()``.
     """
+    context: ScenarioContext
+    """The map the scenarios replay on."""
+    rules: ScenarioRules
+    """The cross-type constraints."""
+    timings: Mapping[str, SignalTiming]
+    """The map's signal timings (``context.timings``); empty only for a map without signals."""
+    budget: MapBudget
+    """This map's count caps: each section's base ``max_count`` times ``budget.scale``."""
+    kinds: Dict[str, SectionKind[Any]]
+    """The ``SectionKind`` of ``"npcs"``, ``"bicycles"`` and ``"pedestrians"``, with budgeted rules."""
 
     def __init__(self, context: ScenarioContext, rules: ScenarioRules = ScenarioRules(), *,
                  npc: NPCOperatorConfig = NPCOperatorConfig(), bicycle: BicycleOperatorConfig = BicycleOperatorConfig(),
@@ -90,13 +107,12 @@ class ScenarioKinds:
         :param BicycleOperatorConfig bicycle: Bicycle operators. Defaults to ``BicycleOperatorConfig()``.
         :param PedestrianOperatorConfig pedestrian: Pedestrian operators. Defaults to ``PedestrianOperatorConfig()``.
         """
-        self.context: ScenarioContext = context
-        self.rules: ScenarioRules = rules
-        self.timings: Mapping[str, SignalTiming] = context.timings
-        self.budget: MapBudget = MapBudget.of(context)
-        """This map's count caps: each section's base ``max_count`` times ``budget.scale``."""
+        self.context = context
+        self.rules = rules
+        self.timings = context.timings
+        self.budget = MapBudget.of(context)
         sized = lambda kind: self.budget.rules(rules.section_rules(kind.default_rules()))
-        self.kinds: Dict[str, SectionKind[Any]] = {
+        self.kinds = {
             "npcs": NPCKind(context.npc_spaces, npc, sized(NPCKind)),
             "bicycles": BicycleKind(context.bicycle_space, bicycle, sized(BicycleKind)),
             "pedestrians": PedestrianKind(context.walk_network, pedestrian, sized(PedestrianKind)),
@@ -191,7 +207,6 @@ def _with(scenario: Scenario, name: str, section: Any) -> Scenario:
     :returns: The copied scenario.
     :rtype: Scenario
     """
-    from dataclasses import replace
     return replace(scenario, **{name: section})
 
 

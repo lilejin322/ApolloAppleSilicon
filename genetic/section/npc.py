@@ -1,4 +1,5 @@
-"""NPC-vehicle parts of the section operators.
+"""
+NPC-vehicle parts of the section operators.
 
 ``NPCKind`` draws, mutates, crosses and rebalances ``NPCVehicleAgent`` values
 on the per-type route spaces.
@@ -23,12 +24,13 @@ class NPCKind(SectionKind[NPCVehicleAgent]):
     :param NPCOperatorConfig config: NPC operators. Defaults to ``NPCOperatorConfig()``.
     :param SectionRules | None rules: In-type constraints. None uses ``NPCSection.RULES``.
     """
-
     compliance_rate: float = COMPLIANCE_RATES["npc"]
     """Share of its agents that obey signals."""
 
     SECTION: Type[NPCSection] = NPCSection
     """NPC section class."""
+    config: NPCOperatorConfig
+    """The NPC operators and their bounds."""
 
     def __init__(self, spaces: Spaces, config: NPCOperatorConfig = NPCOperatorConfig(),
                  rules: SectionRules | None = None) -> None:
@@ -40,7 +42,7 @@ class NPCKind(SectionKind[NPCVehicleAgent]):
         :param SectionRules | None rules: In-type constraints. None uses ``NPCSection.RULES``.
         """
         super().__init__(NPCSection, spaces, rules)
-        self.config: NPCOperatorConfig = config
+        self.config = config
 
     def random_agent(self, rng: Random) -> NPCVehicleAgent | None:
         """

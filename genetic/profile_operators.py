@@ -24,8 +24,8 @@ Replayed = TypeVar("Replayed")
 """An NPCVehicleAgent, BicycleAgent or PedestrianAgent."""
 
 __all__: List[str] = [
-    "clamp_speeds", "cx_drive_style", "cx_speed_profile", "mut_drive_style", "cx_start_time", "mut_speed", "mut_speed_point", "mut_start_t", "mut_stop",
-    "with_profile",
+    "SPEED_POINT_ACTIONS", "clamp_speeds", "cx_drive_style", "cx_speed_profile", "cx_start_time", "kind_of",
+    "mut_drive_style", "mut_speed", "mut_speed_point", "mut_start_t", "mut_stop", "with_profile",
 ]
 
 

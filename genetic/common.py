@@ -21,8 +21,10 @@ from ..scenario.routing import InvalidRoute
 from ..utils import require_nonnegative
 
 logger: logging.Logger = logging.getLogger(__name__)
+"""This module's logger."""
 
 Agent = TypeVar("Agent")
+"""Any agent chromosome: ``ADAgent``, ``NPCVehicleAgent``, ``BicycleAgent`` or ``PedestrianAgent``."""
 
 
 @dataclass(frozen=True)
@@ -43,7 +45,6 @@ class OperatorConfig:
     :param float sigma_s: Standard deviation of route position steps, in metres.
     :param float sigma_t: Standard deviation of start time steps, in seconds.
     """
-
     CROSSOVERS: ClassVar[Tuple[str, ...]] = ()
     """Crossover operator names, as used in ``crossover_weights``."""
     MUTATIONS: ClassVar[Tuple[str, ...]] = ()
@@ -111,7 +112,6 @@ class LaneRouteConfig(OperatorConfig):
         150 -> 190 m in five generations). Off by default: vehicle routes stay stable
         without it.
     """
-
     bridge_candidates: int = 5
     """Number of cheapest lane paths considered when bridging or rerouting."""
     max_detour: float = 0.3
@@ -258,7 +258,6 @@ class ReplayOperatorConfig(OperatorConfig):
         are invalid, or speed, dwell, or arrival-time parameters are nonfinite
         or negative.
     """
-
     GENES: ClassVar[Tuple[str, ...]] = ()
     """Gene names, in the order ``vary`` changes them."""
     CROSSOVER_GENES: ClassVar[Mapping[str, str]] = {}
@@ -279,7 +278,8 @@ class ReplayOperatorConfig(OperatorConfig):
     route_swap_rate: float = 0.5
     """Probability of attempting a whole-route swap after all route crossover operators fail."""
     min_arrival_t: float = 0.0
-    """Earliest accepted route-end time in scenario seconds; positive values also require an earlier start, and zero disables the check."""
+    """Earliest accepted route-end time in scenario seconds; positive values also require an earlier start, and zero
+    disables the check."""
 
     def __post_init__(self) -> None:
         """
@@ -332,8 +332,8 @@ def vary(lead: Agent, order: Sequence[str], operators: Mapping[str, Callable[[Ag
     :param Random rng: Random number generator used for gene, operator, and fallback selection.
     :param int attempts: Maximum number of tries per selected operator or fallback.
     :param Callable[[Agent], bool] accept: Predicate applied to changed proposals and the final child.
-    :param Mapping[str, Tuple[float, Callable[[Agent], Agent | None]]] fallbacks:
-        Optional per-gene fallback probability and operator, used after regular operators fail.
+    :param Mapping[str, Tuple[float, Callable[[Agent], Agent | None]]] fallbacks: Per-gene ``(probability,
+        operator)`` used after the gene's regular operators fail; genes absent here have no fallback.
     :returns: The acceptable child, or ``lead`` unchanged if no gene changes.
     :rtype: Agent
     :raises ValueError: If the final child fails the acceptance check.
@@ -346,6 +346,13 @@ def vary(lead: Agent, order: Sequence[str], operators: Mapping[str, Callable[[Ag
         current: Agent = child
 
         def changes(candidate: Agent) -> bool:
+            """
+            Accept only a changed candidate that also satisfies the caller's acceptance predicate.
+
+            :param Agent candidate: A proposal for the gene being varied.
+            :returns: ``True`` if it differs from the child so far and ``accept`` passes it.
+            :rtype: bool
+            """
             return candidate != current and accept(candidate)
 
         step: Agent | None = apply_weighted(

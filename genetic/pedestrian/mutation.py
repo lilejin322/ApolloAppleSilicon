@@ -156,7 +156,8 @@ def mut_kind(agent: PedestrianAgent, network: WalkNetwork, rng: Random,
     :param PedestrianAgent agent: Agent whose excursion kind is mutated.
     :param WalkNetwork network: Walk network used to propose an excursion and apply the modified walk.
     :param Random rng: Random number generator used to select an excursion, sample a kind, and propose endpoints.
-    :param PedestrianOperatorConfig config: Configuration defining kind weights, redraw reach, and endpoint adjustment bounds.
+    :param PedestrianOperatorConfig config: Configuration defining kind weights, redraw reach, and endpoint
+        adjustment bounds.
     :param ExcursionKind | None drawn: Kind already drawn for this mutation event, or ``None`` to sample one.
     :returns: The mutant, or ``None`` if there is no excursion, no kind is available,
         the selected kind is unchanged, no proposal fits, or the modified walk cannot be applied.
@@ -202,8 +203,10 @@ def mut_count(agent: PedestrianAgent, network: WalkNetwork, rng: Random,
 
     :param PedestrianAgent agent: Agent whose excursion count is mutated.
     :param WalkNetwork network: Walk network used to propose excursions and apply the modified walk.
-    :param Random rng: Random number generator used for unspecified event draws, excursion proposals, and endpoint sampling.
-    :param PedestrianOperatorConfig config: Configuration defining count and kind weights, link reach, and endpoint bounds.
+    :param Random rng: Random number generator used for unspecified event draws, excursion proposals, and endpoint
+        sampling.
+    :param PedestrianOperatorConfig config: Configuration defining count and kind weights, link reach, and endpoint
+        bounds.
     :param str | None action: Action from ``COUNT_ACTIONS``, or ``None`` to sample one.
     :param ExcursionKind | None drawn: Kind for an added excursion, or ``None`` to sample one; unused for removal.
     :param float | None accept: Uniform draw in [0, 1) for Metropolis acceptance, or ``None`` to sample one when needed.

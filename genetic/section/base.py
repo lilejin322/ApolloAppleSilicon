@@ -20,7 +20,9 @@ from ..encounter import EgoEnvelope, encounter_score
 from ...scenario.sections import Section, SectionRules
 
 T = TypeVar("T")
+"""A section's agent type: ``NPCVehicleAgent``, ``BicycleAgent`` or ``PedestrianAgent``."""
 S = TypeVar("S", bound=Section)
+"""A ``Section`` subclass."""
 Fits = Callable[[Any], bool]
 """Predicate of a candidate agent. True when the caller accepts it beyond the section's own conflict check."""
 
@@ -90,6 +92,16 @@ class SectionKind(Generic[T]):
     :param Any context: What its agents replay on (``Section.replay``).
     :param SectionRules | None rules: In-type constraints; None uses the section's ``RULES``.
     """
+    section: Type[Section]
+    """The ``Section`` subclass this kind builds."""
+    context: Any
+    """What its agents replay on (``Section.replay``)."""
+    signals: Any
+    """Signal plans the replays obey (``with_signals``); None replays without signals."""
+    rules: SectionRules
+    """In-type constraints: the ones given, or the section's ``RULES``."""
+    envelope: EgoEnvelope | None
+    """Where the ego may be (``toward``), for drawing new agents that meet it; None draws at random."""
 
     def __init__(self, section: Type[Section], context: Any, rules: SectionRules | None = None) -> None:
         """
@@ -99,13 +111,11 @@ class SectionKind(Generic[T]):
         :param Any context: What its agents replay on.
         :param SectionRules | None rules: In-type constraints. None uses ``section.RULES``.
         """
-        self.section: Type[Section] = section
-        self.context: Any = context
-        self.signals: Any = None
-        """Signal plans the replays obey (``with_signals``); None replays without signals."""
-        self.rules: SectionRules = rules or section.RULES
-        self.envelope: EgoEnvelope | None = None
-        """Where the ego may be (``toward``), for drawing new agents that meet it; None draws at random."""
+        self.section = section
+        self.context = context
+        self.signals = None
+        self.rules = rules or section.RULES
+        self.envelope = None
 
     SECTION: Type[Section] = Section
     """The ``Section`` subclass this kind builds."""
@@ -117,6 +127,10 @@ class SectionKind(Generic[T]):
         """
         A section of ``agents`` carrying the relative ``density`` gene; None derives it from the size.
 
+        :param Sequence[T] agents: The agents, in section order.
+        :param float | None density: The size gene in ``[0, 1]``; None takes ``density_for(len(agents))`` under
+            this kind's rules.
+        :returns: The section.
         :rtype: Section
         """
         if density is None:
@@ -127,6 +141,9 @@ class SectionKind(Generic[T]):
         """
         Size the ``density`` gene of ``section`` asks for under this kind's (map-budgeted) rules.
 
+        :param Section section: A section of this kind's type, possibly built for another map.
+        :returns: ``count_for(density)`` under this kind's rules; without a density gene (legacy), the agent count
+            clamped to them.
         :rtype: int
         """
         if section.density is None:
@@ -209,6 +226,7 @@ class SectionKind(Generic[T]):
         A shallow copy of this kind that draws new agents to meet the ego in ``envelope``.
 
         :param EgoEnvelope | None envelope: Where the ego may be; None draws at random.
+        :returns: ``self`` when the envelope is the same object, else a copy.
         :rtype: SectionKind[T]
         """
         if envelope is self.envelope:
@@ -218,7 +236,13 @@ class SectionKind(Generic[T]):
         return bound
 
     def encounter(self, agent: T) -> float:
-        """How near ``agent`` comes to where the ego may be (``encounter_score``); ``inf`` without an envelope."""
+        """
+        How near ``agent`` comes to where the ego may be (``encounter_score``).
+
+        :param T agent: An agent of this kind's type.
+        :returns: The encounter score of its body against ``envelope``; ``inf`` without an envelope.
+        :rtype: float
+        """
         if self.envelope is None:
             return inf
         body = self.section.body(agent, self.context, self.rules, self.signals)
@@ -284,7 +308,8 @@ def fill(kind: SectionKind[T], agents: Sequence[T], size: int, rng: Random, conf
     :param Sequence[T] agents: Agents already accepted. The input sequence is not modified.
     :param int size: Desired number of agents.
     :param Random rng: Random source for new agents.
-    :param SectionOperatorConfig config: Supplies ``attempts``. Drawing stops after ``attempts * max(1, size)`` agents that do not fit.
+    :param SectionOperatorConfig config: Supplies ``attempts``. Drawing stops after ``attempts * max(1, size)``
+        agents that do not fit.
     :param Fits | None fits: Extra predicate, or None. Defaults to None.
     :returns: The accepted agents, shorter than ``size`` when draws run out.
     :rtype: List[T]
@@ -335,6 +360,11 @@ def adapt_section(section: Section, kind: SectionKind[T], rng: Random,
     agents that fit (in order) up to that count, refill with random agents. Used when a section's
     genes move to a map of another size; a section already at its target is returned unchanged.
 
+    :param Section section: The section to resize, possibly built for another map.
+    :param SectionKind[T] kind: The kind of its type on the current map; supplies the budgeted rules.
+    :param Random rng: Random source for the agents drawn to refill it.
+    :param SectionOperatorConfig config: Supplies ``attempts`` for the refill (``fill``).
+    :param Fits | None fits: Extra acceptance check on kept and drawn agents, or None.
     :returns: The adapted section (same ``density``).
     :rtype: Section
     """
@@ -538,7 +568,8 @@ def rebalance_sections(sections: Sequence[Section], kind: SectionKind[T], rng: R
     With ``passes`` > 1 the helper runs again on the result while it still changes
     something, so changes rejected by the section constraints are retried on other agents.
 
-    :param Sequence[Section] sections: Sections whose agents are rebalanced together. The input sequence is not modified.
+    :param Sequence[Section] sections: Sections whose agents are rebalanced together. The input sequence is not
+        modified.
     :param SectionKind[T] kind: Section kind whose ``rebalance`` proposes the new agents.
     :param Random rng: Random source passed to ``kind.rebalance``.
     :param Callable[[int, Any], bool] | None fits: ``fits(section_index, agent)`` for an extra check, or None.
@@ -567,6 +598,8 @@ def _rebalance_once(sections: Sequence[Section], kind: SectionKind[T], rng: Rand
     :param SectionKind[T] kind: Section kind whose ``rebalance`` and ``conflict`` are used.
     :param Random rng: Random source passed to ``kind.rebalance``.
     :param Callable[[int, Any], bool] | None fits: Extra check ``fits(section_index, agent)``, or None.
+    :param Sequence[SignalSection] | None signals: Each section's signal plans (in-section conflicts replay under
+        them), or None for all.
     :returns: The sections, with a section rebuilt only when one of its agents changed.
     :rtype: List[Section]
     """

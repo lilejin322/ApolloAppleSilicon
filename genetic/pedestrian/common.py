@@ -85,7 +85,6 @@ class PedestrianOperatorConfig(ReplayOperatorConfig):
         or step sizes fail validation; pedestrian step sizes or distance bounds
         are nonfinite or negative; or ``turn_back_probability`` is outside [0, 1].
     """
-
     GENES: ClassVar[Tuple[str, ...]] = GENES
     """Pedestrian gene names, in the order each variation call processes them."""
     CROSSOVERS: ClassVar[Tuple[str, ...]] = ("shared_sidewalk", "walker_type", "speed_profile", "walk_style",

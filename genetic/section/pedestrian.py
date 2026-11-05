@@ -1,4 +1,5 @@
-"""Pedestrian parts of the section operators.
+"""
+Pedestrian parts of the section operators.
 
 ``PedestrianKind`` draws, mutates, crosses and rebalances ``PedestrianAgent``
 values on the walk network.
@@ -28,12 +29,13 @@ class PedestrianKind(SectionKind[PedestrianAgent]):
     :param PedestrianOperatorConfig config: Pedestrian operators. Defaults to ``PedestrianOperatorConfig()``.
     :param SectionRules | None rules: In-type constraints. None uses ``PedestrianSection.RULES``.
     """
-
     compliance_rate: float = COMPLIANCE_RATES["pedestrian"]
     """Share of its agents that obey signals."""
 
     SECTION: Type[PedestrianSection] = PedestrianSection
     """Pedestrian section class."""
+    config: PedestrianOperatorConfig
+    """The pedestrian operators and their bounds."""
 
     def __init__(self, network: WalkNetwork, config: PedestrianOperatorConfig = PedestrianOperatorConfig(),
                  rules: SectionRules | None = None) -> None:
@@ -45,7 +47,7 @@ class PedestrianKind(SectionKind[PedestrianAgent]):
         :param SectionRules | None rules: In-type constraints. None uses ``PedestrianSection.RULES``.
         """
         super().__init__(PedestrianSection, network, rules)
-        self.config: PedestrianOperatorConfig = config
+        self.config = config
 
     def random_agent(self, rng: Random) -> PedestrianAgent | None:
         """

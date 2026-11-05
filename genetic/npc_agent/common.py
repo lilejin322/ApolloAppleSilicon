@@ -224,6 +224,13 @@ def retyped(agent: NPCVehicleAgent, vehicle_type: VehicleType, spaces: Spaces) -
     old_top, top = VEHICLE_SPECS[agent.vehicle_type].max_speed, VEHICLE_SPECS[vehicle_type].max_speed
 
     def mapped(point: SpeedPoint) -> SpeedPoint:
+        """
+        Transfer a moving speed-profile point to the new vehicle type.
+
+        :param SpeedPoint point: A point with a positive speed on the agent's route.
+        :returns: The point with its cruise factor mapped to the new type's prior, capped at the type's maximum.
+        :rtype: SpeedPoint
+        """
         factor = point.speed / point_reference(space, point.lane_id, old, old_top)
         return replace(point, speed=min(mapped_speed(old, new, factor) * point_reference(space, point.lane_id, new, top),
                                         top))
