@@ -11,9 +11,8 @@ https://googleapis.dev/python/protobuf/latest/google/protobuf/descriptor.html
 
 from pathlib import Path
 from threading import RLock
-from typing import Tuple, Set, Iterator, Dict, Type
-
-from google.protobuf.descriptor_pb2 import FileDescriptorSet
+from typing import Tuple, Set, Iterable, Iterator, Dict, Type
+from google.protobuf.descriptor_pb2 import DescriptorProto, FileDescriptorSet
 from google.protobuf.message import Message
 from google.protobuf.descriptor_pool import DescriptorPool
 from google.protobuf.message_factory import GetMessageClass
@@ -22,11 +21,19 @@ class _DescriptorBundleCache(type):
     """
     Publish a cached instance only after its initialization succeeds.
     """
-
-    _instances = {}
+    _instances: Dict[Tuple[type, Path], "DescriptorBundle"] = {}
+    """The bundles built so far, by class and resolved descriptor path."""
     _lock = RLock()
+    """Serializes construction, so two threads asking for one path get one bundle."""
 
-    def __call__(cls, descriptor_path: str | Path):
+    def __call__(cls, descriptor_path: str | Path) -> "DescriptorBundle":
+        """
+        Return one cached bundle per class and resolved path, serializing construction with the shared lock.
+
+        :param str | Path descriptor_path: Path to the serialized FileDescriptorSet
+        :returns: The bundle for that path, built on the first call and reused after.
+        :rtype: DescriptorBundle
+        """
         path = Path(descriptor_path).expanduser().resolve()
         key = (cls, path)
         with cls._lock:
@@ -51,6 +58,18 @@ class DescriptorBundle(metaclass=_DescriptorBundleCache):
 
     :param str | Path descriptor_path: Path to the serialized FileDescriptorSet
     """
+    _descriptor_path: Path
+    """Resolved absolute path of the descriptor file; the cache key."""
+    _descriptor_set: FileDescriptorSet
+    """The parsed descriptor file."""
+    _pool: DescriptorPool
+    """Descriptor pool of this bundle alone, so bundles of different Apollo versions never clash."""
+    _messages: Dict[str, Type[Message]]
+    """Message classes generated so far, by fully qualified name."""
+    _names: Dict[str, list[str]]
+    """Fully qualified names by short name; a short name with several is ambiguous."""
+    _full_names: Dict[str, None]
+    """Every fully qualified message name, nested messages included, in descriptor order."""
 
     def __init__(self, descriptor_path: str | Path) -> None:
         """
@@ -72,13 +91,19 @@ class DescriptorBundle(metaclass=_DescriptorBundleCache):
 
         self._descriptor_set = self._load_descriptor_set()
         self._pool = DescriptorPool()
-        self._messages: Dict[str, Type[Message]] = {}
-        self._names: Dict[str, list[str]] = {}
-        self._full_names: Dict[str, None] = {}
+        self._messages = {}
+        self._names = {}
+        self._full_names = {}
         files = {file.name: file for file in self._descriptor_set.file}
         visiting = set()
 
         def add_file(name: str) -> None:
+            """
+            Load a descriptor and its dependencies into the pool, rejecting dependency cycles.
+
+            :param str name: File name of a descriptor in the set; one already loaded or unknown is skipped.
+            :raises ValueError: If the file depends, directly or through others, on itself.
+            """
             if name not in files:
                 return
             if name in visiting:
@@ -91,7 +116,13 @@ class DescriptorBundle(metaclass=_DescriptorBundleCache):
             visiting.remove(name)
             del files[name]
 
-        def index_messages(messages, prefix: str) -> None:
+        def index_messages(messages: Iterable[DescriptorProto], prefix: str) -> None:
+            """
+            Recursively index fully qualified and short message names, including nested message types.
+
+            :param Iterable[DescriptorProto] messages: Message definitions of one file or nested in one message.
+            :param str prefix: The package, or the enclosing message's fully qualified name.
+            """
             for descriptor in messages:
                 full_name = f"{prefix}.{descriptor.name}" if prefix else descriptor.name
                 self._full_names[full_name] = None
