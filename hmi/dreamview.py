@@ -30,11 +30,12 @@ else:
     from message.descriptor import DescriptorBundle
 
 logger = getLogger(__name__)
+"""This module's logger."""
 
-# The backend broadcasts HMIStatus about once a second (~1.35 KB) to every
-# connection. Unread, it fills the socket buffers of a long-held instance, and
-# the backend then blocks on every broadcast to it.
 _IDLE_DRAIN_S = 1.0
+"""Seconds between reads of the idle connection's broadcasts. The backend broadcasts HMIStatus about once a
+second (~1.35 KB) to every connection; unread, it fills the socket buffers of a long-held instance, and the
+backend then blocks on every broadcast to it."""
 
 
 class Dreamview(DreamviewInterface):
@@ -69,11 +70,17 @@ class Dreamview(DreamviewInterface):
     """The websocket timeout"""
     ws: WebSocket
     """The websocket connection for Dreamview to its backend"""
+    _lock: RLock
+    """Serializes use of ``ws``: a command or query holds it; the drainer takes it between its reads."""
+    _closed: Event
+    """Set by ``close``; the drainer stops at its next wake."""
+    _drainer: Thread
+    """Daemon thread that reads and drops the backend's broadcasts while the connection is idle."""
 
-    def __init__(self, host="localhost", port: int = 8899,
+    def __init__(self, host: str = "localhost", port: int = 8899,
                  timeout: float = 20.0, *, descriptor_path: str | Path) -> None:
         """
-        Constructor
+        Connect to the backend and start the thread that drains its broadcasts.
 
         :param str host: the host of the legacy Dreamview websocket server,
                          in apple mac os Docker Desktop, we don't have Docker bridge
@@ -82,6 +89,7 @@ class Dreamview(DreamviewInterface):
                          TODO: multi-ctn start should assign other ports when launch legacy Dreamview.
         :param float timeout: the timeout for the websocket connection.
         :param str | Path descriptor_path: Required protobuf descriptor bundle used by this client.
+        :raises ValueError: If ``timeout`` is not a finite positive number.
         """
         if isinstance(timeout, bool) or not isfinite(timeout) or timeout <= 0:
             raise ValueError("timeout must be finite and positive")
@@ -138,7 +146,7 @@ class Dreamview(DreamviewInterface):
     def select_mode(self, mode: str) -> None:
         """
         Send CHANGE_MODE using a name from the backend's mode configuration.
-        
+
         :param str mode: the mode to select
         """
         self._hmi_action("CHANGE_MODE", mode)
@@ -158,7 +166,7 @@ class Dreamview(DreamviewInterface):
         reload the map.
         No suggestion for use but an API, I think it's better to modify the tag using script directly
         modify target: /apollo/modules/common/data/global_flagfile.txt
-        
+
         :param str map_name: the map name, note that should convert the name to pass in CAPITAL & SPACE.
         E.g.                 borregas_ave -> 'Borregas Ave'
                              san_mateo    -> 'San Mateo'
@@ -198,7 +206,7 @@ class Dreamview(DreamviewInterface):
         """
         return self._status_name("currentVehicle")
 
-    def start_sim_control(self, dynamic_model="Simulation Perfect Control") -> None:
+    def start_sim_control(self, dynamic_model: str = "Simulation Perfect Control") -> None:
         """
         Switch the operation to Sim Control and select the dynamic model.
 
@@ -206,7 +214,7 @@ class Dreamview(DreamviewInterface):
         This does not verify localization/chassis publication. A timeout does
         not undo commands already sent.
 
-        :param str dynamic model: currently only "Simulation Perfect Control" has been implemented
+        :param str dynamic_model: currently only "Simulation Perfect Control" has been implemented
                                   This means that users can define their only vehicle 'dynamic model'
                                   for PnC testing.
         """
@@ -261,7 +269,7 @@ class Dreamview(DreamviewInterface):
     def start_module(self, module: str) -> None:
         """
         Turn on the distinct module, same effect as click on the panel in your browser.
-        
+
         :param str module: the module you want to call up, same as 'source cyber_setup.sh & cyber_launch start'
                            command in the ctn.
         cyber_launch E.g.
@@ -272,10 +280,10 @@ class Dreamview(DreamviewInterface):
     def stop_module(self, module: str) -> None:
         """
         Stop the module, same effect as click on the panel in your browser.
-        
+
         :param str module: the module you want to stop, same as 'source cyber_setup.bash & cyber_launch stop'
                            command in the ctn.
-        
+
         cyber_launch E.g.
             cyber_launch stop /apollo/modules/planning/planning_component/launch/planning.launch
         """
@@ -384,7 +392,7 @@ class Dreamview(DreamviewInterface):
     def get_current_pose(self) -> Tuple[Point, Optional[float]]:
         """
         Read the cached car pose from SimulationWorld (no GetStartPoint API).
-        
+
         :returns: A Shapely Point in map coordinates and heading in radians.
                   Heading is None if the backend does not provide it.
         :rtype: Tuple[Point, Optional[float]]
@@ -751,7 +759,7 @@ class Dreamview(DreamviewInterface):
                     return
 
     @staticmethod
-    def _recv_type(ws, response_type: Optional[str], deadline: float):
+    def _recv_type(ws: WebSocket, response_type: Optional[str], deadline: float):
         """
         Read until a matching JSON response or the first binary frame arrives.
 

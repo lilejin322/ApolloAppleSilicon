@@ -5,7 +5,7 @@ Author: Lejin Li, Kyushu University & National Institute of Informatics, Japan
 Contact: li.lejin.147@s.kyushu-u.ac.jp
 
 Talks to a Dreamview Plus that is already running at ws://host:port/websocket.
-Note that the format of the wb backend of Dreamview Plus is different from the 
+Note that the format of the wb backend of Dreamview Plus is different from the
 old Dreamview 1.0, so the websocket client should be rewritten as follow.
 """
 
@@ -31,16 +31,14 @@ else:
     from interface import DreamviewInterface
     from message.descriptor import DescriptorBundle
 
-# These HMI actions are the ones whose handler sends a response frame.
-# Waiting on any other action hangs, because Dreamview Plus never replies.
 _ACK_ACTIONS = {"CHANGE_MAP", "CHANGE_OPERATION", "CHANGE_MODE"}
-
-# The backend adds a connection to its broadcast list only after the handshake,
-# so a one-shot HMIStatus broadcast can miss a just-opened /hmi connection.
+"""The HMI actions whose handler sends a response frame. Waiting on any other action hangs: Dreamview Plus
+never replies to it."""
 _HMI_RESUBSCRIBE_S = 1.0
-
-
+"""Seconds between HMIStatus subscriptions while waiting for a frame: the backend adds a connection to its
+broadcast list only after the handshake, so a one-shot broadcast can miss a just-opened /hmi connection."""
 logger = getLogger(__name__)
+"""This module's logger."""
 
 
 @lru_cache(maxsize=None)
@@ -75,7 +73,7 @@ def _decode_hmi_status(raw: bytes, descriptor_path: str | Path) -> Optional[Mess
     """
     Decode the HMIStatus carried by a /hmi StreamData frame.
 
-    :param raw: A frame received from /hmi; text frames are str.
+    :param bytes | str raw: A frame received from /hmi; text frames are str.
     :param str | Path descriptor_path: Descriptor bundle for HMIStatus and, if present, StreamData.
     :returns: The HMIStatus, or None if the frame does not carry one
     :rtype: Optional[Message]
@@ -127,7 +125,7 @@ class DreamviewPlus(DreamviewInterface):
     def __init__(self, host: str = "localhost", port: int = 8888,
                  timeout: float = 20.0, *, descriptor_path: str | Path) -> None:
         """
-        Constructor
+        Connect to the Dreamview Plus backend.
 
         :param str host: the host of the Dreamview Plus websocket server,
                          in apple mac os Docker Desktop, we don't have Docker bridge
@@ -162,7 +160,7 @@ class DreamviewPlus(DreamviewInterface):
                    dvp.start_sim_control()
                    dv.start_module("Planning")
                # leave with will call __exit__()
-        
+
         :returns: This dreamviewplus instance
         :rtype: DreamviewPlus
         """
@@ -213,7 +211,7 @@ class DreamviewPlus(DreamviewInterface):
         reload the map.
         No suggestion for use but an API, I think it's better to modify the tag using script directly
         modify target: /apollo/modules/common/data/global_flagfile.txt
-        
+
         :param str map_name: the map name, note that should convert the name to pass in CAPITAL & SPACE.
         E.g.                 borregas_ave -> 'Borregas Ave'
                              san_mateo    -> 'San Mateo'
@@ -243,7 +241,7 @@ class DreamviewPlus(DreamviewInterface):
         No suggestion for use but an API, contains wrong legacy sensor's configurations that don't match 9.0
         If you use carla for real-sensing simulation, should modify and fix it.
         modify target: /apollo/modules/common/data/vehicle_param.pb.txt
-        
+
         :param str vehicle: the vehicle name, note that should convert the same to pass in CAPITAL & SPACE
         E.g.                kitti_140   -> 'Kitti 140'
                             mkz_example -> 'Mkz Example'
@@ -328,7 +326,7 @@ class DreamviewPlus(DreamviewInterface):
 
         :param str module: the module you want to stop, same as 'source cyber_setup.bash & cyber_launch stop'
                            command in the ctn.
-        
+
         cyber_launch E.g.
             cyber_launch stop /apollo/modules/planning/planning_component/launch/planning.launch
         """
@@ -399,14 +397,15 @@ class DreamviewPlus(DreamviewInterface):
         """
         Get the current route paths and routing timestamp from Dreamview Plus.
 
+        This reads cached route data from backend; it does not wait for a new route or
+        establish that the route belongs to the latest routing request.
+
         :returns: (paths, routing_time), with each path represented by an
                   ordered list of Shapely Points. Path boundaries and any z
                   coordinates are preserved. No route is represented by [].
                   routing_time is the backend's routingTime, in seconds.
+        :rtype: Tuple[List[List[Point]], float]
         :raises RuntimeError: If the request fails or route data is invalid.
-
-        This reads cached route data from backend; it does not wait for a new route or
-        establish that the route belongs to the latest routing request.
         """
         info = self._request("RequestRoutePath", {})
         if info.get("code") != 0:
@@ -558,7 +557,7 @@ class DreamviewPlus(DreamviewInterface):
         if info.get("code") != 0:
             raise RuntimeError(f"Reset failed: {info.get('message', info)}")
 
-    def _hmi_action(self, action: str, value: Any = None):
+    def _hmi_action(self, action: str, value: Any = None) -> None:
         """
         Send an HMI action and wait only for actions in ``_ACK_ACTIONS``.
 
@@ -567,8 +566,7 @@ class DreamviewPlus(DreamviewInterface):
         a zero or missing response code is accepted.
 
         :param str action: Backend HMI action name, such as ``CHANGE_MAP``.
-        :param value: Optional JSON-serializable action value; omitted if None.
-        :returns: None
+        :param Any value: Optional JSON-serializable action value; omitted if None.
         :raises RuntimeError: The response contains a nonzero error code.
         :raises websocket.WebSocketException: Sending or receiving fails,
             including a socket timeout.
@@ -649,6 +647,7 @@ class DreamviewPlus(DreamviewInterface):
         :param str msg_type: Backend message type, such as ``GetInitData``.
         :param Dict[str, Any] info: JSON-serializable request payload.
         :returns: The matching response's ``data.info``, or an empty dict if absent.
+        :rtype: Dict[str, Any]
         :raises websocket.WebSocketException: Sending or receiving fails,
             including a socket timeout.
         """
@@ -689,6 +688,7 @@ class DreamviewPlus(DreamviewInterface):
 
         :param str request_id: Request ID returned by ``_send``.
         :returns: The matching response's ``data.info``, or an empty dict if absent.
+        :rtype: Dict[str, Any]
         :raises websocket.WebSocketException: Receiving fails, including a
             socket timeout or connection closure.
         """
