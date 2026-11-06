@@ -12,8 +12,8 @@ from typing import Tuple
 
 __all__ = ["ACCELERATION", "DISTANCE", "DISTANCE_MAX", "DURATION", "DURATION_MAX", "SPEED", "SPEED_MAX",
            "accelerated_limited_movement", "distance_offset_accelerated", "feq", "fge", "fgt", "fle", "flt", "fmax",
-           "fmin", "required_time_accelerated", "speed_accelerated", "speed_and_distance_offset", "stopping_distance",
-           "time_for_distance", "time_to_cover_distance", "time_to_stop"]
+           "fmin", "required_time_accelerated", "signbit", "speed_accelerated", "speed_and_distance_offset",
+           "stopping_distance", "time_for_distance", "time_to_cover_distance", "time_to_stop"]
 
 DISTANCE = SPEED = DURATION = 1e-3
 """Precision of distances (m), speeds (m/s) and durations (s)."""
@@ -118,9 +118,9 @@ def fmin(a: float, b: float, precision: float) -> float:
     return b if flt(b, a, precision) else a
 
 
-def _signbit(value: float) -> bool:
+def signbit(value: float) -> bool:
     """
-    Return the floating-point sign bit, including the sign of negative zero.
+    Return the floating-point sign bit, including the sign of negative zero (``std::signbit``).
 
     :param float value: The value.
     :returns: True if it is negative, ``-0.0`` included.
@@ -172,7 +172,7 @@ def stopping_distance(v: float, a: float) -> float | None:
     """
     if feq(a, 0.0, ACCELERATION):
         return 0.0 if feq(v, 0.0, SPEED) else None
-    if _signbit(a) == _signbit(v):
+    if signbit(a) == signbit(v):
         return None
     return v * v / (2 * -a)
 

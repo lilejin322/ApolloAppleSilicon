@@ -18,11 +18,13 @@ record; priority follows the spec's rules (signals, then stop signs, then same
 priority) instead of ad_map's right-of-way model.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cached_property
-from math import atan2, cos, pi, sin
-from typing import Dict, List, Sequence, Tuple
+from math import atan2, cos, hypot, pi, sin
+from typing import Dict, List, Sequence, Tuple, Self
 from weakref import WeakKeyDictionary
+from google.protobuf.message import Message
+import shapely
 from shapely.geometry import LineString, Point, Polygon
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import substring
@@ -42,6 +44,8 @@ AHEAD_LENGTH = 150.0
 """Metres of lanes ahead its chain keeps when it has no route that far."""
 _HALF_WIDTH = 1.75
 """Half lane width where a lane has neither boundary curves nor width samples."""
+_CHAIN_LINES = 4096
+"""Chain centrelines an ``RssMap`` keeps (``chain_line``) before it starts over."""
 
 
 @dataclass(frozen=True)
@@ -161,9 +165,11 @@ class RssMap:
     """A spatial index of the lane surfaces."""
     junction_areas: Dict[str, BaseGeometry | None]
     """Each junction's area, by id; None where it has none."""
+    _chain_lines: Dict[Tuple[Tuple[str, ...], bool], LineString]
+    """The centrelines built so far, by chain and direction: a road user's chain is the same frame after frame."""
 
     @classmethod
-    def of(cls, service: MapService) -> "RssMap":
+    def of(cls, service: MapService) -> Self:
         """
         The map's lanes, built once per ``MapService`` (maps are read-only).
 
@@ -200,6 +206,7 @@ class RssMap:
         self._ids = list(lanes)
         self._tree = STRtree([lanes[i].surface for i in self._ids])
         self.junction_areas = junctions
+        self._chain_lines = {}
 
     def match(self, body: Polygon) -> List[str]:
         """
@@ -312,16 +319,23 @@ class RssMap:
 
         :param Sequence[str] lanes: The chain (``chain``).
         :param bool against: Whether it is driven against its lanes: each lane's points then run backwards.
-        :returns: Its lanes' centrelines joined, repeated points dropped.
+        :returns: Its lanes' centrelines joined, repeated points dropped. Kept per chain and direction, and shared:
+            geometries are immutable.
         :rtype: LineString
         """
-        coords: List[Tuple[float, float]] = []
-        for lane_id in lanes:
-            points = list(self.lanes[lane_id].line.coords)
-            for point in points[::-1] if against else points:
-                if not coords or Point(coords[-1]).distance(Point(point)) > 1e-6:
-                    coords.append(tuple(point[:2]))
-        return LineString(coords)
+        key = (tuple(lanes), against)
+        line = self._chain_lines.get(key)
+        if line is None:
+            coords: List[Tuple[float, float]] = []
+            for lane_id in lanes:
+                points = list(self.lanes[lane_id].line.coords)
+                for x, y, *_ in points[::-1] if against else points:
+                    if not coords or hypot(x - coords[-1][0], y - coords[-1][1]) > 1e-6:
+                        coords.append((x, y))
+            if len(self._chain_lines) >= _CHAIN_LINES:
+                self._chain_lines.clear()
+            line = self._chain_lines[key] = LineString(coords)
+        return line
 
     @cached_property
     def _family(self) -> Dict[str, Tuple[frozenset, frozenset]]:
@@ -378,15 +392,15 @@ class RssMap:
                 ObjectType.BICYCLE: params.bicycle}.get(party.object_type, params.vehicle)
         limits = [self.lanes[l].speed_limit for l in lanes if self.lanes[l].speed_limit > 0]
         if params.speed_limit_factor and limits and party.object_type != ObjectType.PEDESTRIAN:
-            return base.with_(max_speed_on_acceleration=max(limits) * params.speed_limit_factor)
+            return replace(base, max_speed_on_acceleration=max(limits) * params.speed_limit_factor)
         return base
 
 
-def _surface(lane, line: LineString) -> Polygon:
+def _surface(lane: Message, line: LineString) -> Polygon:
     """
     Build the lane surface from its boundaries, falling back to a buffered centreline.
 
-    :param Lane lane: The map's lane message.
+    :param Message lane: The map's ``apollo.hdmap.Lane`` message.
     :param LineString line: Its centreline.
     :returns: The polygon between its boundaries; else its centreline buffered by its first width samples'
         mean, or ``_HALF_WIDTH`` without them.
@@ -404,7 +418,7 @@ def _surface(lane, line: LineString) -> Polygon:
     return line.buffer(half, cap_style="flat")
 
 
-def _junction_of(line: LineString, junctions) -> str | None:
+def _junction_of(line: LineString, junctions: Dict[str, BaseGeometry | None]) -> str | None:
     """
     Return the first junction covering at least half the centreline length, or None.
 
@@ -425,21 +439,27 @@ def _coordinates(line: LineString, body: Polygon) -> Tuple[Tuple[float, float], 
     """
     ``(s range, lateral range)`` of a body along ``line``; lateral grows to the right.
 
+    Each corner is projected onto the line; its lateral offset is measured from that foot, across the line's
+    direction over the 10 cm around it. The corners go through shapely's array functions together (one call to
+    project them, one for every point on the line), and the arithmetic stays in Python: with four corners that
+    is faster than arrays, and it keeps the results bit for bit those of the corner-by-corner form.
+
     :param LineString line: A chain's centreline (``chain_line``).
     :param Polygon body: A footprint.
     :returns: ``((s_min, s_max), (l_min, l_max))`` over its corners, metres.
     :rtype: Tuple[Tuple[float, float], Tuple[float, float]]
     """
-    s_values, l_values = [], []
-    for x, y in list(body.exterior.coords)[:-1]:
-        s = line.project(Point(x, y))
-        a, b = line.interpolate(max(s - 0.05, 0.0)), line.interpolate(min(s + 0.05, line.length))
-        tx, ty = b.x - a.x, b.y - a.y
+    corners = shapely.get_coordinates(body.exterior)[:-1]
+    s_values = shapely.line_locate_point(line, shapely.points(corners)).tolist()
+    count, length = len(s_values), line.length
+    at = [max(s - 0.05, 0.0) for s in s_values] + [min(s + 0.05, length) for s in s_values] + s_values
+    on = shapely.get_coordinates(shapely.line_interpolate_point(line, at)).tolist()
+    l_values = []
+    for i, (x, y) in enumerate(corners.tolist()):
+        (ax, ay), (bx, by), (ox, oy) = on[i], on[count + i], on[2 * count + i]
+        tx, ty = bx - ax, by - ay
         norm = (tx * tx + ty * ty) ** 0.5 or 1.0
-        on = line.interpolate(s)
-        left = (tx * (y - on.y) - ty * (x - on.x)) / norm
-        s_values.append(s)
-        l_values.append(-left)
+        l_values.append(-(tx * (y - oy) - ty * (x - ox)) / norm)
     return (min(s_values), max(s_values)), (min(l_values), max(l_values))
 
 
@@ -695,7 +715,8 @@ def _intersection(rss_map: RssMap, first: Party, second: Party, first_line: Line
     second_i = (second_range[0] - second_s[1], second_range[0] - second_s[0])
     position, distance = _intersection_order(first_i, second_i)
 
-    def state(party: Party, dynamics: Dynamics, line: LineString, s_range, area_range, priority: bool):
+    def state(party: Party, dynamics: Dynamics, line: LineString, s_range: Tuple[float, float],
+              area_range: Tuple[float, float], priority: bool) -> RelativeObjectState:
         """
         Build intersection-relative velocity, priority and nonnegative entry/exit distances for one party.
 
@@ -722,7 +743,7 @@ def _intersection(rss_map: RssMap, first: Party, second: Party, first_line: Line
         position, distance, LatPosition.OVERLAP, 0.0, first.id, second.id)
 
 
-def _area_range(line: LineString, area, width: float) -> Tuple[float, float] | None:
+def _area_range(line: LineString, area: BaseGeometry, width: float) -> Tuple[float, float] | None:
     """
     Project the area intersecting a width-metre path band to an arc-length range, or None.
 
@@ -763,11 +784,10 @@ def _intersection_order(ego: Tuple[float, float], other: Tuple[float, float]) ->
     return LonPosition.OVERLAP, 0.0
 
 
-def _approach(rss_map: RssMap, chain: Sequence[str], junction_lane: str) -> List[str]:
+def _approach(chain: Sequence[str], junction_lane: str) -> List[str]:
     """
     The junction lane and the lane leading into it on the chain.
 
-    :param RssMap rss_map: The map's lanes; unused.
     :param Sequence[str] chain: A chain.
     :param str junction_lane: A junction lane on it.
     :returns: Lane ids: the junction lane, then the one before it on the chain, if any.
@@ -794,8 +814,8 @@ def _priority(rss_map: RssMap, chain: Sequence[str], a: str, other_chain: Sequen
         ``INTERSECTION_SAME_PRIORITY``, from the first party's side.
     :rtype: ConstellationType
     """
-    first_signals = {s for l in _approach(rss_map, chain, a) for s in rss_map.lanes[l].signals}
-    second_signals = {s for l in _approach(rss_map, other_chain, b) for s in rss_map.lanes[l].signals}
+    first_signals = {s for l in _approach(chain, a) for s in rss_map.lanes[l].signals}
+    second_signals = {s for l in _approach(other_chain, b) for s in rss_map.lanes[l].signals}
     if first_signals or second_signals:
         first_green = bool(first_signals) and all(lights.get(s) == "GREEN" for s in first_signals)
         second_green = bool(second_signals) and all(lights.get(s) == "GREEN" for s in second_signals)
@@ -809,8 +829,8 @@ def _priority(rss_map: RssMap, chain: Sequence[str], a: str, other_chain: Sequen
                 return (ConstellationType.INTERSECTION_OBJECT_HAS_PRIORITY if first_turns
                         else ConstellationType.INTERSECTION_EGO_HAS_PRIORITY)
         return ConstellationType.INTERSECTION_SAME_PRIORITY
-    first_stop = any(rss_map.lanes[l].stop_sign for l in _approach(rss_map, chain, a))
-    second_stop = any(rss_map.lanes[l].stop_sign for l in _approach(rss_map, other_chain, b))
+    first_stop = any(rss_map.lanes[l].stop_sign for l in _approach(chain, a))
+    second_stop = any(rss_map.lanes[l].stop_sign for l in _approach(other_chain, b))
     if first_stop != second_stop:
         return (ConstellationType.INTERSECTION_OBJECT_HAS_PRIORITY if first_stop
                 else ConstellationType.INTERSECTION_EGO_HAS_PRIORITY)

@@ -14,10 +14,13 @@ checkers with the roles swapped (digest §4.6, §5.4).
 """
 
 from dataclasses import dataclass, field, replace
+from itertools import groupby
 from math import atan2, cos, pi, sin
+from statistics import median_high
 from typing import Dict, List, Tuple
 from shapely.affinity import translate
 from shapely.geometry import Polygon
+from shapely.geometry.base import BaseGeometry
 
 from ...map import MapService
 from ...utils import ApolloVehicleConfig
@@ -30,8 +33,8 @@ from .physics import SPEED_MAX, stopping_distance
 from .preventable import (DECISION, EVALUATION, HORIZON, Pose, Prevention, careful_driver_avoids, careful_driver_gap,
                           careful_driver_runs_into, perceived)
 from .structured import IntersectionChecker, NonIntersectionChecker
-from .types import (CANONICAL, ConstellationType, LatPosition, LatResponse, LonPosition, LonResponse, ObjectType,
-                    RelativeConstellation, RssParameters, RssState, UnstructuredResponse, is_dangerous)
+from .types import (CANONICAL, ConstellationType, Dynamics, LatPosition, LatResponse, LonPosition, LonResponse,
+                    ObjectType, RelativeConstellation, RssParameters, RssState, UnstructuredResponse, is_dangerous)
 from .unstructured import UnstructuredChecker, inside_heading_range, normalize_angle
 
 __all__ = ["KINDS", "MARGIN_CAP", "Moment", "RssJudge", "Verdict"]
@@ -445,12 +448,8 @@ class RssJudge:
         :returns: Lane ids in the order matched, each run of frames on one lane once; frames off lanes add none.
         :rtype: List[str]
         """
-        lanes: List[str] = []
-        for party in track:
-            lane = self.map.main_lane(replace(party, route=()))
-            if lane is not None and (not lanes or lanes[-1] != lane):
-                lanes.append(lane)
-        return lanes
+        matched = (self.map.main_lane(replace(party, route=())) for party in track)
+        return [lane for lane, _ in groupby(lane for lane in matched if lane is not None)]
 
     def _path(self, lanes: List[str]) -> List[str]:
         """
@@ -1001,7 +1000,7 @@ def _sweep_margin(ego: Party, stop_ego: float, other: Party, stop_other: float) 
     return min(0.0, first - stop_ego)
 
 
-def _points(geom) -> List[Tuple[float, float]]:
+def _points(geom: BaseGeometry) -> List[Tuple[float, float]]:
     """
     The vertices of a shapely geometry.
 
@@ -1012,7 +1011,7 @@ def _points(geom) -> List[Tuple[float, float]]:
     return list(geom.exterior.coords) if hasattr(geom, "exterior") else list(geom.coords)
 
 
-def _lateral_stop(speed: float, dynamics) -> float:
+def _lateral_stop(speed: float, dynamics: Dynamics) -> float:
     """
     Metres to stop moving sideways at ``speed`` (towards the other when positive) at ``|lat brake_min|``.
 
@@ -1026,18 +1025,15 @@ def _lateral_stop(speed: float, dynamics) -> float:
 
 def _median(values: List[float], half: int) -> List[float]:
     """
-    Each value replaced by the median of the ``2 * half + 1`` around it (fewer at the ends).
+    Each value replaced by the median of the ``2 * half + 1`` around it (fewer at the ends, where a window of
+    even size takes the upper of its two middle values).
 
     :param List[float] values: The values, in order.
     :param int half: How many values each side of each count.
     :returns: The filtered values, as many as given.
     :rtype: List[float]
     """
-    out = []
-    for i in range(len(values)):
-        window = sorted(values[max(0, i - half):i + half + 1])
-        out.append(window[len(window) // 2])
-    return out
+    return [median_high(values[max(0, i - half):i + half + 1]) for i in range(len(values))]
 
 
 def _overlap(a0: float, a1: float, b0: float, b1: float) -> float:

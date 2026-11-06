@@ -12,7 +12,7 @@ whether two sets collide is the same.
 
 from dataclasses import dataclass, field, replace
 from math import cos, fabs, pi, sin
-from typing import List, Tuple, Iterator
+from typing import Iterable, Iterator, List, Tuple
 from shapely.geometry import MultiPoint, Polygon
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
@@ -125,7 +125,7 @@ def _corners(point: TrajectoryPoint, obj: RelativeObjectState) -> Tuple[Tuple[fl
     return tuple(tuple(corners[index]) for index in (0, 3, 1, 2))
 
 
-def _hull(points) -> BaseGeometry:
+def _hull(points: Iterable[Tuple[float, float]]) -> BaseGeometry:
     """
     Return the convex hull of the supplied map-frame points.
 

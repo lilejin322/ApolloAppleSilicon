@@ -5,11 +5,10 @@ where the C++ returns false; the ``check_*`` functions return
 ``(ok, safe_distance, is_safe)``.
 """
 
-from math import copysign
 from typing import Tuple
 
 from .physics import (DISTANCE, DISTANCE_MAX, accelerated_limited_movement, distance_offset_accelerated, fgt, flt,
-                      fmax, speed_accelerated, stopping_distance)
+                      fmax, signbit, speed_accelerated, stopping_distance)
 from .types import RelativeObjectState
 
 __all__ = ["Check", "check_lat", "check_lon_opposite", "check_lon_same", "check_stop_in_front", "lat_stated_braking",
@@ -36,17 +35,6 @@ def valid(obj: RelativeObjectState) -> bool:
             and v.speed_lon_min >= 0)
 
 
-def _signbit(value: float) -> bool:
-    """
-    Return the floating-point sign bit, including the sign of negative zero.
-
-    :param float value: The value.
-    :returns: True if it is negative, ``-0.0`` included.
-    :rtype: bool
-    """
-    return copysign(1.0, value) < 0
-
-
 def lon_stated_braking(v: float, v_max: float, rho: float, accel: float, brake: float) -> float | None:
     """
     Distance covered accelerating at ``accel`` (speed capped) for ``rho``, then
@@ -66,7 +54,7 @@ def lon_stated_braking(v: float, v_max: float, rho: float, accel: float, brake: 
         return None
     v_rho, s_rho = response
     stop = 0.0
-    if _signbit(v_rho) != _signbit(brake):
+    if signbit(v_rho) != signbit(brake):
         stop = stopping_distance(v_rho, brake)
         if stop is None:
             return None
@@ -89,7 +77,7 @@ def lat_stated_braking(v: float, rho: float, accel: float, brake: float) -> floa
     if v_rho is None or s_rho is None:
         return None
     stop = 0.0
-    if _signbit(v_rho) != _signbit(brake):
+    if signbit(v_rho) != signbit(brake):
         stop = stopping_distance(v_rho, brake)
         if stop is None:
             return None

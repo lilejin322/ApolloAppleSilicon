@@ -316,16 +316,6 @@ class Dynamics:
     unstructured: UnstructuredSettings = DEFAULT_UNSTRUCTURED
     """How its unstructured trajectory sets are sampled."""
 
-    def with_(self, **changes) -> "Dynamics":
-        """
-        A copy with ``changes``.
-
-        :param changes: Fields to replace, by name.
-        :returns: The copy.
-        :rtype: Dynamics
-        """
-        return replace(self, **changes)
-
 
 VEHICLE = Dynamics(LongitudinalAccelerations(3.5, -8.0, -4.0, -3.0), LateralAccelerations(0.2, -0.8),
                    response_time=2.0, lateral_fluctuation_margin=0.1)
@@ -347,7 +337,7 @@ class RssParameters:
     :param float speed_limit_factor: An object's ``max_speed_on_acceleration`` is its lanes' speed limit times
         this (CARLA's IncreasedSpeedLimit10); 0 keeps the dynamics' value.
     """
-    ego: Dynamics = VEHICLE.with_(response_time=1.0)
+    ego: Dynamics = replace(VEHICLE, response_time=1.0)
     """The ego."""
     vehicle: Dynamics = VEHICLE
     """Other vehicles."""

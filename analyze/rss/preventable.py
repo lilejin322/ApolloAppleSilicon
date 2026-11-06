@@ -27,6 +27,7 @@ behind the ego are not considered.
 
 from bisect import bisect_right
 from dataclasses import dataclass
+from itertools import accumulate
 from math import atan2, cos, pi, sin
 from typing import Callable, Dict, List, Sequence, Tuple
 from shapely.geometry import Polygon
@@ -35,8 +36,8 @@ from shapely.ops import unary_union
 from ..footprint import box
 from .unstructured import normalize_angle
 
-__all__ = ["DECELERATION", "DECISION", "EVALUATION", "HORIZON", "JERK_TIME", "Prevention", "careful_driver_avoids",
-           "careful_driver_gap", "careful_driver_runs_into", "perceived"]
+__all__ = ["DECELERATION", "DECISION", "EVALUATION", "HORIZON", "JERK_TIME", "Pose", "Prevention",
+           "careful_driver_avoids", "careful_driver_gap", "careful_driver_runs_into", "perceived"]
 
 EVALUATION = 0.4
 """Seconds to evaluate a perceived risk (R157 Annex 3, Table 1)."""
@@ -152,7 +153,8 @@ def careful_driver_avoids(poses: Sequence[Pose], length: float, width: float,
 
 def careful_driver_gap(poses: Sequence[Pose], length: float, width: float, other: Sequence[Tuple[float, Polygon]],
                        brake: float, until: float, *, stop_at_touch: bool = False,
-                       deceleration: float = DECELERATION, jerk_time: float = JERK_TIME, on_path: bool = False) -> float:
+                       deceleration: float = DECELERATION, jerk_time: float = JERK_TIME,
+                       on_path: bool = False) -> float:
     """
     The least distance between the careful driver's body, braking from
     ``brake`` along the ego's recorded path, and the other's recorded bodies,
@@ -238,9 +240,7 @@ def _braking(poses: Sequence[Pose], brake: float, deceleration: float,
     :rtype: Callable[[float], Tuple[float, float, float, bool]]
     """
     times = [p.t for p in poses]
-    arc = [0.0]
-    for a, b in zip(poses, poses[1:]):
-        arc.append(arc[-1] + ((b.x - a.x) ** 2 + (b.y - a.y) ** 2) ** 0.5)
+    arc = [0.0, *accumulate(((b.x - a.x) ** 2 + (b.y - a.y) ** 2) ** 0.5 for a, b in zip(poses, poses[1:]))]
     start = _interpolate(times, arc, brake)
     speed = _interpolate(times, [p.speed for p in poses], brake)
 
