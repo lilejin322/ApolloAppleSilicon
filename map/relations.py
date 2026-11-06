@@ -387,6 +387,7 @@ class MapRelations:
 
         :param List[str] lane_ids1: Lane IDs of the first group.
         :param List[str] lane_ids2: Lane IDs of the second group.
+        :returns: ``True`` if some lane of the first group meets a different lane of the second.
         :rtype: bool
         :raises KeyError: If either group names an unknown lane.
         """
@@ -550,7 +551,8 @@ class MapRelations:
 
         :param str left: A signal ID.
         :param str right: Another signal ID at the same junction.
-        :param movements_of: Returns a signal's judged movements at this junction.
+        :param Callable[[str], List[_Movement]] movements_of: Returns a signal's judged movements at this
+            junction.
         :returns: ``"EQ"`` for the same lanes or approach, or opposing approaches
             whose straight movements do not cross; ``"NE"`` for crossing
             approaches, or opposing ones whose straight movements cross; None if

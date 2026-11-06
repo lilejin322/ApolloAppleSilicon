@@ -1016,6 +1016,7 @@ class SignalSection:
         and Apollo and the replayed agents see the same ones.
 
         :param Mapping[str, SignalTiming] timings: ``signal_timings(service)``.
+        :returns: The section of default plans, one per control unit.
         :rtype: SignalSection
         """
         return cls(tuple(timing.default_plan() for timing in timings.values()))

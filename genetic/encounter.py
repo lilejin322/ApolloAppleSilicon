@@ -87,6 +87,7 @@ def encounter_score(body: Body, times: np.ndarray, envelope: EgoEnvelope) -> flo
     :param Body body: The agent's sampled poses, on ``times``.
     :param np.ndarray times: The sample times of ``body``.
     :param EgoEnvelope envelope: Where the ego may be.
+    :returns: Metres, lower meeting the ego better; ``inf`` when no sample comes within ``REACH`` of the route.
     :rtype: float
     """
     every = max(1, int(round(STEP / (times[1] - times[0])))) if len(times) > 1 else 1
