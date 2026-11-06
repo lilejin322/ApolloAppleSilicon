@@ -6,7 +6,6 @@ class BridgeOp:
     """
     Class representing cyber bridge operations.
     """
-
     RegisterDesc = (1).to_bytes(1, byteorder="big")
     """Register a descriptor of protobuf message, let the cyber_bridge in apollo know the format"""
 

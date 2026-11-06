@@ -38,9 +38,13 @@ class ServiceCallError(RuntimeError):
 class Service:
     """
     Class representing information regarding cyber bridge services.
+
+    :param str name: The name of the service
+    :param Type[Message] request_cls: The protobuf request message class, not an instance
+    :param Type[Message] response_cls: The protobuf response message class, not an instance
     """
     name: str
-    """"The name of the service"""
+    """The name of the service"""
     request_cls: Type[Message]
     """The protobuf request message class, not an instance"""
     response_cls: Type[Message]
@@ -53,16 +57,17 @@ class Services:
 
     Construct Services(path) before accessing a service definition.
 
-    :param str | Path: The path of the descriptor .desc file
+    :param str | Path descriptor_path: The path of the descriptor .desc file
     """
-    descriptor_path: str | Path
-    """The path of the descriptor .desc file"""
+    descriptor_path: Path
+    """The resolved path of the descriptor .desc file"""
 
-    def __init__(self, descriptor_path: str | Path):
+    def __init__(self, descriptor_path: str | Path) -> None:
         """
-        Constructor
+        Load the descriptor bundle and keep its resolved path.
 
-        :param str | Path: The path of the descriptor .desc file
+        :param str | Path descriptor_path: The path of the descriptor .desc file
+        :raises FileNotFoundError: If the path does not refer to a file
         """
         self.descriptor_path = DescriptorBundle(descriptor_path).descriptor_path
 
@@ -81,7 +86,12 @@ class Services:
 
     @property
     def LaneFollow(self) -> Service:
-        """Drive along lanes to an end pose; replaces RoutingRequest"""
+        """
+        Drive along lanes to an end pose; replaces RoutingRequest.
+
+        :returns: ``/apollo/external_command/lane_follow``: ``LaneFollowCommand`` in, ``CommandStatus`` out
+        :rtype: Service
+        """
         return self._service(
             "/apollo/external_command/lane_follow",
             "apollo.external_command.LaneFollowCommand",
@@ -90,7 +100,12 @@ class Services:
 
     @property
     def ValetParking(self) -> Service:
-        """Drive to and park in a parking spot"""
+        """
+        Drive to and park in a parking spot.
+
+        :returns: ``/apollo/external_command/valet_parking``: ``ValetParkingCommand`` in, ``CommandStatus`` out
+        :rtype: Service
+        """
         return self._service(
             "/apollo/external_command/valet_parking",
             "apollo.external_command.ValetParkingCommand",
@@ -99,7 +114,12 @@ class Services:
 
     @property
     def Action(self) -> Service:
-        """Stop, pull over, switch driving mode, etc."""
+        """
+        Stop, pull over, switch driving mode, etc.
+
+        :returns: ``/apollo/external_command/action``: ``ActionCommand`` in, ``CommandStatus`` out
+        :rtype: Service
+        """
         return self._service(
             "/apollo/external_command/action",
             "apollo.external_command.ActionCommand",
@@ -108,7 +128,12 @@ class Services:
 
     @property
     def QueryStatus(self) -> Service:
-        """Query the status of a previously sent command"""
+        """
+        Query the status of a previously sent command.
+
+        :returns: ``/apollo/external_command/command_status``: ``CommandStatusRequest`` in, ``CommandStatus`` out
+        :rtype: Service
+        """
         return self._service(
             "/apollo/external_command/command_status",
             "apollo.external_command.CommandStatusRequest",

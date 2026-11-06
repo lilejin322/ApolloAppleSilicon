@@ -37,6 +37,7 @@ else:
 
 
 logger = getLogger(__name__)
+"""This module's logger."""
 
 
 def to_bytes(s: str) -> bytes:
@@ -78,32 +79,58 @@ class CyberBridge:
     """The registered subscribers and their callback functions"""
     publishable_channel: Dict[str, Type[Message]]
     """The registered channel names and their protobuf message classes"""
+    _spinning: bool
+    """Whether the receive thread should keep dispatching; ``spin`` sets it, ``stop``, a failure and ``reconnect``
+    clear it."""
+    _receive_thread: Optional[Thread]
+    """The thread that runs or last ran ``_spin``; None before the first ``spin`` and after ``reconnect``."""
+    _closed: bool
+    """Whether the connection was closed or failed; only ``reconnect`` clears it."""
+    _buffer: bytearray
+    """Bytes received but not yet framed; ``on_read`` appends to it and consumes complete frames."""
+    _send_lock: Lock
+    """Serializes writes to the socket, so frames sent from different threads do not interleave."""
+    _publisher_lock: Lock
+    """Serializes writer registration and publishing; the descriptors are registered once, with the first writer."""
+    _descriptors_registered: bool
+    """Whether the descriptor bundle has been sent to the bridge on this connection."""
+    _state_lock: RLock
+    """Guards ``subscribers``, ``_pending`` and ``_next_request_id``."""
+    _pending: Dict[int, Future]
+    """Service calls still waiting for their reply, by request ID."""
+    _next_request_id: int
+    """The request ID of the next service call: a uint32, counted from 1."""
 
-    MAX_FIELD_SIZE = 64 * 1024 * 1024
+    MAX_FIELD_SIZE: int = 64 * 1024 * 1024
+    """Largest length-prefixed field accepted from the bridge, in bytes (64 MiB). A longer one means a corrupt or
+    misaligned stream, and reading fails instead of buffering it."""
 
-    def __init__(self, host: str, port=9090, timeout=5.0, *,
+    def __init__(self, host: str, port: int = 9090, timeout: float = 5.0, *,
                  descriptor_path: str | Path) -> None:
         """
-        Constructor
+        Connect to the bridge and resolve the channel and service definitions.
 
         :param str host: The host ip address
         :param int port: The port of cyber_bridge, default to 9090
         :param float timeout: The socket timeout max time
         :param str | Path descriptor_path: Descriptor bundle for registration and typed definitions
+        :raises ValueError: If ``timeout`` is not finite and positive.
+        :raises FileNotFoundError: If ``descriptor_path`` does not refer to a file.
+        :raises OSError: If the TCP connection cannot be made within ``timeout``.
         """
         if timeout <= 0 or not isfinite(timeout):
             raise ValueError("timeout must be finite and positive")
-        self.host: str = host
-        self.port: int = port
-        self.timeout: float = timeout
-        self.descriptor_path: Path = DescriptorBundle(descriptor_path).descriptor_path
+        self.host = host
+        self.port = port
+        self.timeout = timeout
+        self.descriptor_path = DescriptorBundle(descriptor_path).descriptor_path
         self.channels = Channels(self.descriptor_path)
         self.services = Services(self.descriptor_path)
         # Create the TCP connection using socket
         self.conn = socket.create_connection((host, port), timeout=timeout)
         self.conn.setblocking(False)
-        self.subscribers: DefaultDict[str, List] = defaultdict(list)
-        self.publishable_channel: Dict[str, Type[Message]] = {}
+        self.subscribers = defaultdict(list)
+        self.publishable_channel = {}
         self._spinning = False
         self._receive_thread = None
         self._closed = False
@@ -119,7 +146,7 @@ class CyberBridge:
     def connected(self) -> bool:
         """
         Whether the connection is open; False after close or disconnect.
-        
+
         :returns: The connected status
         :rtype: bool
         """
@@ -129,7 +156,7 @@ class CyberBridge:
     def spinning(self) -> bool:
         """
         Whether the receive thread is dispatching; ``stop`` keeps the connection.
-        
+
         :returns: The spinning status
         :rtype: bool
         """
@@ -211,7 +238,12 @@ class CyberBridge:
         """
         if not isinstance(channel, Channel):
             raise TypeError("channel must be a Channel instance")
-        def cb_wrapper(data):
+        def cb_wrapper(data: bytes) -> None:
+            """
+            Decode a subscribed channel payload and pass the protobuf message to the user callback.
+
+            :param bytes data: The serialized message as received from the bridge.
+            """
             parsed_msg = channel.msg_cls()
             parsed_msg.ParseFromString(data)
             cb(parsed_msg)
