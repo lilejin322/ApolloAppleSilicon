@@ -12,7 +12,7 @@ from ...map.types import LaneMarking
 from ...utils import ApolloVehicleConfig
 from ..footprint import ego_footprint
 from ..replay import LOCALIZATION, World
-from .base import Episodes, Oracle
+from .base import Episode, Episodes, Oracle
 
 __all__ = ["LaneMarkingOracle"]
 
@@ -133,7 +133,7 @@ class LaneMarkingOracle(Oracle):
             self._lines[marking] = line
         return line
 
-    def _close(self, closed: List[Tuple[LaneMarking, object]]) -> None:
+    def _close(self, closed: List[Tuple[LaneMarking, Episode]]) -> None:
         """
         Report closed marking-crossing episodes meeting the minimum duration.
 

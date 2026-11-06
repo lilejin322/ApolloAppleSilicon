@@ -126,12 +126,28 @@ class JunctionLaneChangeOracle(Oracle):
 
 @dataclass
 class _CommandError:
-    """One command's error, timed on one clock and located at its first reception."""
+    """
+    One command's error, timed on one clock and located at its first reception.
+
+    :param float start: The first ERROR status' stamp on the episode's clock: the status' source time, or record
+        time for statuses without a finite timestamp.
+    :param float end: The latest ERROR status' stamp, on the same clock.
+    :param float received: Seconds since the record began at which the first ERROR status was received.
+    :param Tuple[float | None, float | None] position: The ego's reference point ``(x, y)`` at ``received``, map
+        frame; ``(None, None)`` without an ego state.
+    :param str message: The latest ERROR status' message.
+    """
     start: float
+    """The first ERROR status' stamp on the episode's clock: the status' source time, or record time for statuses
+    without a finite timestamp."""
     end: float
+    """The latest ERROR status' stamp, on the same clock."""
     received: float
+    """Seconds since the record began at which the first ERROR status was received."""
     position: Tuple[float | None, float | None]
+    """The ego's reference point ``(x, y)`` at ``received``, map frame; ``(None, None)`` without an ego state."""
     message: str
+    """The latest ERROR status' message."""
 
 
 class PlanningFailureOracle(Oracle):
@@ -149,20 +165,51 @@ class PlanningFailureOracle(Oracle):
     :param float max_error: Seconds of ERROR status required for a report.
     """
     kind = "planning_error"
+    """The ``Violation.kind`` of a sustained error; silence is reported as ``planning_gap``. The subject of both
+    is ``"planning"``."""
     channels = frozenset({PLANNING, COMMAND_STATUS, PLANNING_COMMAND})
+    """Planning's trajectories (silence), the command statuses (errors) and the commands (which one is current)."""
+    max_gap: float
+    """Seconds of Planning silence still tolerated."""
+    max_error: float
+    """Seconds of ERROR status required for a report."""
+    _last: float | None
+    """Record time silence is counted from: the latest Planning message, or the first command when none came
+    before it; None until either."""
+    _command_id: int | None
+    """The current command's ID; None before the first command."""
+    _last_status: Tuple[bool, float] | None
+    """The latest status accepted for the current command: whether its stamp is source time, and the stamp."""
+    _error: _CommandError | None
+    """The current command's open error episode; None while its latest status is not ERROR."""
 
     def __init__(self, *, max_gap: float = 2.0, max_error: float = 1.0) -> None:
-        """Configure silence and error thresholds in seconds."""
+        """
+        Configure silence and error thresholds in seconds.
+
+        :param float max_gap: Seconds of Planning silence still tolerated.
+        :param float max_error: Seconds of ERROR status required for a report.
+        """
         super().__init__()
         self.max_gap = max_gap
         self.max_error = max_error
-        self._last: float | None = None
-        self._command_id: int | None = None
-        self._last_status: Tuple[bool, float] | None = None
-        self._error: _CommandError | None = None
+        self._last = None
+        self._command_id = None
+        self._last_status = None
+        self._error = None
 
     def on_message(self, world: World, channel: str, message: Message) -> None:
-        """Observe the active command, Planning reception, or its matching status."""
+        """
+        Observe the active command, Planning reception, or its matching status.
+
+        A new command closes the open error and starts the silence clock if nothing has yet. A Planning message
+        checks the silence before it and restarts the clock. A status of the current command opens, extends or
+        closes the error episode; one of another command, or not newer than the last on its clock, is ignored.
+
+        :param World world: The world at the message; ``world.command`` is the current command.
+        :param str channel: ``PLANNING``, ``COMMAND_STATUS`` or ``PLANNING_COMMAND``.
+        :param Message message: The ``ADCTrajectory``, ``CommandStatus`` or ``PlanningCommand``.
+        """
         command_id = None if world.command is None else world.command.command_id
         if command_id != self._command_id:
             self._close_error()
@@ -197,18 +244,28 @@ class PlanningFailureOracle(Oracle):
             self._error.message = message.message
 
     def finish(self, world: World) -> None:
-        """Check final silence and close the current command's error episode."""
+        """
+        Check final silence and close the current command's error episode.
+
+        :param World world: The world at the last message.
+        """
         self._gap(world)
         self._close_error()
 
     def _gap(self, world: World) -> None:
-        """Report silence since the first command or the latest Planning message."""
+        """
+        Report silence since the first command or the latest Planning message, if longer than ``max_gap``.
+
+        :param World world: The world now; the silence runs from ``_last`` to ``world.t``.
+        """
         if self._last is not None and world.t - self._last > self.max_gap:
             self.report(world, "planning", f"no planning message for {world.t - self._last:.1f} s "
                                            f"after t={self._last:.1f} s", kind="planning_gap")
 
     def _close_error(self) -> None:
-        """Report a qualifying error at its first receive time, then clear it."""
+        """
+        Report a qualifying error at its first receive time, then clear it.
+        """
         error, self._error = self._error, None
         if error is None:
             return

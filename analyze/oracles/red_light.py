@@ -2,8 +2,7 @@
 Red light: the ego's front crosses the stop line of a signal that shows red.
 """
 
-from typing import List, Tuple
-
+from typing import List, Set, Tuple
 from google.protobuf.message import Message
 from shapely.geometry import LineString, Point
 
@@ -33,23 +32,46 @@ class RedLightOracle(Oracle):
     :param MapService map_service: The map Apollo drives.
     :param ApolloVehicleConfig vehicle: ``front_edge_to_center`` places the front.
     """
-
     kind = "red_light"
+    """The ``Violation.kind`` it reports; the subject is the red signals of one stop line, joined by ``+``."""
     channels = frozenset({LOCALIZATION, PLANNING_COMMAND})
+    """The localization messages, at which the front is placed, and the commands, which carry the route."""
+    map: MapService
+    """The map Apollo drives."""
+    vehicle: ApolloVehicleConfig
+    """The ego's dimensions; ``front_edge_to_center`` places the front."""
+    _route: Tuple[str, ...]
+    """The lanes of the route the stop lines were collected for."""
+    _stop_lines: List[Tuple[LineString, str, List[str]]]
+    """Each stop line of the route, its lane and the signals it stops for."""
+    _front: Tuple[float, float] | None
+    """The front-edge midpoint at the previous localization message; None before the first."""
+    _run: Set[str]
+    """The signals already reported as run."""
 
     def __init__(self, map_service: MapService, vehicle: ApolloVehicleConfig) -> None:
-        """Initialize map and ego geometry with no cached route or previously crossed signals."""
+        """
+        Initialize map and ego geometry with no cached route or previously crossed signals.
+
+        :param MapService map_service: The map Apollo drives.
+        :param ApolloVehicleConfig vehicle: ``front_edge_to_center`` places the front.
+        """
         super().__init__()
         self.map = map_service
         self.vehicle = vehicle
-        self._route: Tuple[str, ...] = ()
-        self._stop_lines: List[Tuple[LineString, str, List[str]]] = []
-        """Each stop line of the route, its lane and the signals it stops for."""
-        self._front: Tuple[float, float] | None = None
-        self._run: set = set()
+        self._route = ()
+        self._stop_lines = []
+        self._front = None
+        self._run = set()
 
     def on_message(self, world: World, channel: str, message: Message) -> None:
-        """Refresh route stop lines or report the ego front crossing a red signal once per signal."""
+        """
+        Refresh route stop lines or report the ego front crossing a red signal once per signal.
+
+        :param World world: The world at the message; ``world.route`` and ``world.lights`` are read from it.
+        :param str channel: ``PLANNING_COMMAND`` (a new route) or ``LOCALIZATION`` (a new pose).
+        :param Message message: The ``PlanningCommand`` or the localization; both are read through ``world``.
+        """
         if channel == PLANNING_COMMAND:
             if world.route != self._route:
                 self._route = world.route
@@ -88,11 +110,20 @@ class RedLightOracle(Oracle):
 
 def _crosses_forward(line: LineString, lane: LineString, previous: Tuple[float, float],
                      front: Tuple[float, float]) -> bool:
-    """Require a move from the approach side onto the far side in the lane's direction.
+    """
+    Require a move from the approach side onto the far side in the lane's direction.
 
     A sample on the line may start the crossing, but only a later sample beyond
     it completes it. Orient the stop line using the lane tangent, independently
     of the map's ordering of the stop-line vertices.
+
+    :param LineString line: The stop line.
+    :param LineString lane: The centerline of the lane the stop line belongs to, in driving direction.
+    :param Tuple[float, float] previous: The front-edge midpoint at the previous localization message.
+    :param Tuple[float, float] front: The front-edge midpoint now.
+    :returns: ``True`` if ``previous`` lies on or before the line and ``front`` beyond it, in the lane's
+        direction; ``False`` otherwise, also when the lane runs along the stop line.
+    :rtype: bool
     """
     at = line.project(Point(front))
     stop = line.interpolate(at)

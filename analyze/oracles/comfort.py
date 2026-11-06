@@ -2,10 +2,11 @@
 Comfort: the ego accelerates or brakes harder than passengers accept.
 """
 
+from typing import Hashable, List, Tuple
 from google.protobuf.message import Message
 
 from ..replay import LOCALIZATION, World
-from .base import Episodes, Oracle
+from .base import Episode, Episodes, Oracle
 
 __all__ = ["ComfortOracle"]
 
@@ -73,11 +74,12 @@ class ComfortOracle(Oracle):
         """
         self._close(self._episodes.close_all())
 
-    def _close(self, closed) -> None:
+    def _close(self, closed: List[Tuple[Hashable, Episode]]) -> None:
         """
         Report each closed episode with its peak acceleration magnitude and duration.
 
-        :param List[Tuple[str, Episode]] closed: Episodes just closed, keyed ``"acceleration"`` or ``"braking"``.
+        :param List[Tuple[Hashable, Episode]] closed: Episodes just closed (``Episodes.update`` or ``close_all``),
+            keyed ``"acceleration"`` or ``"braking"``.
         """
         for what, episode in closed:
             limit = self.max_acceleration if what == "acceleration" else self.max_deceleration

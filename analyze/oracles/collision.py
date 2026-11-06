@@ -2,6 +2,7 @@
 Collision: the ego's body touches another road user's, and who is to blame,
 by Responsibility-Sensitive Safety (Shalev-Shwartz, Shammah and Shashua,
 2017) as ad-rss-lib implements it (``analyze.rss``).
+See: https://github.com/intel/ad-rss-lib
 
 At every obstacle frame the ego and each road user near it are checked from
 both sides: when their constellation turns dangerous, each owes its proper
@@ -13,13 +14,13 @@ without this every agent running into a braking ego would count against the
 ego, and the ego cutting in just ahead of a fast agent would not.
 """
 
-from typing import FrozenSet
+from typing import FrozenSet, List
 from google.protobuf.message import Message
 
 from ...map import MapService
 from ...utils import ApolloVehicleConfig
 from ..replay import OBSTACLES, World
-from ..rss.judge import MARGIN_CAP, RssJudge
+from ..rss.judge import MARGIN_CAP, Moment, RssJudge, Verdict
 from ..rss.types import CANONICAL, RssParameters
 from .base import Oracle
 
@@ -80,7 +81,7 @@ class RssOracle(Oracle):
         return self.judge.margin
 
     @property
-    def verdicts(self):
+    def verdicts(self) -> List[Verdict]:
         """
         Each touch's ``Verdict``, once the record has ended.
 
@@ -90,7 +91,7 @@ class RssOracle(Oracle):
         return self.judge.verdicts
 
     @property
-    def worst_at(self):
+    def worst_at(self) -> Moment | None:
         """
         The ``Moment`` of the least margin, None while nothing lowered it.
 

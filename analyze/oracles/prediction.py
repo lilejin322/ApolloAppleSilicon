@@ -18,7 +18,6 @@ from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 from math import hypot, isnan
 from typing import Dict, List, Sequence, Set, Tuple
-
 from google.protobuf.message import Message
 from shapely.geometry import LineString, Point, Polygon
 
@@ -277,7 +276,8 @@ class MispredictionOracle(Oracle):
 
     :param ApolloVehicleConfig vehicle: The ego's dimensions.
     :param float horizon: Seconds after a prediction to judge.
-    :param float max_prediction_gap: Maximum gap in source seconds, defaulting to 0.25 for 10 Hz predictions.
+    :param float max_prediction_gap: Largest source-time gap in seconds between consecutive predictions of one
+        run; a longer one interrupts it. Defaults to 0.25, one missing cycle at 10 Hz.
     """
     kind = "misprediction"
     """The ``Violation.kind`` it reports; the subject is the road user, e.g. ``"VEHICLE 1003"``."""
@@ -287,6 +287,11 @@ class MispredictionOracle(Oracle):
     """The ego's dimensions."""
     horizon: float
     """Seconds after a prediction to judge."""
+    max_prediction_gap: float
+    """Largest source-time gap in seconds between consecutive predictions of one run; a longer one interrupts
+    it."""
+    _last_judged: Dict[int, float]
+    """Per road user, the source stamp of its latest prediction judged; repeated and older ones are skipped."""
     _frames: List[_Frame]
     """The obstacle frames still needed, in time order."""
     _pending: List[_Predicted]
@@ -303,7 +308,8 @@ class MispredictionOracle(Oracle):
 
         :param ApolloVehicleConfig vehicle: The ego's dimensions.
         :param float horizon: Seconds after a prediction to judge.
-        :param float max_prediction_gap: Maximum source-time interval between consecutive wrong predictions.
+        :param float max_prediction_gap: Largest source-time gap in seconds between consecutive predictions of
+            one run; a longer one interrupts it.
         """
         super().__init__()
         self.vehicle = vehicle
@@ -313,7 +319,7 @@ class MispredictionOracle(Oracle):
         self._pending = []
         self._candidates = {}
         self._reported = set()
-        self._last_judged: Dict[int, float] = {}
+        self._last_judged = {}
 
     def on_message(self, world: World, channel: str, message: Message) -> None:
         """
@@ -357,7 +363,9 @@ class MispredictionOracle(Oracle):
         self._last_judged = {}
 
     def _judge(self) -> None:
-        """Judge each pending prediction the frames now reach through its horizon, then drop what is done."""
+        """
+        Judge each pending prediction the frames now reach through its horizon, then drop what is done.
+        """
         stamps = [frame.stamp for frame in self._frames]
         now = stamps[-1]
         waiting = []
@@ -421,8 +429,8 @@ class MispredictionOracle(Oracle):
                 self.violations.append(Violation(
                     self.kind, run.t, run.name,
                     f"Prediction at t={run.t:.2f} s was wrong about {run.name}: {run.what} within {self.horizon:g} s, "
-                    f"and for {duration:.1f} s of source time after; it came within {run.gap:.1f} m of the ego or where "
-                    f"it drove next", run.x, run.y))
+                    f"and for {duration:.1f} s of source time after; it came within {run.gap:.1f} m of the ego or "
+                    f"where it drove next", run.x, run.y))
 
 
 class PredictionNaNOracle(Oracle):
@@ -438,17 +446,28 @@ class PredictionNaNOracle(Oracle):
     Apollo (that, and OpenBLAS on Apple Silicon), so the search does not count
     it.
     """
-
     kind = "prediction_nan"
+    """The ``Violation.kind`` it reports; the subject is the road user, e.g. ``"PEDESTRIAN 3001"``."""
     channels = frozenset({PREDICTION})
+    """The predictions, whose trajectory points are checked."""
+    _reported: Set[int]
+    """The obstacle IDs reported."""
 
     def __init__(self) -> None:
-        """Start with no obstacle IDs reported for invalid predictions."""
+        """
+        Start with no obstacle IDs reported for invalid predictions.
+        """
         super().__init__()
-        self._reported: Set[int] = set()
+        self._reported = set()
 
     def on_message(self, world: World, channel: str, message: Message) -> None:
-        """Report each obstacle at most once when a predicted trajectory contains NaN X or Y coordinates."""
+        """
+        Report each obstacle at most once when a predicted trajectory contains NaN X or Y coordinates.
+
+        :param World world: The world at the prediction message.
+        :param str channel: ``PREDICTION``.
+        :param Message message: The ``PredictionObstacles``.
+        """
         for predicted in message.prediction_obstacle:
             obstacle = predicted.perception_obstacle
             if obstacle.id in self._reported or not any(

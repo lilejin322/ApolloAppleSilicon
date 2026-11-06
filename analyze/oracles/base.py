@@ -44,7 +44,8 @@ class Violation:
 
 class Oracle(ABC):
     """
-    Judge one kind of violation while a record is replayed.
+    Judge violations while a record is replayed: of its ``kind``, or of another kind it names when reporting
+    (``RssOracle`` and ``PlanningFailureOracle`` report several).
 
     ``Replay`` calls ``on_message`` for every message of ``channels`` after
     updating the world, then ``finish`` once at the end. An oracle judges one
@@ -54,7 +55,7 @@ class Oracle(ABC):
     ``on_message``; ``finish`` does nothing unless it overrides it.
     """
     kind: ClassVar[str]
-    """The ``Violation.kind`` it reports."""
+    """The ``Violation.kind`` it reports unless ``report`` is given another."""
     channels: ClassVar[FrozenSet[str]]
     """The channels it listens to."""
     violations: List[Violation]
