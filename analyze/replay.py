@@ -3,32 +3,42 @@ Replay a record: its messages in time order, and the world they describe.
 
 The record's receive times are the one clock every channel shares; headers
 are on the wall clock too (our managers stamp the run's start plus scenario
-time), but each sender stamps them its own way. ``Replay`` sorts the messages by receive time and keeps a
-``World``, the latest state of the ego, the obstacles, the lights and
-Planning, which every oracle reads instead of keeping its own copies.
+time), but each sender stamps them its own way. ``Replay`` sorts the messages
+by receive time and keeps a ``World``, the latest state of the ego, the
+obstacles, the lights and Planning, which every oracle reads instead of
+keeping its own copies.
 """
 
 from dataclasses import dataclass, field
 from math import cos, hypot, isfinite, sin
-from typing import Dict, List, Sequence, Tuple
-
+from typing import TYPE_CHECKING, Dict, List, Sequence, Tuple, Self
 from google.protobuf.message import Message
 
 from ..manager.routing import planned_lanes
 from .record import RecordReader
 
-__all__ = ["CHASSIS", "COMMAND_STATUS", "EgoState", "LOCALIZATION", "OBSTACLES", "Obstacle", "PLANNING",
-           "PLANNING_COMMAND", "PREDICTION", "Replay", "TRAFFIC_LIGHT", "World"]
+if TYPE_CHECKING:  # ``oracles.base`` imports ``World`` from here: only the type checker may import it back.
+    from .oracles.base import Oracle, Violation
+
+__all__ = ["COMMAND_STATUS", "EgoState", "LOCALIZATION", "OBSTACLES", "Obstacle", "PLANNING", "PLANNING_COMMAND",
+           "PREDICTION", "Replay", "TRAFFIC_LIGHT", "World"]
 
 LOCALIZATION = "/apollo/localization/pose"
-CHASSIS = "/apollo/canbus/chassis"
+"""The ego's pose, velocity and acceleration (``LocalizationEstimate``)."""
 OBSTACLES = "/apollo/perception/obstacles"
+"""Every road user around the ego (``PerceptionObstacles``); our managers publish it."""
 TRAFFIC_LIGHT = "/apollo/perception/traffic_light"
+"""The colour of each signal (``TrafficLightDetection``); our managers publish it."""
 PLANNING = "/apollo/planning"
+"""Planning's trajectory, decision and scenario (``ADCTrajectory``)."""
 PREDICTION = "/apollo/prediction"
+"""Prediction's trajectories for each obstacle (``PredictionObstacles``)."""
 PLANNING_COMMAND = "/apollo/planning/command"
+"""The route Planning drives (``PlanningCommand``)."""
 COMMAND_STATUS = "/apollo/planning/command_status"
+"""Whether Planning is carrying out its command (``CommandStatus``)."""
 _WORLD_CHANNELS = (LOCALIZATION, OBSTACLES, TRAFFIC_LIGHT, PLANNING, PLANNING_COMMAND, COMMAND_STATUS)
+"""The channels ``World`` keeps the latest message of, whether or not an oracle listens to them."""
 
 
 @dataclass(frozen=True)
@@ -36,29 +46,35 @@ class EgoState:
     """
     The ego at one localization message.
 
+    Apollo's vector fields default to NaN; a velocity or acceleration
+    component a publisher leaves out counts as 0, so a missing acceleration
+    reads as none rather than making every comparison false.
+
     :param float x: Reference point, map frame.
     :param float y: Reference point, map frame.
     :param float heading: Radians.
     :param float speed: Metres per second.
     :param float acceleration: Longitudinal, metres per second squared; negative when braking.
-
-    Apollo's vector fields default to NaN; a velocity or acceleration
-    component a publisher leaves out counts as 0, so a missing acceleration
-    reads as none rather than making every comparison false.
     """
-
     x: float
+    """Reference point, map frame."""
     y: float
+    """Reference point, map frame."""
     heading: float
+    """Radians."""
     speed: float
+    """Metres per second."""
     acceleration: float
+    """Longitudinal, metres per second squared; negative when braking."""
 
     @classmethod
-    def of(cls, localization: Message) -> "EgoState":
+    def of(cls, localization: Message) -> Self:
         """
         Read a ``LocalizationEstimate``.
 
         :param Message localization: The message.
+        :returns: The ego's state, its speed the size of its velocity and its acceleration the part along its
+            heading.
         :rtype: EgoState
         """
         pose = localization.pose
@@ -69,7 +85,13 @@ class EgoState:
 
 
 def _set(value: float) -> float:
-    """Replace a non-finite recorded scalar with zero; preserve finite values."""
+    """
+    Replace a non-finite recorded scalar with zero; preserve finite values.
+
+    :param float value: A recorded component, NaN where the publisher left it out.
+    :returns: ``value``, or 0 when it is NaN or infinite.
+    :rtype: float
+    """
     return value if isfinite(value) else 0.0
 
 
@@ -87,15 +109,22 @@ class Obstacle:
     :param float width: Across it.
     :param float speed: Metres per second.
     """
-
     id: int
+    """Its ID."""
     type: str
+    """``PerceptionObstacle.Type`` name, e.g. ``"VEHICLE"``."""
     x: float
+    """Centre, map frame."""
     y: float
+    """Centre, map frame."""
     heading: float
+    """Radians."""
     length: float
+    """Along the heading."""
     width: float
+    """Across it."""
     speed: float
+    """Metres per second."""
 
     @classmethod
     def all_of(cls, obstacles: Message) -> Tuple["Obstacle", ...]:
@@ -103,6 +132,7 @@ class Obstacle:
         Read every obstacle of a ``PerceptionObstacles``.
 
         :param Message obstacles: The message.
+        :returns: The obstacles, in the message's order.
         :rtype: Tuple[Obstacle, ...]
         """
         result = []
@@ -120,12 +150,22 @@ class World:
 
     :param float t: Seconds since the record began.
     :param float begin: When the record began, in seconds since the epoch; 0 when unknown.
+    :param EgoState | None ego: The ego at the latest localization message; None before the first.
+    :param Tuple[Obstacle, ...] obstacles: The obstacles of the latest frame; none before the first.
+    :param Dict[str, str] lights: Colour name of every reported signal, e.g. ``{"signal_9": "RED"}``.
+    :param Message | None planning: The latest ``ADCTrajectory``.
+    :param Message | None command: The latest ``PlanningCommand`` created since the record began.
+    :param Tuple[str, ...] route: The lanes of ``command`` in driving order.
+    :param Message | None command_status: The latest ``CommandStatus`` Planning published.
     """
-
     t: float = 0.0
+    """Seconds since the record began."""
     begin: float = 0.0
+    """When the record began, in seconds since the epoch; 0 when unknown."""
     ego: EgoState | None = None
+    """The ego at the latest localization message; None before the first."""
     obstacles: Tuple[Obstacle, ...] = ()
+    """The obstacles of the latest frame; none before the first."""
     lights: Dict[str, str] = field(default_factory=dict)
     """Colour name of every reported signal, e.g. ``{"signal_9": "RED"}``."""
     planning: Message | None = None
@@ -177,20 +217,26 @@ class Replay:
 
     :param RecordReader reader: The record.
     """
+    reader: RecordReader
+    """The record."""
 
     def __init__(self, reader: RecordReader) -> None:
-        """Bind the record reader used to reconstruct successive world snapshots."""
+        """
+        Bind the record reader used to reconstruct successive world snapshots.
+
+        :param RecordReader reader: The record.
+        """
         self.reader = reader
 
     def run(self, oracles: Sequence["Oracle"]) -> List["Violation"]:
         """
         Replay the record to ``oracles`` and collect their violations.
 
-        :param oracles: Fresh oracles; each is used for one record only.
+        :param Sequence[Oracle] oracles: Fresh oracles; each is used for one record only.
         :returns: Every violation, in time order.
         :rtype: List[Violation]
         """
-        listeners: Dict[str, List] = {}
+        listeners: Dict[str, List["Oracle"]] = {}
         for oracle in oracles:
             for channel in oracle.channels:
                 listeners.setdefault(channel, []).append(oracle)

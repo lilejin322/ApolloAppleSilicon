@@ -19,11 +19,11 @@ the file.
 """
 
 import struct
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Collection, Dict, Iterator, Tuple
-
-from google.protobuf.message import Message
+from typing import BinaryIO, Collection, Dict, Iterator, Set, Tuple, Type
+from google.protobuf.message import DecodeError, Message
 
 from ..message.descriptor import DescriptorBundle
 
@@ -53,29 +53,46 @@ class RecordMessage:
     :param int time: When the recorder received it, in nanoseconds since the epoch.
     :param Message message: The decoded message.
     """
-
     channel: str
+    """Its channel, e.g. ``/apollo/localization/pose``."""
     time: int
+    """When the recorder received it, in nanoseconds since the epoch."""
     message: Message
+    """The decoded message."""
 
 
 class RecordReader:
     """
     One record file and the channels it holds.
 
-    :param path: The record file, e.g. ``ApolloManager.record_file``.
-    :param descriptor_path: The protobuf descriptor of the Apollo that recorded it.
+    :param str | Path path: The record file, e.g. ``ApolloManager.record_file``.
+    :param str | Path descriptor_path: The protobuf descriptor of the Apollo that recorded it.
     :raises RecordError: The file does not start with a record header, or is compressed.
     """
-
     path: Path
+    """The record file."""
     header: Message
     """The record's ``apollo.cyber.proto.Header``; ``is_complete`` is False when recording did not finish."""
     channels: Dict[str, str]
     """Message type of every channel, by channel name."""
+    _bundle: DescriptorBundle
+    """The descriptor of the Apollo that recorded the file: decodes the messages' contents."""
+    _header_cls: Type[Message]
+    """``apollo.cyber.proto.Header``, from the bundled record descriptor."""
+    _channel_cls: Type[Message]
+    """``apollo.cyber.proto.Channel``, from the bundled record descriptor."""
+    _body_cls: Type[Message]
+    """``apollo.cyber.proto.ChunkBody``, from the bundled record descriptor."""
 
     def __init__(self, path: str | Path, *, descriptor_path: str | Path) -> None:
-        """Read the header and channel table, rejecting unsupported compression or an invalid header."""
+        """
+        Read the header and channel table, rejecting unsupported compression or an invalid header.
+
+        :param str | Path path: The record file, e.g. ``ApolloManager.record_file``.
+        :param str | Path descriptor_path: The protobuf descriptor of the Apollo that recorded it.
+        :raises RecordError: The file does not start with a record header, or is compressed.
+        :raises FileNotFoundError: If the record or the descriptor does not exist.
+        """
         self.path = Path(path)
         self._bundle = DescriptorBundle(descriptor_path)
         record_format = DescriptorBundle(RECORD_DESCRIPTOR)
@@ -95,13 +112,16 @@ class RecordReader:
                 self.channels[channel.name] = channel.message_type
 
     def validate(self, *, required_channels: Collection[str] = ()) -> None:
-        """Require a complete, structurally intact record before formal scoring.
+        """
+        Require a complete, structurally intact record before formal scoring.
 
         Ordinary message iteration remains available for partial-file inspection.
-        """
-        from collections import Counter
-        from google.protobuf.message import DecodeError
 
+        :param Collection[str] required_channels: Channels that must each hold at least one message.
+        :raises RecordError: If recording did not finish, a section is cut off or cannot be decoded, the index is
+            missing, the message or channel count differs from the header's, or the record holds no message at
+            all or none on a required channel.
+        """
         if not self.header.is_complete:
             raise RecordError(f"{self.path}: recording is incomplete")
         counts = Counter()
@@ -136,7 +156,8 @@ class RecordReader:
         """
         Decode the messages of ``channels``, in file order (chunks in recording order).
 
-        :param channels: Channel names; None decodes every channel whose message type the descriptor knows.
+        :param Collection[str] | None channels: Channel names; None decodes every channel whose message type the
+            descriptor knows.
         :returns: The messages; other channels are skipped without decoding.
         :rtype: Iterator[RecordMessage]
         :raises RecordError: A requested channel's message type is not in the descriptor.
@@ -150,27 +171,35 @@ class RecordReader:
                     if cls is not None:
                         yield RecordMessage(single.channel_name, single.time, cls.FromString(single.content))
 
-    def _classes(self, channels: Collection[str] | None) -> Dict[str, type]:
-        """Resolve selected channel types; reject unknown explicit selections and skip unknown implicit ones."""
+    def _classes(self, channels: Collection[str] | None) -> Dict[str, Type[Message]]:
+        """
+        Resolve selected channel types; reject unknown explicit selections and skip unknown implicit ones.
+
+        :param Collection[str] | None channels: Channel names; None selects every channel the descriptor can decode.
+        :returns: The message class of each selected channel the record holds, by channel name.
+        :rtype: Dict[str, Type[Message]]
+        :raises RecordError: A channel named in ``channels`` has a message type the descriptor does not define.
+        """
         if channels is None:
-            names = [name for name, kind in self.channels.items() if self._known(kind)]
+            names = [name for name, kind in self.channels.items() if kind in self._bundle]
         else:
             names = [name for name in channels if name in self.channels]
-            unknown = sorted(f"{name} ({self.channels[name]})" for name in names if not self._known(self.channels[name]))
+            unknown = sorted(f"{name} ({self.channels[name]})" for name in names
+                             if self.channels[name] not in self._bundle)
             if unknown:
                 raise RecordError(f"the descriptor does not define the message types of {', '.join(unknown)}")
         return {name: self._bundle.message(self.channels[name]) for name in names}
 
-    def _known(self, message_type: str) -> bool:
-        """Return whether the descriptor bundle defines the given fully qualified message type."""
-        try:
-            self._bundle.message(message_type)
-        except KeyError:
-            return False
-        return True
+    def _sections(self, stream: BinaryIO, wanted: Set[int]) -> Iterator[Tuple[int, bytes]]:
+        """
+        Payloads of the ``wanted`` section types after the header; other payloads are skipped.
 
-    def _sections(self, stream: BinaryIO, wanted: set) -> Iterator[Tuple[int, bytes]]:
-        """Payloads of the ``wanted`` section types after the header; other payloads are skipped."""
+        :param BinaryIO stream: The open record file; it is moved to just after the header first.
+        :param Set[int] wanted: ``SectionType`` values to yield.
+        :returns: ``(section type, payload)`` in file order; iteration ends at the end of the file, or at a
+            section cut off while the record was written.
+        :rtype: Iterator[Tuple[int, bytes]]
+        """
         stream.seek(_SECTION.size + _HEADER_LENGTH)
         while True:
             try:
@@ -189,6 +218,9 @@ class RecordReader:
         """
         Read one section header and return its type and payload byte count.
 
+        :param BinaryIO stream: The open record file, at the start of a section.
+        :returns: ``(section type, payload size in bytes)``; the stream is left at the payload.
+        :rtype: Tuple[int, int]
         :raises EOFError: If fewer than a complete section header's bytes remain.
         :raises RecordError: If the declared payload size is negative.
         """

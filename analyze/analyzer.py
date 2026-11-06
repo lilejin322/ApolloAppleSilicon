@@ -11,8 +11,9 @@ from typing import List, Tuple
 
 from ..map import MapService
 from ..utils import ApolloVehicleConfig
-from .oracles import (ComfortOracle, EStopOracle, JunctionLaneChangeOracle, LaneMarkingOracle, Oracle,
-                      PlanningFailureOracle, PredictionNaNOracle, RedLightOracle, RssOracle, SpeedingOracle, Violation)
+from .oracles import (ComfortOracle, EStopOracle, JunctionLaneChangeOracle, LaneMarkingOracle, MispredictionOracle,
+                      Oracle, PlanningFailureOracle, PredictionNaNOracle, RedLightOracle, RssOracle, SpeedingOracle,
+                      Violation)
 from .planning_states import planning_transitions
 from .record import RecordReader
 from .replay import LOCALIZATION, OBSTACLES, PLANNING, Replay
@@ -27,11 +28,13 @@ def default_oracles(map_service: MapService, vehicle: ApolloVehicleConfig) -> Li
 
     :param MapService map_service: The map Apollo drove.
     :param ApolloVehicleConfig vehicle: The ego's dimensions.
+    :returns: One oracle of each class, none of which has seen a record yet; ``RssOracle`` is the first.
     :rtype: List[Oracle]
     """
     return [RssOracle(map_service, vehicle), RedLightOracle(map_service, vehicle), SpeedingOracle(map_service),
             LaneMarkingOracle(map_service, vehicle), ComfortOracle(), EStopOracle(),
-            JunctionLaneChangeOracle(map_service), PlanningFailureOracle(), PredictionNaNOracle()]
+            JunctionLaneChangeOracle(map_service), PlanningFailureOracle(), PredictionNaNOracle(),
+            MispredictionOracle(vehicle)]
 
 
 @dataclass(frozen=True)
@@ -39,20 +42,25 @@ class RecordAnalysis:
     """
     What one record shows.
 
-    :param violations: Every violation, in time order.
+    :param Tuple[Violation, ...] violations: Every violation, in time order.
     :param float margin: The ego's RSS margin in metres (``RssOracle.margin``).
     :param str | None worst: What happened at the least margin; None when nothing lowered it.
     :param Moment | None worst_at: Where that was.
-    :param verdicts: The RSS verdict of each collision.
-    :param transitions: Each change of Planning's scenario or stage (``planning_transitions``).
+    :param Tuple[Verdict, ...] verdicts: The RSS verdict of each collision.
+    :param Tuple[str, ...] transitions: Each change of Planning's scenario or stage (``planning_transitions``).
     """
-
     violations: Tuple[Violation, ...]
+    """Every violation, in time order."""
     margin: float
+    """The ego's RSS margin in metres (``RssOracle.margin``)."""
     worst: str | None = None
+    """What happened at the least margin; None when nothing lowered it."""
     worst_at: Moment | None = None
+    """Where that was."""
     verdicts: Tuple[Verdict, ...] = ()
+    """The RSS verdict of each collision."""
     transitions: Tuple[str, ...] = ()
+    """Each change of Planning's scenario or stage (``planning_transitions``)."""
 
 
 class RecordAnalyzer:
@@ -61,11 +69,23 @@ class RecordAnalyzer:
 
     :param MapService map_service: The map Apollo drove.
     :param ApolloVehicleConfig vehicle: The ego's dimensions, e.g. ``utils.get_vehicle_params``.
-    :param descriptor_path: The protobuf descriptor of the Apollo that recorded them.
+    :param str | Path descriptor_path: The protobuf descriptor of the Apollo that recorded them.
     """
+    map_service: MapService
+    """The map Apollo drove."""
+    vehicle: ApolloVehicleConfig
+    """The ego's dimensions."""
+    descriptor_path: str | Path
+    """The protobuf descriptor of the Apollo that recorded the records."""
 
     def __init__(self, map_service: MapService, vehicle: ApolloVehicleConfig, descriptor_path: str | Path) -> None:
-        """Keep the map, vehicle geometry and descriptor bundle path for subsequent record analyses."""
+        """
+        Keep the map, vehicle geometry and descriptor bundle path for subsequent record analyses.
+
+        :param MapService map_service: The map Apollo drove.
+        :param ApolloVehicleConfig vehicle: The ego's dimensions, e.g. ``utils.get_vehicle_params``.
+        :param str | Path descriptor_path: The protobuf descriptor of the Apollo that recorded them.
+        """
         self.map_service = map_service
         self.vehicle = vehicle
         self.descriptor_path = descriptor_path
@@ -74,8 +94,11 @@ class RecordAnalyzer:
         """
         Replay ``record`` to fresh ``default_oracles`` and read Planning's states.
 
-        :param record: The record file, e.g. ``ApolloManager.record_file``.
+        :param str | Path record: The record file, e.g. ``ApolloManager.record_file``.
+        :returns: What the record shows.
         :rtype: RecordAnalysis
+        :raises RecordError: If the record is compressed, incomplete or damaged, or holds no localization or
+            obstacle messages.
         """
         reader = RecordReader(record, descriptor_path=self.descriptor_path)
         reader.validate(required_channels={LOCALIZATION, OBSTACLES})

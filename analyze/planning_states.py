@@ -8,7 +8,6 @@ Each ``ADCTrajectory`` names both in ``debug.planning_data.scenario``.
 """
 
 from typing import Iterable, List, Tuple
-
 from google.protobuf.message import Message
 
 __all__ = ["planning_transitions"]
@@ -21,7 +20,8 @@ def planning_transitions(planning: Iterable[Message]) -> Tuple[str, ...]:
     Messages without a scenario, published while Planning fails, are left
     out, so that a failure is not a change and the recovery from it not another.
 
-    :param planning: The record's ``ADCTrajectory`` messages, in time order.
+    :param Iterable[Message] planning: The record's ``ADCTrajectory`` messages, in time order.
+    :returns: One entry per change, oldest first; empty when Planning stayed in one state.
     :rtype: Tuple[str, ...]
     """
     changes: List[str] = []
