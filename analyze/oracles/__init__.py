@@ -7,10 +7,10 @@ from .collision import RssOracle
 from .comfort import ComfortOracle
 from .lane_marking import LaneMarkingOracle
 from .planning import EStopOracle, JunctionLaneChangeOracle, PlanningFailureOracle
-from .prediction import PredictionNaNOracle
+from .prediction import MispredictionOracle, PredictionNaNOracle
 from .red_light import RedLightOracle
 from .speeding import SpeedingOracle
 
 __all__ = ["ComfortOracle", "EStopOracle", "Episode", "Episodes", "JunctionLaneChangeOracle", "LaneMarkingOracle",
-           "Oracle", "PlanningFailureOracle", "PredictionNaNOracle", "RedLightOracle", "RssOracle", "SpeedingOracle",
-           "Violation"]
+           "MispredictionOracle", "Oracle", "PlanningFailureOracle", "PredictionNaNOracle", "RedLightOracle",
+           "RssOracle", "SpeedingOracle", "Violation"]

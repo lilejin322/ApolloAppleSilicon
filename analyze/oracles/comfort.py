@@ -26,19 +26,37 @@ class ComfortOracle(Oracle):
     :param float max_acceleration: Metres per second squared allowed when speeding up.
     :param float max_deceleration: Metres per second squared allowed when braking, positive.
     """
-
     kind = "comfort"
+    """The ``Violation.kind`` it reports; the subject is ``"acceleration"`` or ``"braking"``."""
     channels = frozenset({LOCALIZATION})
+    """The localization messages, which carry the ego's acceleration."""
+    max_acceleration: float
+    """Metres per second squared allowed when speeding up."""
+    max_deceleration: float
+    """Metres per second squared allowed when braking, positive."""
+    _episodes: Episodes
+    """The open stretches of harsh ``"acceleration"`` or ``"braking"``, each with its peak magnitude."""
 
     def __init__(self, *, max_acceleration: float = 4.0, max_deceleration: float = 4.0) -> None:
-        """Set positive acceleration and braking thresholds in metres per second squared."""
+        """
+        Set positive acceleration and braking thresholds in metres per second squared.
+
+        :param float max_acceleration: Metres per second squared allowed when speeding up.
+        :param float max_deceleration: Metres per second squared allowed when braking, positive.
+        """
         super().__init__()
         self.max_acceleration = max_acceleration
         self.max_deceleration = max_deceleration
         self._episodes = Episodes()
 
     def on_message(self, world: World, channel: str, message: Message) -> None:
-        """Update harsh acceleration or braking episodes from the current ego acceleration."""
+        """
+        Update harsh acceleration or braking episodes from the current ego acceleration.
+
+        :param World world: The world at the localization message.
+        :param str channel: ``LOCALIZATION``.
+        :param Message message: The localization; the acceleration is read from ``world.ego``.
+        """
         a = world.ego.acceleration
         holding = {}
         if a > self.max_acceleration + _TOLERANCE:
@@ -48,11 +66,19 @@ class ComfortOracle(Oracle):
         self._close(self._episodes.update(world, holding))
 
     def finish(self, world: World) -> None:
-        """Report acceleration and braking episodes still open at the end of replay."""
+        """
+        Report acceleration and braking episodes still open at the end of replay.
+
+        :param World world: The world at the last message; unused.
+        """
         self._close(self._episodes.close_all())
 
     def _close(self, closed) -> None:
-        """Report each closed episode with its peak acceleration magnitude and duration."""
+        """
+        Report each closed episode with its peak acceleration magnitude and duration.
+
+        :param List[Tuple[str, Episode]] closed: Episodes just closed, keyed ``"acceleration"`` or ``"braking"``.
+        """
         for what, episode in closed:
             limit = self.max_acceleration if what == "acceleration" else self.max_deceleration
             self.report_episode(episode, what, f"harsh {what} up to {episode.peak:.2f} m/s^2 "

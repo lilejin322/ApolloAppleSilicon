@@ -4,7 +4,6 @@ Lane marking: the ego's body crosses a line it may not cross.
 
 from math import copysign
 from typing import Dict, List, Tuple
-
 from google.protobuf.message import Message
 from shapely.geometry import LineString, Point, Polygon
 
@@ -47,27 +46,55 @@ class LaneMarkingOracle(Oracle):
     :param float min_depth: Metres past the line below which the body is still on its side.
     :param float min_duration: Seconds below which a crossing is not reported.
     """
-
     kind = "lane_marking"
+    """The ``Violation.kind`` it reports; the subject is the line's lane, side and types."""
     channels = frozenset({LOCALIZATION})
+    """The localization messages, at which the ego's body is placed."""
+    map: MapService
+    """The map Apollo drives."""
+    vehicle: ApolloVehicleConfig
+    """The ego's dimensions."""
+    min_depth: float
+    """Metres past the line below which the body is still on its side."""
+    min_duration: float
+    """Seconds below which a crossing is not reported."""
+    _reach: float
+    """Metres a strip beside a line must reach to hold any part of the body."""
+    _lines: Dict[LaneMarking, LaneMarking]
+    """Each marking seen, mapped to the first marking of its painted line."""
+    _known: List[LaneMarking]
+    """The first marking of each painted line seen, in the order seen."""
+    _episodes: Episodes
+    """The open crossings, by painted line, each with its deepest reach in metres."""
 
     def __init__(self, map_service: MapService, vehicle: ApolloVehicleConfig, *, min_depth: float = 0.1,
                  min_duration: float = 0.2) -> None:
-        """Configure body penetration thresholds in metres and seconds and initialize marking caches."""
+        """
+        Configure body penetration thresholds in metres and seconds and initialize marking caches.
+
+        :param MapService map_service: The map Apollo drives.
+        :param ApolloVehicleConfig vehicle: The ego's dimensions.
+        :param float min_depth: Metres past the line below which the body is still on its side.
+        :param float min_duration: Seconds below which a crossing is not reported.
+        """
         super().__init__()
         self.map = map_service
         self.vehicle = vehicle
         self.min_depth = min_depth
         self.min_duration = min_duration
         self._reach = vehicle.length + vehicle.width
-        """Metres a strip beside a line must reach to hold any part of the body."""
-        self._lines: Dict[LaneMarking, LaneMarking] = {}
-        """Each marking seen, mapped to the first marking of its painted line."""
-        self._known: List[LaneMarking] = []
+        self._lines = {}
+        self._known = []
         self._episodes = Episodes()
 
     def on_message(self, world: World, channel: str, message: Message) -> None:
-        """Update episodes where the ego body crosses a prohibiting marking beyond the depth threshold."""
+        """
+        Update episodes where the ego body crosses a prohibiting marking beyond the depth threshold.
+
+        :param World world: The world at the localization message.
+        :param str channel: ``LOCALIZATION``.
+        :param Message message: The localization; the pose is read from ``world.ego``.
+        """
         ego = world.ego
         body = ego_footprint(ego.x, ego.y, ego.heading, self.vehicle)
         reference = Point(ego.x, ego.y)
@@ -82,11 +109,21 @@ class LaneMarkingOracle(Oracle):
         self._close(self._episodes.update(world, holding))
 
     def finish(self, world: World) -> None:
-        """Report qualifying marking-crossing episodes still open at the end of replay."""
+        """
+        Report qualifying marking-crossing episodes still open at the end of replay.
+
+        :param World world: The world at the last message; unused.
+        """
         self._close(self._episodes.close_all())
 
     def _line(self, marking: LaneMarking) -> LaneMarking:
-        """Reuse a canonical marking for geometrically coincident painted lines."""
+        """
+        Reuse a canonical marking for geometrically coincident painted lines.
+
+        :param LaneMarking marking: A lane's marking.
+        :returns: The first marking seen within ``_SAME_LINE`` (Hausdorff) of it; itself if none.
+        :rtype: LaneMarking
+        """
         line = self._lines.get(marking)
         if line is None:
             line = next((known for known in self._known
@@ -97,7 +134,11 @@ class LaneMarkingOracle(Oracle):
         return line
 
     def _close(self, closed: List[Tuple[LaneMarking, object]]) -> None:
-        """Report closed marking-crossing episodes meeting the minimum duration."""
+        """
+        Report closed marking-crossing episodes meeting the minimum duration.
+
+        :param List[Tuple[LaneMarking, Episode]] closed: Episodes just closed, by painted line (``_line``).
+        """
         for line, episode in closed:
             if episode.duration >= self.min_duration:
                 types = "+".join(line.types)
@@ -108,7 +149,14 @@ class LaneMarkingOracle(Oracle):
 
 
 def _side(line: LineString, point: Point) -> float:
-    """Positive left of ``line`` at the point's projection, negative right of it, zero on it."""
+    """
+    Positive left of ``line`` at the point's projection, negative right of it, zero on it.
+
+    :param LineString line: A marking, in its lane's direction.
+    :param Point point: The point.
+    :returns: A cross product, signed by the side; its size is not a distance.
+    :rtype: float
+    """
     s = line.project(point)
     a, b = line.interpolate(max(s - 0.05, 0.0)), line.interpolate(min(s + 0.05, line.length))
     return (b.x - a.x) * (point.y - a.y) - (b.y - a.y) * (point.x - a.x)
@@ -122,6 +170,15 @@ def _depth(line: LineString, reference: Point, body: Polygon, reach: float, outs
     The far side is a strip ``reach`` wide alongside the line, with flat ends,
     so nothing beyond the line's ends counts. A reference point on the line
     has both sides as far sides.
+
+    :param LineString line: The marking, in its lane's direction.
+    :param Point reference: The ego's reference point.
+    :param Polygon body: The ego's footprint.
+    :param float reach: Metres: the strip's width.
+    :param float | None outside: The far side, ``1.0`` left or ``-1.0`` right; None to take the side away from
+        ``reference``.
+    :returns: Metres from the line to the farthest point of the body within the strip; 0 when none is in it.
+    :rtype: float
     """
     here = _side(line, reference)
     if outside is not None:

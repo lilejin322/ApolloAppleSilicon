@@ -5,7 +5,7 @@ Red light: the ego's front crosses the stop line of a signal that shows red.
 from typing import List, Tuple
 
 from google.protobuf.message import Message
-from shapely.geometry import LineString
+from shapely.geometry import LineString, Point
 
 from ...map import MapService
 from ...utils import ApolloVehicleConfig
@@ -77,7 +77,35 @@ class RedLightOracle(Oracle):
                          if signal not in self._run and world.lights.get(signal) == "RED")
             if not red or not step.intersects(line):
                 continue
+            centerline = self.map.get_lane_central_curve_by_id(lane)
+            if not _crosses_forward(line, centerline, previous, front):
+                continue
             self._run.update(red)
             subject = "+".join(red)
             self.report(world, subject, f"front crossed the stop line of {subject} on red, entering past {lane} "
                                         f"at {ego.speed:.2f} m/s")
+
+
+def _crosses_forward(line: LineString, lane: LineString, previous: Tuple[float, float],
+                     front: Tuple[float, float]) -> bool:
+    """Require a move from the approach side onto the far side in the lane's direction.
+
+    A sample on the line may start the crossing, but only a later sample beyond
+    it completes it. Orient the stop line using the lane tangent, independently
+    of the map's ordering of the stop-line vertices.
+    """
+    at = line.project(Point(front))
+    stop = line.interpolate(at)
+    a = line.interpolate(max(0.0, at - 0.05))
+    b = line.interpolate(min(line.length, at + 0.05))
+    dx, dy = b.x - a.x, b.y - a.y
+    along = lane.project(stop)
+    before = lane.interpolate(max(0.0, along - 0.5))
+    after = lane.interpolate(min(lane.length, along + 0.5))
+    direction = dx * (after.y - before.y) - dy * (after.x - before.x)
+    if abs(direction) < 1e-12:
+        return False
+    sign = 1.0 if direction > 0 else -1.0
+    old_side = sign * (dx * (previous[1] - stop.y) - dy * (previous[0] - stop.x))
+    new_side = sign * (dx * (front[1] - stop.y) - dy * (front[0] - stop.x))
+    return old_side <= 1e-9 and new_side > 1e-9
